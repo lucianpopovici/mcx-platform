@@ -9,7 +9,7 @@ profile (PLT-ICD-001 §2.1 ICD-GEN-005), so they are directly property-testable.
 
 from __future__ import annotations
 
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from core import model
 from core.errors import (
@@ -19,6 +19,7 @@ from core.errors import (
     NOT_AUTHORISED,
     NO_BINDING,
     NO_LOCATION_BINDING,
+    RESOLVER_UNAVAILABLE,
     UNKNOWN_TARGET,
     HookContractViolation,
     PlatformError,
@@ -288,6 +289,17 @@ class TableBearerSelector:
 # --------------------------------------------------------------------------
 
 
+class BackingStoreUnavailable(Exception):
+    """A group source could not be read, wholly or in part."""
+
+
+class GroupSource(Protocol):
+    """Where group membership comes from. `members` returns the COMPLETE member
+    list or raises `BackingStoreUnavailable`; it never returns part of one."""
+
+    def members(self, group_id: str) -> Optional[Sequence[MCServiceId]]: ...
+
+
 class DirectoryResolver:
     """Directory-backed resolution. No functional addressing.
 
@@ -299,6 +311,9 @@ class DirectoryResolver:
         self._profile = profile
         self._users: Dict[MCServiceId, None] = {}
         self._groups: Dict[str, Tuple[MCServiceId, ...]] = {}
+        # Optional external source consulted for groups not provisioned
+        # locally. Set by the host; None means only local provisioning.
+        self.group_source: Optional[GroupSource] = None
 
     # -- provisioning (not part of IF-IDR) -------------------------------
 
@@ -361,8 +376,18 @@ class DirectoryResolver:
         if self._is_external(target):
             return Resolution(kind=ResolutionKind.EXTERNAL, members=(),
                               group_id=None, resolved_from=target)
-        if target in self._groups:
-            members = self._groups[target]
+        members = self._groups.get(target)
+        if members is None and self.group_source is not None:
+            # PLT-ICD-001 §3.2 POST-5 / PLT-HOK-015: an unreadable source is a
+            # refusal with its own reason code. Whatever was read before the
+            # failure is discarded with the exception; there is no partial set.
+            try:
+                fetched = self.group_source.members(target)
+            except BackingStoreUnavailable as exc:
+                raise ResolutionFailure(RESOLVER_UNAVAILABLE, str(exc)) from exc
+            if fetched is not None:
+                members = tuple(dict.fromkeys(fetched))
+        if members is not None:
             if not members:
                 raise ResolutionFailure(UNKNOWN_TARGET,
                                         f"group {target!r} has no members")

@@ -120,7 +120,8 @@ class SessionManager:
 
     def __init__(self, loaded: LoadedProfile, auditor: Auditor,
                  platform: Optional[Platform] = None,
-                 clock: Optional[Callable[[], int]] = None) -> None:
+                 clock: Optional[Callable[[], int]] = None,
+                 functions: Optional[Mapping[str, str]] = None) -> None:
         self._loaded = loaded
         self._hooks = loaded.hooks
         self._profile = loaded.profile
@@ -128,6 +129,10 @@ class SessionManager:
         self._platform = platform or Platform()
         self._clock = clock or (lambda: 0)
         self._sessions: Dict[str, Session] = {}
+        # Names of the functions hosting each role for this deployment, merged
+        # into the admission and establishment audit records (PLT-CC-001,
+        # VP1-CC-001). Opaque to the core: e.g. {"controlling_function": ...}.
+        self._functions = dict(functions or {})
 
     # -- observation ----------------------------------------------------
 
@@ -321,11 +326,13 @@ class SessionManager:
                            initiator=request.initiator,
                            priority=priority.label, scope=priority.scope,
                            members=len(resolution.members),
-                           resolved_from=resolution.resolved_from)
+                           resolved_from=resolution.resolved_from,
+                           **self._functions)
         self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
                            members=tuple(resolution.members),
                            qos_identifier=bearer.qos_identifier,
-                           recording=decision.recording_required)
+                           recording=decision.recording_required,
+                           **self._functions)
         return session, tuple(signals), None
 
     # -- inbound from a non-MC system -------------------------------------
@@ -377,6 +384,25 @@ class SessionManager:
         self._auditor.emit(RecordType.SESSION_RELEASED, correlation_id,
                            cause=cause)
         return tuple(signals)
+
+    def abandon(self, correlation_id: str, reason: str) -> Tuple[Signal, ...]:
+        """Forget a session that was established here but never became live,
+        e.g. every invited party refused (PLT-SIG-005). Unlike `release`, the
+        session is REMOVED, not kept in state RELEASED, so nothing about it
+        remains to be found. The audit record is the only trace. Returns
+        the signals to undo what
+        establishment reserved (empty when there was nothing to abandon)."""
+        session = self._sessions.pop(correlation_id, None)
+        if session is None:
+            return ()
+        if session.floor is not None:
+            session.floor.handle(floor_mod.Event(
+                floor_mod.EventType.SESSION_RELEASED))
+        self._auditor.emit(RecordType.SESSION_FAILED, correlation_id,
+                           call_type=session.request.call_type,
+                           initiator=session.request.initiator,
+                           reason_code="", detail=reason, abandoned=True)
+        return (Signal(SignalType.RELEASE_QOS),)
 
     # -- pre-emption -----------------------------------------------------
 

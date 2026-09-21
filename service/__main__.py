@@ -27,6 +27,16 @@ EXIT_REFUSED = 2
 EXIT_FAULT = 1
 
 
+def start_sip(runtime):
+    from .sip_core import SipCore
+    from .sip_tls import TlsListener
+    cfg = runtime.config.sip
+    core = SipCore(runtime, cfg.uri, utc_ms)
+    listener = TlsListener(core, cfg)
+    listener.start()
+    return listener
+
+
 def main(argv: Optional[Sequence[str]] = None,
          env: Optional[Mapping[str, str]] = None) -> int:
     logs.configure()
@@ -52,6 +62,20 @@ def main(argv: Optional[Sequence[str]] = None,
         runtime.close()
         return EXIT_FAULT
 
+    listener = None
+    if runtime.config.sip is not None:
+        try:
+            listener = start_sip(runtime)
+        except Exception as exc:  # noqa: BLE001 - TLS material, bind failure
+            log.error("cannot start SIP listener: %s", exc)
+            server.server_close()
+            runtime.close()
+            return EXIT_FAULT
+        runtime.health.set_extra(lambda: {"sip": dict(listener.counters)})
+        log.info("SIP over TLS listening on %s:%s roles=%s",
+                 runtime.config.sip.host, listener.bound_port,
+                 ",".join(runtime.config.sip.roles))
+
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     runtime.health.set_ready(True)
@@ -62,6 +86,8 @@ def main(argv: Optional[Sequence[str]] = None,
     stop.wait()
     log.info("shutting down")
     runtime.health.set_ready(False)
+    if listener is not None:
+        listener.stop()
     server.shutdown()
     server.server_close()
     runtime.close()

@@ -42,6 +42,8 @@ class SessionStore(Protocol):
     def save_session(self, correlation_id: str, state: str, profile: str,
                      at_ms: int, body: Mapping[str, Any]) -> None: ...
     def mark_released(self, correlation_id: str, at_ms: int) -> None: ...
+    def discard_session(self, correlation_id: str) -> None: ...
+    def has_session(self, correlation_id: str) -> bool: ...
     def sessions(self) -> List[Dict[str, Any]]: ...
     def audit_records(self, correlation_id: Optional[str] = None
                       ) -> List[Dict[str, Any]]: ...
@@ -89,6 +91,18 @@ class SqliteStore:
     def mark_released(self, correlation_id: str, at_ms: int) -> None:
         self._write("UPDATE sessions SET state='released', released_at_ms=? "
                     "WHERE correlation_id=?", (at_ms, correlation_id))
+
+    def discard_session(self, correlation_id: str) -> None:
+        self._write("DELETE FROM sessions WHERE correlation_id=?",
+                    (correlation_id,))
+
+    def has_session(self, correlation_id: str) -> bool:
+        """Direct inspection of the table (VP1-SIG-005): a row, or not."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM sessions WHERE correlation_id=?",
+                (correlation_id,)).fetchone()
+        return row is not None
 
     def sessions(self) -> List[Dict[str, Any]]:
         with self._lock:

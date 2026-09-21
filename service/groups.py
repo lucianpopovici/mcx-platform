@@ -8,6 +8,11 @@ It is read from the file named by MCX_GROUPS_FILE:
       - id: "grp:alpha"
         display_name: "Alpha team"
         members: ["sip:u1@mcptt.example", ...]
+    users: ["sip:u9@mcptt.example"]      # optional: known users in no group
+
+Every group member is also a known user, so a private call to one resolves.
+Registering over SIP does not make a user known: being registered says where a
+user can be reached, the directory says who exists (SIP-OP-05).
 
 OPEN (SVC-OP-01): the TS 24.481 schema is not in this repository and could not
 be obtained here. `render` emits an RFC 4826 resource-lists `list-service`
@@ -39,6 +44,18 @@ class Group:
     members: Tuple[str, ...]
 
 
+def load_users(path: Optional[Path]) -> Tuple[str, ...]:
+    """Explicitly declared users (the optional `users` key)."""
+    if path is None:
+        return ()
+    with path.open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    users = raw.get("users", []) if isinstance(raw, dict) else []
+    if not isinstance(users, list) or not all(isinstance(u, str) and u for u in users):
+        raise StartupRefused(f"groups file {path}: users must be a list of ids")
+    return tuple(users)
+
+
 def load_groups(path: Optional[Path]) -> Tuple[Group, ...]:
     if path is None:
         return ()
@@ -47,10 +64,12 @@ def load_groups(path: Optional[Path]) -> Tuple[Group, ...]:
             raw = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
         raise StartupRefused(f"groups file {path}: {exc}") from exc
-    if not isinstance(raw, dict) or set(raw) != {"groups"} \
+    if not isinstance(raw, dict) or "groups" not in raw \
+            or not set(raw) <= {"groups", "users"} \
             or not isinstance(raw["groups"], list):
         raise StartupRefused(
-            f"groups file {path}: expected a mapping with one key, 'groups'")
+            f"groups file {path}: expected a mapping with 'groups' and "
+            "optionally 'users'")
     groups: List[Group] = []
     seen = set()
     for i, g in enumerate(raw["groups"]):
@@ -95,8 +114,14 @@ def check_rendered(group: Group, document: bytes) -> None:
 
 
 class GroupDirectory:
-    def __init__(self, groups: Tuple[Group, ...]) -> None:
+    def __init__(self, groups: Tuple[Group, ...],
+                 users: Tuple[str, ...] = ()) -> None:
         self._groups: Dict[str, Group] = {g.id: g for g in groups}
+        self._users = tuple(dict.fromkeys(
+            list(users) + [m for g in groups for m in g.members]))
+
+    def users(self) -> Tuple[str, ...]:
+        return self._users
 
     def ids(self) -> Tuple[str, ...]:
         return tuple(self._groups)

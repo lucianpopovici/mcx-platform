@@ -9,13 +9,83 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Mapping, Optional
+from typing import List, Mapping, Optional, Tuple
 
 from core.errors import StartupRefused
 
 DEFAULT_PROFILES_ROOT = Path(__file__).resolve().parents[1] / "profiles"
 IDMS_STUB = "stub"
 KNOWN_IDMS = (IDMS_STUB,)   # R1 has only the stub (PLT-IDM-007); R2 adds OIDC
+
+
+@dataclass(frozen=True)
+class SipConfig:
+    host: str
+    port: int
+    uri: str
+    cert: Path
+    key: Path
+    ca: Optional[Path]
+    client_auth: str            # "required" | "optional"
+    roles: Tuple[str, ...]
+
+    @staticmethod
+    def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
+        """None when SIP is not enabled (MCX_SIP_LISTEN unset). When it IS
+        enabled every security-relevant setting must be stated (PLT-SEC-007):
+        there is no plaintext mode to fall back to and no default for
+        client authentication."""
+        listen = (env.get("MCX_SIP_LISTEN") or "").strip()
+        if not listen:
+            return None
+        host, _, port_s = listen.rpartition(":")
+        try:
+            port = int(port_s)
+        except ValueError:
+            raise StartupRefused(
+                f"MCX_SIP_LISTEN={listen!r} is not host:port") from None
+        if not host or not 0 <= port <= 65535:
+            raise StartupRefused(f"MCX_SIP_LISTEN={listen!r} is not host:port")
+
+        def need(key: str) -> str:
+            v = (env.get(key) or "").strip()
+            if not v:
+                raise StartupRefused(
+                    f"{key} is not set: SIP is enabled and requires it")
+            return v
+
+        uri = need("MCX_SIP_URI")
+        cert, key = Path(need("MCX_SIP_TLS_CERT")), Path(need("MCX_SIP_TLS_KEY"))
+        for p in (cert, key):
+            if not p.is_file():
+                raise StartupRefused(f"TLS file {p} does not exist")
+        ca_s = (env.get("MCX_SIP_TLS_CA") or "").strip()
+        ca = Path(ca_s) if ca_s else None
+        if ca is not None and not ca.is_file():
+            raise StartupRefused(f"TLS CA file {ca} does not exist")
+        auth = need("MCX_SIP_CLIENT_AUTH").lower()
+        if auth not in ("required", "optional"):
+            raise StartupRefused(
+                f"MCX_SIP_CLIENT_AUTH={auth!r}: must be 'required' or 'optional'")
+        if ca is None:
+            raise StartupRefused(
+                "MCX_SIP_TLS_CA is not set: client certificates cannot be "
+                "verified without a CA (PLT-SEC-007)")
+
+        roles = tuple(sorted({r.strip().lower()
+                              for r in need("MCX_SIP_ROLES").split(",")
+                              if r.strip()}))
+        unknown = set(roles) - {"controlling", "participating"}
+        if unknown or not roles:
+            raise StartupRefused(
+                f"MCX_SIP_ROLES has unknown role(s) {sorted(unknown)}")
+        if "controlling" not in roles:
+            # SIP-OP-03: a participating-only instance must relay to a
+            # controlling function elsewhere (MCPTT-4). Not built.
+            raise StartupRefused(
+                "MCX_SIP_ROLES=participating alone is not supported: the "
+                "controlling function is not reachable remotely (SIP-OP-03)")
+        return SipConfig(host, port, uri, cert, key, ca, auth, roles)
 
 
 @dataclass(frozen=True)
@@ -27,6 +97,7 @@ class Config:
     host: str
     port: int
     groups_file: Optional[Path]
+    sip: Optional[SipConfig] = None
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
@@ -66,4 +137,5 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,
+            sip=SipConfig.from_env(env),
         )

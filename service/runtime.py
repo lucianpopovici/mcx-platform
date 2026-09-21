@@ -20,7 +20,7 @@ from core.loader import LoadedProfile
 from core.session import (Platform, Refusal, Session, SessionManager, Signal)
 
 from .config import IDMS_STUB, Config
-from .groups import GroupDirectory, load_groups
+from .groups import GroupDirectory, load_groups, load_users
 from .store import SessionStore, SqliteStore
 
 log = logging.getLogger("mcx.service")
@@ -48,6 +48,10 @@ class Health:
         self._profile: Optional[str] = None
         self._name = self._version = self._hash = None
         self._lock = threading.Lock()
+        self._extra: Callable[[], dict] = lambda: {}
+
+    def set_extra(self, fn: Callable[[], dict]) -> None:
+        self._extra = fn
 
     def set_profile(self, loaded: LoadedProfile) -> None:
         p = loaded.profile
@@ -70,7 +74,8 @@ class Health:
                     "ready": self._ready and self._profile is not None,
                     "profile": {"name": self._name, "version": self._version,
                                 "hash": self._hash,
-                                "identifier": self._profile}}
+                                "identifier": self._profile},
+                    **self._extra()}
 
 
 @dataclass
@@ -105,6 +110,14 @@ class Runtime:
             self.on_signals(session, signals)
         return signals
 
+    def abandon(self, correlation_id: str, reason: str) -> None:
+        """Remove a session that never became live, from memory AND the store
+        (PLT-SIG-005). Only the audit record of what happened remains."""
+        signals = self.manager.abandon(correlation_id, reason)
+        self.store.discard_session(correlation_id)
+        if signals:
+            log.info("abandoned session %s: %s", correlation_id, reason)
+
     def _persist(self, s: Session) -> None:
         self.store.save_session(
             s.correlation_id, s.state.value, self.loaded.profile.identifier(),
@@ -117,6 +130,16 @@ class Runtime:
     def close(self) -> None:
         self.health.set_ready(False)
         self.store.close()
+
+
+def role_functions(config: Config) -> Mapping[str, str]:
+    """Which function hosts which role, for the audit record (VP1-CC-001)."""
+    if config.sip is None:
+        return {}
+    out = {"controlling_function": config.sip.uri}
+    if "participating" in config.sip.roles:
+        out["participating_function"] = config.sip.uri
+    return out
 
 
 def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
@@ -145,14 +168,18 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     auditor = Auditor(store, identifier, clock=clock)
     manager = SessionManager(loaded, auditor,
                              platform=platform or fail_closed_platform(),
-                             clock=clock)
+                             clock=clock, functions=role_functions(config))
 
-    groups = GroupDirectory(load_groups(config.groups_file))
+    groups = GroupDirectory(load_groups(config.groups_file),
+                            load_users(config.groups_file))
     # Provision the resolver from the same source the documents are served
     # from, so the two cannot disagree. register_group is not part of IF-IDR;
     # a resolver without it simply has no provisioning surface.
     register = getattr(loaded.hooks.identity_resolver, "register_group", None)
-    if register is not None:
+    register_user = getattr(loaded.hooks.identity_resolver, "register_user", None)
+    if register is not None and register_user is not None:
+        for u in groups.users():
+            register_user(u)
         for g in groups.all():
             register(g.id, g.members)
     elif groups.all():

@@ -58,14 +58,15 @@ core/session.py     the establishment sequence (PLT-ICD-001 §8.1)
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
+service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only socket)
 profiles/common/    shared table-driven hook implementations
 profiles/{mcx,frmcs,utility}/
 ```
 
 `SessionManager.establish()` returns `(session, signals, refusal)`. `Signal` is
 an abstract instruction — INVITE, BYE, RESERVE_QOS, START_RECORDING,
-ROUTE_EXTERNAL, ROUTE_PARTNER. **Nothing currently consumes them.** That is the
-seam the new work attaches to.
+ROUTE_EXTERNAL, ROUTE_PARTNER. `service/sip_core.py` now consumes them via
+`Runtime.on_signals`; media (task 3) is the remaining consumer.
 
 ## Conventions that are not negotiable
 

@@ -75,12 +75,14 @@ class Status(Enum):
     BAD_REQUEST = (400, "Bad Request")
     FORBIDDEN = (403, "Forbidden")
     NOT_FOUND = (404, "Not Found")
+    REQUEST_TIMEOUT = (408, "Request Timeout")
     TEMPORARILY_UNAVAILABLE = (480, "Temporarily Unavailable")
     CALL_DOES_NOT_EXIST = (481, "Call/Transaction Does Not Exist")
     LOOP_DETECTED = (482, "Loop Detected")
     BUSY_HERE = (486, "Busy Here")
     NOT_ACCEPTABLE_HERE = (488, "Not Acceptable Here")
     SERVER_ERROR = (500, "Server Internal Error")
+    NOT_IMPLEMENTED = (501, "Not Implemented")
     SERVICE_UNAVAILABLE = (503, "Service Unavailable")
 
     @property
@@ -191,7 +193,7 @@ class Request:
     def render(self) -> str:
         lines = [f"{self.method} {self.uri} SIP/2.0"]
         lines += [f"{n}: {v}" for n, v in self.headers.items()]
-        lines.append(f"Content-Length: {len(self.body)}")
+        lines.append(f"Content-Length: {len(self.body.encode('utf-8'))}")
         return "\r\n".join(lines) + "\r\n\r\n" + self.body
 
 
@@ -204,8 +206,88 @@ class Response:
     def render(self) -> str:
         lines = [f"SIP/2.0 {self.status.code} {self.status.phrase}"]
         lines += [f"{n}: {v}" for n, v in self.headers.items()]
-        lines.append(f"Content-Length: {len(self.body)}")
+        lines.append(f"Content-Length: {len(self.body.encode('utf-8'))}")
         return "\r\n".join(lines) + "\r\n\r\n" + self.body
+
+
+@dataclass(frozen=True)
+class ReceivedResponse:
+    """A response as it arrived. Any status code is representable, unlike
+    `Response`, which only carries the codes this platform originates."""
+
+    code: int
+    reason: str
+    headers: Headers = field(default_factory=Headers)
+    body: str = ""
+
+
+_COMPACT = {"v": "Via", "f": "From", "t": "To", "i": "Call-ID", "m": "Contact",
+            "c": "Content-Type", "l": "Content-Length", "k": "Supported"}
+_REQUEST_LINE = re.compile(r"^([A-Za-z]+) (\S+) SIP/2\.0$")
+_STATUS_LINE = re.compile(r"^SIP/2\.0 (\d{3})(?: (.*))?$")
+
+
+def split_frame(data: bytes) -> Optional[Tuple[bytes, int]]:
+    """Return (head, total_length) once `data` holds a complete message, else
+    None. Framing is by Content-Length (RFC 3261 §18.3): required on a stream
+    transport, so an absent one is taken as zero."""
+    end = data.find(b"\r\n\r\n")
+    if end < 0:
+        return None
+    head = data[:end]
+    length = 0
+    for line in head.decode("utf-8", "replace").split("\r\n")[1:]:
+        name, _, value = line.partition(":")
+        if _COMPACT.get(name.strip().lower(), name.strip()).lower() == "content-length":
+            try:
+                length = int(value.strip())
+            except ValueError:
+                raise SipError("malformed Content-Length")
+            if length < 0:
+                raise SipError("negative Content-Length")
+    total = end + 4 + length
+    return (head, total) if len(data) >= total else None
+
+
+def parse_message(data: bytes):
+    """Parse one complete framed message into a Request or ReceivedResponse.
+
+    Compact header forms are expanded. Continuation lines are unfolded. Raises
+    SipError for anything that is not a SIP message; whether a well-formed
+    message is *acceptable* is `InboundGuard`'s question, not this one's.
+    """
+    frame = split_frame(data)
+    if frame is None:
+        raise SipError("incomplete message")
+    head_bytes, total = frame
+    try:
+        head = head_bytes.decode("utf-8")
+        body = data[len(head_bytes) + 4:total].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SipError(f"message is not UTF-8: {exc}") from exc
+    lines: List[str] = []
+    for raw in head.split("\r\n"):
+        if raw[:1] in (" ", "\t") and lines:
+            lines[-1] += " " + raw.strip()
+        else:
+            lines.append(raw)
+    start, header_lines = lines[0], lines[1:]
+    headers = Headers()
+    for line in header_lines:
+        name, sep, value = line.partition(":")
+        if not sep or not name.strip():
+            raise SipError(f"malformed header line {line!r}")
+        name = name.strip()
+        headers.add(_COMPACT.get(name.lower(), name), value.strip())
+    headers = Headers([(n, v) for n, v in headers.items()
+                       if n.lower() != "content-length"])
+    m = _STATUS_LINE.match(start)
+    if m:
+        return ReceivedResponse(int(m.group(1)), m.group(2) or "", headers, body)
+    m = _REQUEST_LINE.match(start)
+    if m:
+        return Request(m.group(1), m.group(2), headers, body)
+    raise SipError(f"malformed start line {start!r}")
 
 
 # --------------------------------------------------------------------------
@@ -479,7 +561,9 @@ class Adapter:
 
     def _media_from_offer(self, message: Request) -> Tuple[MediaKind, ...]:
         content_type = (message.headers.get("Content-Type") or "").lower()
-        if CT_SDP not in content_type:
+        # MC INVITEs carry SDP inside multipart/mixed alongside the MC info
+        # body (TS 24.379), so a top-level application/sdp is not required.
+        if CT_SDP not in content_type and "multipart" not in content_type:
             return ()
         kinds: List[MediaKind] = []
         for line in message.body.splitlines():
