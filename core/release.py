@@ -30,8 +30,12 @@ about what happens when it is.
 
 Scope
 -----
-This governs the TS 24.380 floor control layer. The TS 24.379 SIP layer has
-NOT been examined for release dependence -- see REL-OP-01 in PLT-VP-R1.
+Both layers. TS 24.380 floor control (subtypes, field ids, revoke causes) and
+TS 24.379 signalling (warning codes). The 24.379 sweep is PLT-CONF-AUDIT
+CA-12: every other constant the platform emits on the signalling side --
+`g.3gpp.mcptt`, the ICSI, the MIME types, the Answer-Mode values -- is
+present unchanged in all seven published releases, so only the warning codes
+needed a table.
 """
 
 from __future__ import annotations
@@ -172,3 +176,37 @@ def introduced_in(release: Release) -> Tuple[int, ...]:
     """Subtypes this release adds. Used by the per-release conformance suite
     to prove the gate actually gates something at each step."""
     return tuple(sorted(s for s, r in SUBTYPE_INTRODUCED.items() if r == release))
+
+
+# --------------------------------------------------------------------------
+# TS 24.379 table 4.4.2-2 — Warning texts (PLT-CONF-AUDIT CA-12)
+# --------------------------------------------------------------------------
+
+# Extracted from the seven published versions of TS 24.379 in `docs/3GPP/`
+# (Rel-13 `dj0` through Rel-20 `k00`). Codes are allocated in contiguous
+# blocks per release, which is why this compresses to seven ranges; 129-135
+# are allocated in no release at all.
+#
+# The table grew from 44 codes to 95. The platform emits three of them, and
+# one -- 179, for a refusal by the local system on an interconnection -- does
+# not exist before Rel-17.
+SIP_WARNING_INTRODUCED: Mapping[int, Release] = {
+    **{c: Release.REL_13 for c in (*range(100, 129), *range(136, 151))},
+    **{c: Release.REL_14 for c in range(151, 157)},
+    **{c: Release.REL_15 for c in range(157, 159)},
+    **{c: Release.REL_16 for c in range(159, 166)},
+    **{c: Release.REL_17 for c in range(166, 184)},
+    **{c: Release.REL_18 for c in range(184, 196)},
+    **{c: Release.REL_20 for c in range(196, 202)},
+}
+
+
+def supports_sip_warning(release: Release, code: int) -> bool:
+    """Whether this release's table 4.4.2-2 defines that warning code.
+
+    Codes 301-350 are reserved for interworking and their meaning is deferred
+    to TS 29.379, which is not in this repository, so they are not listed and
+    this returns False for them (PLT-CONF-AUDIT CA-09).
+    """
+    introduced = SIP_WARNING_INTRODUCED.get(code)
+    return introduced is not None and release >= introduced

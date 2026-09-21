@@ -175,13 +175,14 @@ loudly — it decodes the packet and acts on the wrong message.
 | PLT-REL-006 | R1 | A received message that is well formed but uses a construct the configured release does not define shall be reported distinguishably from a malformed message. | T |
 | PLT-REL-007 | R1 | The conformance suite shall run for every supported combination of profile and release on every change, with no combination skippable. | I |
 | PLT-REL-008 | R1 | Release numbers shall appear in exactly one module. No other module shall compare a release to a literal. Enforced as a CI gate. | I |
-| PLT-REL-009 | R2 | The platform shall apply release selection to the TS 24.379 signalling layer as it does to TS 24.380 floor control. | T |
+| PLT-REL-009 | R1 | The platform shall apply release selection to the TS 24.379 signalling layer as it does to TS 24.380 floor control. A warning code the configured release does not define shall be omitted, with its explanatory text retained, and shall not turn a refusal into a failure. | T |
 | PLT-REL-010 | R3 | Each interconnection partner shall carry its own release, independent of the local one. | T |
 
-**PLT-REL-009 and PLT-REL-010 are deliberately not R1.** R1 covers the floor
-control layer only, which is where the release dependence has been established
-from the specifications (PLT-CONF-AUDIT §3A). Claiming the SIP layer before it
-has been examined would be the guess this section exists to prevent.
+**PLT-REL-009 moved to R1** once TS 24.379 was read across all seven published
+releases (PLT-CONF-AUDIT 4.20). It was held at R2 while the signalling layer
+was unexamined, because claiming it earlier would have been the guess this
+section exists to prevent. Only **PLT-REL-010** remains deferred: a partner's
+release is an interconnection concern and arrives with IF-ICX in R3.
 
 ---
 

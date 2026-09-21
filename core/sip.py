@@ -45,6 +45,7 @@ from .errors import (
     UNKNOWN_TARGET,
 )
 from .hooks import MediaKind, SessionRequest
+from .release import Release, supports_sip_warning
 from .session import Signal, SignalType
 
 # --------------------------------------------------------------------------
@@ -553,9 +554,13 @@ class DialogContext:
 class Adapter:
     """Renders abstract signals into TS 24.379 messages and parses inbound ones."""
 
-    def __init__(self, local_uri: str) -> None:
+    def __init__(self, local_uri: str, release: Release) -> None:
         self._local = local_uri
         self._host = _host_of(local_uri)
+        # PLT-REL-009. Table 4.4.2-2 grew from 44 codes in Rel-13 to 95 in
+        # Rel-20, and one of the three this platform emits (179) does not
+        # exist before Rel-17 (PLT-CONF-AUDIT CA-12).
+        self._release = release
 
     # -- rendering -------------------------------------------------------
 
@@ -643,8 +648,17 @@ class Adapter:
         warning = WARNING_TEXTS.get(reason_code)
         if warning is not None:
             code, text = warning
-            headers.add("Warning",
-                        f'{WARNING_CODE_MISC} {self._host} "{code} {text}"')
+            if supports_sip_warning(self._release, code):
+                headers.add("Warning",
+                            f'{WARNING_CODE_MISC} {self._host} "{code} {text}"')
+            else:
+                # The release this deployment speaks has no such code, so the
+                # explanatory phrase goes out without it. Emitting the number
+                # anyway would be meaningless to a conformant peer of that
+                # release; raising would turn a policy refusal into a fault,
+                # which is the one thing the refusal path must never do.
+                headers.add("Warning",
+                            f'{WARNING_CODE_MISC} {self._host} "{text}"')
         else:
             local = LOCAL_WARNING_TEXTS.get(reason_code)
             if local is not None:

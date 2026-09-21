@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.7
+**Version:** 0.8
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -18,7 +18,7 @@ consistency check only".
 That is the circular-validation trap, and it was correct. The first constant set
 ever checked against a real specification was wrong, and so was the second.
 
-**Seven of the eight constant sets checked have contained defects.** The one
+**Eight of the nine constant sets checked have contained defects.** The one
 exception, the floor control timer defaults, is recorded in 4.11 as
 prominently as the failures. That is the prior to carry into the items still
 unverified in §5, and it is strong enough that "probably fine" should not be
@@ -62,8 +62,24 @@ rather than waved at:
    are not here, so those two constants remain unverified.
 
 **Corroboration.** Every finding below was checked against at least two
-releases (Rel-17 and Rel-20 for TS 24.379; Rel-17 and Rel-19 for TS 24.481).
-Where the two disagree it is said so.
+releases, and the release-dependence sweeps against every published one: all
+eight of TS 24.380 (Rel-13 to Rel-20) and all seven of TS 24.379 (Rel-13 to
+Rel-20). Where releases disagree it is said so, and the release at which they
+diverge is given rather than interpolated — interpolating it is what produced
+the one error this document has had to correct in itself (3A).
+
+**Legacy formats.** TS 24.379 Rel-15 and Rel-16 ship as `.doc` rather than
+`.docx` and were converted before extraction. Conversion is a transformation,
+and the finding that matters from those two releases is an **absence** —
+warning code 179 is not there — which a dropped table row would fake
+perfectly.
+
+So the boundary does not rest on them. Code 179 is absent from Rel-13 and
+Rel-14 and present in Rel-17, all three native `.docx`, and the code table
+only ever grows (44, 50, 52, 59, 77, 89, 95 codes across the seven releases,
+each a superset of the last). Rel-15 and Rel-16 are bracketed by the native
+files; the converted ones agree, which is corroboration rather than the
+evidence itself.
 
 ---
 
@@ -687,12 +703,69 @@ specification does not require it, so this is conformant — but a platform
 whose purpose is priority and emergency handling is not signalling any of that
 in the floor layer. Recorded as **FC-OP-06**.
 
+### 4.20 CA-12 — the signalling layer, and the one constant that moves
+
+**Source:** TS 24.379 table 4.4.2-2 and the constant sweep below, extracted
+from all seven published releases in `docs/3GPP/` (Rel-13 `dj0` through
+Rel-20 `k00`). Rel-15 and Rel-16 ship as legacy `.doc` rather than `.docx`
+and were converted before extraction.
+
+The release parameter covered TS 24.380 and left TS 24.379 unexamined, which
+was recorded rather than glossed (REL-OP-01). This closes it.
+
+**The warning code table is the part that moves**, and by a lot: 44 codes in
+Rel-13, 95 in Rel-20, allocated in contiguous per-release blocks.
+
+| First appears in | Codes |
+|---|---|
+| Rel-13 | 100-128, 136-150 |
+| Rel-14 | 151-156 |
+| Rel-15 | 157-158 |
+| Rel-16 | 159-165 |
+| Rel-17 | 166-183 |
+| Rel-18 | 184-195 |
+| Rel-20 | 196-201 |
+
+(129-135 are allocated in no release at all.)
+
+The platform emits three codes. Two — 100 and 145 — are Rel-13 and safe
+everywhere. **The third, 179, arrives in Rel-17**, so a deployment configured
+`MCX_RELEASE=13` through `16` was emitting a code its peers do not define, for
+the interconnection refusal.
+
+**Everything else on the signalling side is release-stable.** Checked across
+all seven releases and present unchanged in every one: the `g.3gpp.mcptt`
+feature tag, the `g.3gpp.icsi-ref` tag, the MCPTT ICSI value, the
+`mcptt-info+xml`, `mcptt-location-info+xml` and `resource-lists+xml` MIME
+types, and the five enumerated detailed reasons for code 100 — including the
+two the platform uses, "local policy" and "user authorisation". So only the
+warning codes needed a table.
+
+**The degradation rule.** When the configured release has no such code, the
+explanatory phrase goes out without the number:
+
+```
+Rel-17:  Warning: 399 ps.mcptt.example "179 service not authorized with ..."
+Rel-16:  Warning: 399 ps.mcptt.example "service not authorized with ..."
+```
+
+Raising was the wrong answer and was tested against: turning a policy refusal
+into a fault is the one thing the refusal path may never do, and it is the
+distinction PLT-ICD-001 is built around. Emitting the number anyway was also
+wrong — it is exactly the "confidently wrong" failure that 4.1 is about, just
+displaced from the wrong table to the wrong release.
+
+**Two codes changed their text without changing meaning** (148 "MCPTT group is
+regrouped" → "group is regrouped" at Rel-16; 149 "SIP-INFO" → "SIP INFO" at
+Rel-17). Neither is emitted here, and both are recorded so that a future
+reader does not mistake an editorial change for a semantic one.
+
 ---
 
 ## 5. NOT verified — the work that remains
 
-CA-01 through CA-06, CA-11 and CA-13 are closed. What is left, ordered
-by consequence:
+CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
+ordered by consequence:
 
 | # | What | Where to look | Status |
 |---|---|---|---|
@@ -700,7 +773,7 @@ by consequence:
 | CA-13 | Message shapes, `tools/trace_compare.py` and the send path | TS 24.380 clauses 8.2.4-8.2.17 | **Closed.** See 4.16-4.19. It was a platform defect, not only a tool defect. |
 | CA-14 | Per-release narrowing of `SHAPE` | TS 24.380, all releases | **Open, low consequence.** The comparator permits the union across releases; a superset can miss a deviation but cannot invent one. |
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
-| CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all releases | **Open.** The floor control layer is release-parameterised; the SIP layer has not been examined at all. REL-OP-01, PLT-REL-009. |
+| CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
 | CA-07 | MCData and MCVideo feature tags | TS 24.282, TS 24.281 | **Open, blocked.** Neither specification is in this repository. Marked `# unverified` in `core/sip.py`. |
 | CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
@@ -714,8 +787,9 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-**Eight constant sets have now been checked against a primary source. Seven
-were wrong; one was right.** That is the prior for everything in the table
+**Nine constant sets have now been checked against a primary source. Eight
+were wrong; one was right.** Every constant the platform puts on the wire has
+now been read from a specification, in every release it supports. That is the prior for everything in the table
 above — not a certainty of defect, but nowhere near a presumption of
 correctness.
 
@@ -747,13 +821,19 @@ correctness.
 ## 7. Recommendation
 
 **Nothing further can be closed from the documents in this repository.**
-CA-14 and FC-OP-05 are open but low-consequence and both are recorded with
-their reasoning. Everything else needs a document this project does not have.
+Every constant the platform puts on the wire has now been read from a
+specification, in every release it supports.
 
-**CA-12 is now the largest open item by consequence**: the TS 24.379
-signalling layer has never been examined for release dependence, while the
-floor control layer now is. The same extraction method applies and the
-document is already here.
+What remains needs four documents this project does not have: OMA XDM Group
+(CA-08, the only one with a verification case behind it), TS 24.282 and
+TS 24.281 (CA-07), TS 29.379 (CA-09, R4 only) and RFC 3840 (CA-10,
+cosmetic). CA-14 and FC-OP-05 are open by choice, both low-consequence and
+both recorded with their reasoning rather than resolved by assumption.
+
+**The remaining R1 work is no longer a conformance question.** `VP1-SIG-001`
+needs a second, independent SIP core (VP-OP-01 is still undecided), and the
+FRMCS profile is still a stub that has never been reconciled with the UIC
+FRS/SRS. Neither is answerable from the 3GPP documents.
 
 CA-07 through CA-10 need four documents this project does not have. CA-08
 (OMA XDM Group) is the only one with a verification case behind it.
@@ -770,6 +850,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 0.8 | 2026-09-21 | CA-12 closed. TS 24.379 read across all seven published releases (Rel-15 and Rel-16 converted from legacy .doc). The warning code table grows from 44 codes to 95 in contiguous per-release blocks, and code 179 — one of the three the platform emits — does not exist before Rel-17; a deployment at Rel-13 to Rel-16 was emitting it. Every other signalling constant is stable from Rel-13. Release selection now covers both layers, so PLT-REL-009 lands in R1 rather than R2. |
 | 0.7 | 2026-09-21 | CA-13 closed, and it was a platform defect rather than only a tool defect: the Message Sequence Number was attached to every outgoing message, where clause 8.2.3.10 defines it for Floor Taken and Floor Idle alone — and the trace comparator REQUIRED it on four messages that do not define it, so the tool agreed with the defect instead of catching it. `SHAPE` rewritten from the message content tables. A Deny cause was being sent in a Floor Revoke. New CA-14, FC-OP-05, FC-OP-06. |
 | 0.6 | 2026-09-21 | CA-03 closed against TS 24.380 clause 8.2.3, read from the prose beneath each field diagram. Eleven of twenty-six field ids had no length rule at all; Source was in the wrong class and SSRC is 6 octets, not the 4 that would have been guessed. Track Info was being UTF-8 validated, so a conformant Floor Request carrying it was rejected as malformed. The field framing was checked and found already correct. New CA-13: the trace comparator's message shapes are incomplete and flag conformant traffic. |
 | 0.5 | 2026-09-21 | CA-11 closed by making the 3GPP release a deployment parameter (`MCX_RELEASE`), on an axis independent of the profile. Per-release tables for subtypes, field IDs and revoke causes extracted mechanically from all eight published versions of TS 24.380. Corrects v0.3: subtype 14 changed meaning at Rel-18, not Rel-19. New CA-12: the TS 24.379 layer is not release-parameterised. |

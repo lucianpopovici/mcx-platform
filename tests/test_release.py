@@ -190,3 +190,63 @@ def test_the_release_is_independent_of_the_profile():
                 {**base, "MCX_PROFILE": profile, "MCX_RELEASE": release})
             seen.add((cfg.profile_names[0], cfg.release))
     assert len(seen) == 6, seen
+
+
+# -- CA-12: the TS 24.379 signalling layer -------------------------------------
+
+
+def test_warning_code_179_does_not_exist_before_rel_17():
+    """PLT-CONF-AUDIT CA-12, the one signalling constant that is release-bound.
+
+    TS 24.379 table 4.4.2-2 grew from 44 codes in Rel-13 to 95 in Rel-20. The
+    platform emits three of them, and 179 ("service not authorized with the
+    interconnected system") arrives in Rel-17. Spelled out rather than derived
+    from the table being checked.
+    """
+    from core.release import supports_sip_warning
+    for release in RELEASES:
+        assert supports_sip_warning(Release(release), 100) is True
+        assert supports_sip_warning(Release(release), 145) is True
+        assert supports_sip_warning(Release(release), 179) is (release >= 17)
+        assert supports_sip_warning(Release(release), 196) is (release >= 20)
+    # 129-135 are allocated in no published release.
+    for code in range(129, 136):
+        assert supports_sip_warning(Release.REL_20, code) is False
+
+
+def test_a_release_without_the_code_still_explains_the_refusal():
+    """The degradation rule. A deployment older than Rel-17 must not emit 179
+    -- but it must still say why it refused, and it must not raise: turning a
+    policy refusal into a fault is the one thing the refusal path may never
+    do (PLT-ICD-001 refusal-vs-failure).
+    """
+    from core.sip import Adapter, DialogContext, Status
+
+    ctx = DialogContext(call_id="c1", local_uri="sip:ps.mcptt.example")
+    phrase = "service not authorized with the interconnected system"
+
+    modern = Adapter("sip:ps.mcptt.example", Release.REL_17)
+    old = Adapter("sip:ps.mcptt.example", Release.REL_16)
+
+    a = modern.reject("partner-not-permitted", ctx)
+    b = old.reject("partner-not-permitted", ctx)
+
+    assert a.headers.get("Warning") == f'399 ps.mcptt.example "179 {phrase}"'
+    assert b.headers.get("Warning") == f'399 ps.mcptt.example "{phrase}"'
+    # the refusal itself is unchanged: same status, still not a fault
+    assert a.status is b.status is Status.FORBIDDEN
+    assert b.status.code < 500
+
+
+def test_a_release_bound_code_is_gated_but_a_rel_13_code_is_not():
+    """Codes 100 and 145 are Rel-13 and must be emitted at every release --
+    a gate that suppressed them would make every deployment less legible."""
+    from core.sip import Adapter, DialogContext
+
+    ctx = DialogContext(call_id="c1", local_uri="sip:ps.mcptt.example")
+    for release in RELEASES:
+        adapter = Adapter("sip:ps.mcptt.example", Release(release))
+        assert '"145 unable to determine called party"' in \
+            adapter.reject("unknown-target", ctx).headers.get("Warning")
+        assert '"100 function not allowed due to user authorisation"' in \
+            adapter.reject("not-authorised", ctx).headers.get("Warning")

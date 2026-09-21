@@ -22,6 +22,7 @@ from core import loader  # noqa: E402
 from core.audit import Auditor, MemorySink, RecordType  # noqa: E402
 from core.hooks import MediaKind, ResolutionKind, SessionRequest  # noqa: E402
 from core.session import SessionManager, SessionState, SignalType  # noqa: E402
+from core.release import Release  # noqa: E402
 from core.sip import Adapter, DialogContext, Status  # noqa: E402
 
 PROFILES = ROOT / "profiles"
@@ -272,7 +273,7 @@ def test_routed_invite_renders_toward_the_gateway(wired):
     manager, _, _ = wired
     request = req("tetra:1234")
     _, signals, _ = manager.establish(request)
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="x1", local_uri="sip:server@mcptt.example")
     invites = [adapter.render(s, ctx, request) for s in signals
                if s.type is SignalType.INVITE]
@@ -281,7 +282,7 @@ def test_routed_invite_renders_toward_the_gateway(wired):
 
 
 def test_gateway_unavailable_renders_as_service_unavailable():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="x", local_uri="sip:server@mcptt.example")
     assert adapter.reject("gateway-unavailable", ctx).status is \
         Status.SERVICE_UNAVAILABLE

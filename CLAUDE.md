@@ -101,8 +101,8 @@ disabled; `tests/test_icx.py` has worked examples.
 
 ## Protocol constants
 
-Seven of the eight constant sets checked against their specification have
-been wrong. The later defects were not wrong values but **absent rules**: eleven
+Eight of the nine constant sets checked against their specification have been
+wrong. The later defects were not wrong values but **absent rules**: eleven
 RTCP field ids had no length constraint at all, so `decode` accepted them at
 any length. A wrong value fails the first time it meets a conformant peer; a
 missing rule never fails, it just accepts what it should not.
@@ -135,10 +135,11 @@ Its tables were extracted mechanically from all eight published versions of
 TS 24.380 in `docs/3GPP/`. If you add a protocol constant, add its release
 alongside it, read from the documents.
 
-**This covers TS 24.380 floor control only.** The TS 24.379 signalling layer
-has not been examined for release dependence (REL-OP-01, CA-12), so
-`MCX_RELEASE=17` means Rel-17 on the media plane and unexamined on the
-signalling plane. Say so to anyone relying on it for interoperability.
+**Both layers are covered.** TS 24.380 floor control and TS 24.379 signalling
+have each been read across every published release. On the signalling side
+only the warning codes move — code 179 arrives in Rel-17 — and a code the
+configured release does not define is emitted without its number rather than
+suppressed or raised.
 
 ## Documents
 

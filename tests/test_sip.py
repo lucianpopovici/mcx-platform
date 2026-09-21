@@ -18,6 +18,7 @@ from core import loader  # noqa: E402
 from core.audit import Auditor, MemorySink  # noqa: E402
 from core.hooks import MediaKind, SessionRequest  # noqa: E402
 from core.session import Platform, SessionManager, Signal, SignalType  # noqa: E402
+from core.release import Release  # noqa: E402
 from core.sip import (  # noqa: E402
     ANSWER_MODE_AUTO,
     ANSWER_MODE_MANUAL,
@@ -148,7 +149,7 @@ def test_deregistration_removes_state():
 
 
 def test_vp1_sig_003_invite_carries_feature_tags():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="grp:alpha", call_type="prearranged-group",
@@ -162,7 +163,7 @@ def test_vp1_sig_003_invite_carries_feature_tags():
 
 
 def test_vp1_sig_003_feature_tag_follows_media():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     for media, expected in ((MediaKind.VOICE, FEATURE_TAG_PTT),
                             (MediaKind.VIDEO, FEATURE_TAG_VIDEO),
@@ -174,7 +175,7 @@ def test_vp1_sig_003_feature_tag_follows_media():
 
 
 def test_auto_answer_renders_answer_mode():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="t", call_type="x", media=(MediaKind.VOICE,))
@@ -195,7 +196,7 @@ def test_auto_answer_renders_answer_mode():
 
 
 def test_invite_asserts_the_initiator_identity():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="t", call_type="x", media=(MediaKind.VOICE,))
@@ -287,7 +288,7 @@ def test_replay_window_is_bounded():
     ("hook-contract-violation", Status.SERVER_ERROR),
 ])
 def test_refusal_maps_to_the_right_status(reason, expected):
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     assert adapter.reject(reason, ctx).status is expected
 
@@ -300,7 +301,7 @@ def test_policy_refusal_is_distinguishable_from_a_fault():
     header — a policy refusal names a specific 3GPP warning code, an internal
     fault carries none.
     """
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
 
     for reason in ("unknown-target", "not-authorised", "capacity-exhausted",
@@ -319,7 +320,7 @@ def test_policy_refusal_is_distinguishable_from_a_fault():
 def test_authorisation_and_capacity_refusals_use_different_statuses():
     """PLT-PRI-008: capacity exhaustion must stay distinguishable from an
     authorisation refusal at the protocol level, not only in the audit trail."""
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     assert adapter.reject("capacity-exhausted", ctx).status is not \
         adapter.reject("not-authorised", ctx).status
@@ -333,14 +334,14 @@ def test_refusal_carries_a_warning_header():
     399 is the RFC 3261 warn-code; the MC code sits inside the quoted text.
     Both were previously in the wrong position (PLT-CONF-AUDIT CA-02).
     """
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     warning = adapter.reject("unknown-target", ctx).headers.get("Warning")
     assert warning == '399 mcptt.example "145 unable to determine called party"'
 
 
 def test_unmapped_reason_defaults_to_server_error():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     assert adapter.reject("something-new", ctx).status is Status.SERVER_ERROR
 
@@ -351,7 +352,7 @@ def test_unmapped_reason_defaults_to_server_error():
 
 
 def test_parse_invite_builds_a_session_request():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     body = build_offer([AMR_WB])
     msg = well_formed(body=body, content_type=CT_SDP)
     msg.headers.add("P-Asserted-Identity", "<sip:u0@mcptt.example>")
@@ -362,7 +363,7 @@ def test_parse_invite_builds_a_session_request():
 
 
 def test_parse_invite_reads_call_type_from_mc_info():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     body = "<mcptt-call_type>prearranged-group</mcptt-call_type>"
     msg = well_formed(body=body, content_type="multipart/mixed")
     parsed = adapter.parse_invite(msg)
@@ -371,13 +372,13 @@ def test_parse_invite_reads_call_type_from_mc_info():
 
 def test_parse_invite_leaves_unknown_call_type_empty_for_policy_to_refuse():
     """The adapter guesses nothing: an absent call type stays absent."""
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     parsed = adapter.parse_invite(well_formed(body="", content_type=None))
     assert parsed.call_type == ""
 
 
 def test_parse_invite_treats_resource_priority_as_advisory():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     msg = well_formed()
     msg.headers.add("Resource-Priority", "mcpttq.0")
     parsed = adapter.parse_invite(msg)
@@ -386,7 +387,7 @@ def test_parse_invite_treats_resource_priority_as_advisory():
 
 
 def test_parse_rejects_a_non_invite():
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     with pytest.raises(SipError):
         adapter.parse_invite(well_formed(method="BYE"))
 
@@ -436,7 +437,7 @@ def wired():
     sink = MemorySink()
     auditor = Auditor(sink, mcx.profile.identifier(), clock=Clock())
     return (SessionManager(mcx, auditor, clock=Clock()),
-            Adapter("sip:server@mcptt.example"), sink)
+            Adapter("sip:server@mcptt.example", Release.REL_19), sink)
 
 
 def test_established_session_renders_invites_with_feature_tags(wired):
@@ -578,7 +579,7 @@ def test_the_icsi_is_in_its_own_accept_contact_header_field():
     One combined header used to be emitted, with no ICSI reference at all
     (PLT-CONF-AUDIT CA-06). The flows in annex F show the pair verbatim.
     """
-    adapter = Adapter("sip:server@mcptt.example")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="t", call_type="x", media=(MediaKind.VOICE,))
@@ -630,7 +631,7 @@ def test_warning_agent_is_a_host_name_for_a_public_service_identity():
         ("sip:server@mcptt.example", "mcptt.example"),
         ("sip:[2001:db8::1]:5060", "[2001:db8::1]"),
     ):
-        warning = Adapter(uri).reject("unknown-target", ctx(uri)) \
+        warning = Adapter(uri, Release.REL_19).reject("unknown-target", ctx(uri)) \
             .headers.get("Warning")
         assert warning == \
             f'399 {host} "145 unable to determine called party"', (uri, warning)

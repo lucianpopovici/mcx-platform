@@ -103,7 +103,7 @@ class SipCore:
                         for c in runtime.loaded.profile.media.codecs}
         self.local_uri = local_uri
         self.clock = clock
-        self.adapter = Adapter(local_uri)
+        self.adapter = Adapter(local_uri, runtime.config.release)
         self.guard = InboundGuard()
         self.registrations = RegistrationStore(clock)
         self.server = ServerTransactions(clock, t1=t1)
