@@ -33,12 +33,15 @@ BINDINGS = ("static", "dynamic")
 MULTIPLICITIES = ("single", "multi")
 RESOLVES_TO = ("user", "group")
 
-# TS 24.380 floor control timers. A profile may override only these.
-# OPEN: confirm this set against the current release of TS 24.380 (VP-OP-04).
-FLOOR_TIMERS = (
-    "T201", "T203", "T204", "T205", "T206",
-    "T207", "T208", "T209", "T230", "T233",
-)
+# On-network floor control SERVER timers, TS 24.380 clause 6.3. A profile may
+# override only these.
+#
+# The off-network PARTICIPANT timers (T201, T203..T207, T230, T233, clause
+# 7.2.3) are deliberately NOT accepted: this platform is an on-network server,
+# and a profile declaring one of them is making a category error that should
+# fail validation rather than be silently honoured. They are added when
+# off-network operation arrives (R4).
+FLOOR_TIMERS = ("T1", "T2", "T3", "T4", "T7", "T8", "T20")
 
 HOOK_FIELDS = (
     "identity_resolver",

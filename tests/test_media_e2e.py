@@ -289,4 +289,4 @@ def test_floor_does_not_start_while_callees_are_still_ringing(call):
         (req,) = flows[U[1]].requests("INVITE")
         core.on_bytes(answer(req, 200, ues[U[1]].sdp()), flows[U[1]])
         assert floor.state.value == "floor-taken" and floor.holder == U[0]
-        assert set(floor.running_timers()) == {"T203", "T205"}
+        assert set(floor.running_timers()) == {"T2", "T20"}

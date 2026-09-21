@@ -15,10 +15,11 @@ Invariants the machine enforces rather than assumes:
               are fixed here (PLT-PRF-031)
   PLT-FC-011  every transition is recorded with trigger, timestamp and result
 
-OPEN: the timer-to-behaviour mapping below (notably T203 as the holder's
-stop-talking timer and T205 as grant retransmission) needs confirming against
-the current release of TS 24.380. The machine's structure does not depend on
-that mapping; only the constants and which transition each name drives do.
+Timer names were checked against TS 24.380 (V15.4.0 and V18.6.0 agree): this
+module is the on-network floor control SERVER, so it uses the clause 6.3 server
+timers T1/T2/T3/T4/T7/T8/T20. It previously used T203/T205/T206, which are
+off-network PARTICIPANT timers from clause 7.2.3 — the wrong family. The
+machine's structure never depended on the mapping; only the names did.
 """
 
 from __future__ import annotations
@@ -75,9 +76,20 @@ class DenyReason(Enum):
 
 
 # Timer names are TS 24.380 names; values come from the profile.
-T_STOP_TALKING = "T203"       # holder has held the floor for its maximum
-T_GRANTED_RETRY = "T205"      # retransmit a grant not yet acknowledged
-T_REVOKE = "T206"             # holder must release after a revoke
+# On-network floor control SERVER timers, TS 24.380 clause 6.3. This module is
+# the controlling side, so these are the right family.
+#
+# The T2xx names used here previously (T203, T205, T206) are OFF-NETWORK
+# PARTICIPANT timers, clause 7.2.3 — the wrong family entirely for a server
+# implementing on-network floor control. Corrected against TS 24.380.
+T_STOP_TALKING = "T2"         # stop talking
+T_STOP_TALKING_GRACE = "T3"   # stop talking grace (declared, not yet driven)
+T_GRANTED_RETRY = "T20"       # floor granted
+T_REVOKE = "T8"               # media revoke
+T_END_OF_MEDIA = "T1"         # end of RTP media (declared, not yet driven)
+T_INACTIVITY = "T4"           # inactivity (declared, not yet driven)
+T_FLOOR_IDLE = "T7"           # floor idle (declared, not yet driven)
+
 DEFAULT_TIMERS_MS: Mapping[str, int] = {
     T_STOP_TALKING: 30000,
     T_GRANTED_RETRY: 100,

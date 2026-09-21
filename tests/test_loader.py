@@ -516,7 +516,7 @@ def test_vp1_hook_034_floor_policy_matches_profile(mcx):
     fp = mcx.hooks.session_policy.floor_policy(
         request_for("emergency-group"), res)
     assert fp.queueing_enabled is False and fp.max_queue_depth == 0
-    assert fp.timers_ms["T203"] == 2000
+    assert fp.timers_ms["T2"] == 2000
 
 
 def test_vp1_hook_040_bearer_decision_well_formed(mcx, frmcs):

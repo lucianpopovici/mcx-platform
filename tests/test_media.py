@@ -219,7 +219,7 @@ def remote(uri):
 def policy(**kw):
     base = dict(initial_grant_to_initiator=True, queueing_enabled=True,
                 override_allowed=False, max_queue_depth=8,
-                timers_ms={"T203": 4000, "T205": 100, "T206": 100})
+                timers_ms={"T2": 4000, "T20": 100, "T8": 100})
     base.update(kw)
     return fl.Policy(**base)
 
@@ -497,7 +497,7 @@ def test_an_ack_from_a_non_holder_does_not_stop_retransmission():
     assert ios[A].types() == [MsgType.GRANTED]
 
 
-def test_t203_expiry_revokes_and_t206_recovers_the_floor():
+def test_stop_talking_expiry_revokes_and_revoke_timer_recovers_the_floor():
     ms, ios, clock, floor = make()
     to_floor(ms, A, MsgType.ACK)
     clear(ios)
@@ -512,8 +512,8 @@ def test_t203_expiry_revokes_and_t206_recovers_the_floor():
 
 
 def test_timer_durations_are_the_profiles_not_hardcoded():
-    ms, ios, clock, floor = make(pol=policy(timers_ms={"T203": 9000, "T205": 100,
-                                                       "T206": 100}))
+    ms, ios, clock, floor = make(pol=policy(timers_ms={"T2": 9000, "T20": 100,
+                                                       "T8": 100}))
     to_floor(ms, A, MsgType.ACK)
     clear(ios)
     clock.now += 8999
