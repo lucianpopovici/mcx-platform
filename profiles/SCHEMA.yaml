@@ -154,3 +154,10 @@ admission:
   reserved_for_urgency:           # urgency id -> reserved session count
     <urgency_id>: int
   reject_reason_codes: [string]   # closed set; audit records reference these
+
+# Voice codecs the deployment may carry. Payload types are unique, 0..127.
+# The media plane forwards nothing else (PLT-MED-001, VP1-MED-001).
+media:
+  codecs:
+    - payload_type: int
+      name: string          # SDP rtpmap value, e.g. AMR-WB/16000

@@ -150,7 +150,8 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_TLS_KEY": str(pki / "server.key"),
            "MCX_SIP_TLS_CA": str(pki / "ca.crt"),
            "MCX_SIP_CLIENT_AUTH": "required",
-           "MCX_SIP_ROLES": "controlling,participating"}
+           "MCX_SIP_ROLES": "controlling,participating",
+           "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
     env.update(over)
     return env
 
@@ -174,7 +175,9 @@ def rt(env, clock):
 
 @pytest.fixture
 def core(rt, clock):
-    return SipCore(rt, LOCAL, clock)
+    c = SipCore(rt, LOCAL, clock)
+    yield c
+    c.close()
 
 
 def msg(method, uri, call_id, cseq, frm, to, *, branch=None, body="",

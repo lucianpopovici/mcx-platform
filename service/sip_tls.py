@@ -73,7 +73,7 @@ class TlsListener:
                  lock: Optional[threading.RLock] = None) -> None:
         self.core = core
         self.cfg = cfg
-        self.lock = lock or threading.RLock()
+        self.lock = lock or core.lock
         self._ctx = make_context(cfg)
         self._stop = threading.Event()
         self._srv: Optional[socket.socket] = None
@@ -108,6 +108,8 @@ class TlsListener:
             self._srv.close()
         for t in self._threads:
             t.join(timeout=2)
+        with self.lock:
+            self.core.close()
 
     # -- loops -----------------------------------------------------------
 

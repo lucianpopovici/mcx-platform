@@ -89,6 +89,38 @@ class SipConfig:
 
 
 @dataclass(frozen=True)
+class MediaConfig:
+    address: str
+    ports: Optional[Tuple[int, int]]     # None: OS-assigned (tests only)
+
+    @staticmethod
+    def from_env(env: Mapping[str, str]) -> "MediaConfig":
+        """Required whenever SIP is enabled: without a media plane in the path
+        nothing enforces the floor, and silently forwarding SDP verbatim would
+        be exactly that degraded start."""
+        addr = (env.get("MCX_MEDIA_ADDRESS") or "").strip()
+        if not addr:
+            raise StartupRefused(
+                "MCX_MEDIA_ADDRESS is not set: SIP is enabled and needs the "
+                "address the media relay advertises")
+        raw = (env.get("MCX_MEDIA_PORTS") or "").strip()
+        if not raw:
+            raise StartupRefused(
+                "MCX_MEDIA_PORTS is not set: give 'lo-hi', or '0' for "
+                "OS-assigned ports")
+        if raw == "0":
+            return MediaConfig(addr, None)
+        lo_s, _, hi_s = raw.partition("-")
+        try:
+            lo, hi = int(lo_s), int(hi_s)
+        except ValueError:
+            raise StartupRefused(f"MCX_MEDIA_PORTS={raw!r} is not 'lo-hi'") from None
+        if not 1 <= lo <= hi <= 65535:
+            raise StartupRefused(f"MCX_MEDIA_PORTS={raw!r} is not a valid range")
+        return MediaConfig(addr, (lo, hi))
+
+
+@dataclass(frozen=True)
 class Config:
     profile_names: List[str]
     profiles_root: Path
@@ -98,6 +130,7 @@ class Config:
     port: int
     groups_file: Optional[Path]
     sip: Optional[SipConfig] = None
+    media: Optional[MediaConfig] = None
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
@@ -128,6 +161,7 @@ class Config:
             raise StartupRefused(f"MCX_HTTP_PORT {port} is out of range")
 
         groups = (env.get("MCX_GROUPS_FILE") or "").strip()
+        sip = SipConfig.from_env(env)
         return Config(
             profile_names=names,
             profiles_root=Path(env.get("MCX_PROFILES_ROOT")
@@ -137,5 +171,6 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,
-            sip=SipConfig.from_env(env),
+            sip=sip,
+            media=MediaConfig.from_env(env) if sip is not None else None,
         )

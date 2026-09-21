@@ -621,6 +621,75 @@ def negotiate(offer_sdp: str, supported: Sequence[int]) -> Optional[int]:
 
 
 # --------------------------------------------------------------------------
+# SDP endpoint description (for media anchoring)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SdpInfo:
+    """Where a party wants media sent, and what it offers."""
+
+    address: str
+    audio_port: int
+    payload_types: Tuple[int, ...]
+    floor_port: Optional[int] = None     # m=application ... MCPTT, if present
+
+
+def parse_sdp(body: str) -> SdpInfo:
+    """Extract the audio and floor-control endpoints from an SDP body.
+
+    The body may be a multipart part or carry trailing non-SDP text, so only
+    lines that are recognisably SDP are read. Raises SipError when there is no
+    usable audio media line or no connection address.
+    """
+    session_addr: Optional[str] = None
+    audio: Optional[Tuple[int, Tuple[int, ...]]] = None
+    audio_addr: Optional[str] = None
+    floor_port: Optional[int] = None
+    current: Optional[str] = None
+    for raw in body.splitlines():
+        line = raw.strip()
+        if line.startswith("m="):
+            parts = line[2:].split()
+            current = parts[0] if parts else None
+            if current == "audio" and audio is None and len(parts) >= 4 \
+                    and parts[1].isdigit():
+                audio = (int(parts[1]),
+                         tuple(int(p) for p in parts[3:] if p.isdigit()))
+            elif current == "application" and "MCPTT" in line.upper() \
+                    and len(parts) >= 2 and parts[1].isdigit():
+                floor_port = int(parts[1])
+        elif line.startswith("c="):
+            fields = line[2:].split()
+            addr = fields[2] if len(fields) >= 3 else None
+            if current is None:
+                session_addr = addr
+            elif current == "audio" and audio_addr is None:
+                audio_addr = addr
+    if audio is None:
+        raise SipError("SDP has no audio media line")
+    address = audio_addr or session_addr
+    if not address:
+        raise SipError("SDP has no connection address")
+    return SdpInfo(address, audio[0], audio[1], floor_port)
+
+
+def build_sdp(address: str, audio_port: int, floor_port: Optional[int],
+              codecs: Sequence[Tuple[int, str]]) -> str:
+    """An SDP body advertising exactly `codecs` at `address`."""
+    if not codecs:
+        raise SipError("an SDP body must advertise at least one codec")
+    lines = ["v=0", f"o=- 0 0 IN IP4 {address}", "s=-",
+             f"c=IN IP4 {address}", "t=0 0",
+             f"m=audio {audio_port} RTP/AVP "
+             + " ".join(str(pt) for pt, _ in codecs)]
+    lines += [f"a=rtpmap:{pt} {name}" for pt, name in codecs]
+    if floor_port is not None:
+        lines.append(f"m=application {floor_port} udp MCPTT")
+    return "\r\n".join(lines) + "\r\n"
+
+
+# --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 

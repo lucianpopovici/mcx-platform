@@ -197,6 +197,20 @@ class Admission:
 
 
 @dataclass(frozen=True)
+class Codec:
+    """A voice codec the deployment may carry. Opaque to the core: it is a
+    payload type and an rtpmap string, never a name the core recognises."""
+
+    payload_type: int
+    name: str            # SDP rtpmap value, e.g. "AMR-WB/16000"
+
+
+@dataclass(frozen=True)
+class Media:
+    codecs: Tuple[Codec, ...]
+
+
+@dataclass(frozen=True)
 class HookPaths:
     identity_resolver: str
     priority_policy: str
@@ -229,6 +243,7 @@ class Profile:
     interworking: Optional[Interworking]
     interconnection: Optional[Interconnection]
     admission: Admission
+    media: Media
     content_hash: str
 
     # -- lookups ---------------------------------------------------------

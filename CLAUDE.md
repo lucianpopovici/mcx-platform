@@ -36,7 +36,7 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green: 280 tests
+python3 -m pytest tests/ -q                   # must stay green (430+ tests)
 python3 tools/check_boundary.py --root .      # must stay 18/18
 MCX_PROFILE=mcx MCX_IDMS=stub MCX_DATA_DIR=/tmp/mcx python3 -m service   # run it
 MCX_PROFILE=mcx     python3 -m pytest tests/test_conformance.py -q
@@ -58,15 +58,18 @@ core/session.py     the establishment sequence (PLT-ICD-001 §8.1)
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
-service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only socket)
+service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only SIP socket)
+service/media.py    RTP relay gated by the floor + floor control over UDP; MediaSession is pure, UdpMediaPlane owns the sockets
+core/rtcp.py        TS 24.380 floor messages as RTCP APP packets (encoding UNVERIFIED, see FC-OP-03)
+tools/trace_compare.py  floor trace comparator, independent of the encoder
 profiles/common/    shared table-driven hook implementations
 profiles/{mcx,frmcs,utility}/
 ```
 
 `SessionManager.establish()` returns `(session, signals, refusal)`. `Signal` is
 an abstract instruction — INVITE, BYE, RESERVE_QOS, START_RECORDING,
-ROUTE_EXTERNAL, ROUTE_PARTNER. `service/sip_core.py` now consumes them via
-`Runtime.on_signals`; media (task 3) is the remaining consumer.
+ROUTE_EXTERNAL, ROUTE_PARTNER. `service/sip_core.py` consumes them via
+`Runtime.on_signals`, and `service/media.py` carries the media they set up.
 
 ## Conventions that are not negotiable
 
@@ -106,11 +109,24 @@ disabled; `tests/test_icx.py` has worked examples.
 
 ## Status and honesty
 
-R1 is not complete: 83 of 99 cases pass. The FRMCS profile is a **stub** with
-placeholder values, not reconciled with the UIC FRS/SRS, and must not be used as
-safety-case input. 25 open points are recorded across the documents.
+All three task briefs have been worked. R1 is still **not** complete, and the
+reasons are specific, not general:
+
+- **VP1-SIG-001** needs two independent SIP cores; none was available, and
+  which two is VP-OP-01. Nothing has run against a third-party core.
+- **VP1-FC-002** cannot close: the TS 24.380 text was not available, so the RTCP
+  encoding and the comparator are both from memory (FC-OP-03).
+- **VP1-DOC-001**'s "schema-valid" clause: TS 24.481 schema unavailable (SVC-OP-01).
+- **VP1-MED-001**: enforcement exists, but the codec set is a placeholder (MED-OP-01).
+- **VP1-CC-001**: roles are named in the audit record but not independently
+  deployable (SIP-OP-03).
+
+The FRMCS profile is a **stub** with placeholder values, not reconciled with the
+UIC FRS/SRS, and must not be used as safety-case input. Open points are
+recorded across the documents; VP-R1 §11 holds the ones raised while building.
 
 When you hit something the specification does not answer, **record it as an open
 point rather than guessing quietly.** Several existing open points are
 interface defects found exactly that way, and they are more valuable written down
-than resolved by assumption.
+than resolved by assumption. The same goes for specifications you cannot read:
+say so in the code, as `core/rtcp.py` does, rather than asserting conformance.

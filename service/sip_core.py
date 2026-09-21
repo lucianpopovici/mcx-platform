@@ -22,13 +22,20 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+import dataclasses
+import threading
+
 from core.errors import NOT_AUTHORISED
+from core.hooks import MediaKind
+from core.invoke import Invoker
 from core.session import Session, Signal, SignalType
 from core.sip import (
     Adapter, DialogContext, Headers, InboundGuard, ReceivedResponse, Request,
-    RegistrationStore, Response, SipError, Status, parse_message,
+    RegistrationStore, Response, SipError, Status, build_sdp, negotiate,
+    parse_message, parse_sdp,
 )
 
+from .media import MediaSession, UdpMediaPlane
 from .runtime import Runtime
 from .sip_txn import (ClientTransactions, ClientTxn, ServerTransactions,
                       ServerTxn, cseq_of, top_branch)
@@ -67,6 +74,9 @@ class Call:
     skip_bye_to: Optional[str] = None
     bye_sent_to_initiator: bool = False
     cseq_out: int = 0
+    media: Optional[MediaSession] = None
+    payload_type: Optional[int] = None
+    media_error: Optional[str] = None
 
 
 def _tag(seed: str) -> str:
@@ -75,8 +85,22 @@ def _tag(seed: str) -> str:
 
 class SipCore:
     def __init__(self, runtime: Runtime, local_uri: str, clock,
-                 t1: int = 500) -> None:
+                 t1: int = 500, media: Optional[UdpMediaPlane] = None) -> None:
         self.rt = runtime
+        # One lock for everything that touches core state: SIP, media and
+        # timers all run under it.
+        self.lock = threading.RLock()
+        media_cfg = runtime.config.media
+        if media is None:
+            if media_cfg is None:
+                raise ValueError("SIP requires a media plane (MCX_MEDIA_*)")
+            media = UdpMediaPlane(media_cfg.address, media_cfg.ports, clock,
+                                  self.lock)
+        else:
+            media.lock = self.lock
+        self.media = media
+        self._codecs = {c.payload_type: c.name
+                        for c in runtime.loaded.profile.media.codecs}
         self.local_uri = local_uri
         self.clock = clock
         self.adapter = Adapter(local_uri)
@@ -227,6 +251,9 @@ class SipCore:
             # Nothing was established: no session, no persisted record, no legs.
             return self._reject(txn, refusal.reason_code)
         # `_consume` (called from establish) has created the legs.
+        if call.media_error:
+            return self._fail_call(call, Status.NOT_ACCEPTABLE_HERE,
+                                   call.media_error)
         if all(l.state == "failed" for l in call.legs.values()):
             self._fail_call(call, Status.TEMPORARILY_UNAVAILABLE,
                             "no invitation could be delivered")
@@ -237,6 +264,9 @@ class SipCore:
             or self.calls.get(session.correlation_id)
         if call is None:
             return
+        if call.cid in self._pending and call.media is None \
+                and call.media_error is None:
+            self._media_open(call, session)
         for sig in signals:
             if sig.type is SignalType.INVITE and call.cid in self._pending:
                 self._invite_leg(call, sig)
@@ -246,7 +276,57 @@ class SipCore:
             self.calls[call.cid] = call
             self._dialogs[call.cid] = call
 
+    def _media_open(self, call: Call, session: Session) -> None:
+        """Anchor media at the platform (VP1-MED-001/003/004).
+
+        The initiator's offer is checked against the PROFILE's codecs, and one
+        payload type is chosen for the whole session: with no transcoding, a
+        group only works if every party uses the same one.
+        """
+        if MediaKind.VOICE not in call.sr.media or session.floor is None:
+            return
+        try:
+            info = parse_sdp(call.invite.body)
+        except SipError as exc:
+            call.media_error = f"unusable SDP offer: {exc}"
+            return
+        pt = negotiate(call.invite.body, tuple(self._codecs))
+        if pt is None:
+            call.media_error = "no codec in the offer is declared by the profile"
+            return
+        ms = self.media.open(call.cid, session.floor, pt,
+                             self._priority_of(session))
+        ms.add(call.initiator)
+        ms.set_remote(call.initiator, (info.address, info.audio_port),
+                      (info.address, info.floor_port) if info.floor_port else None)
+        call.media, call.payload_type = ms, pt
+
+    def _priority_of(self, session: Session):
+        """A participant's floor priority, from IF-PRI (PLT-FC-005)."""
+        cache: Dict[str, int] = {}
+
+        def priority(uri: str) -> int:
+            if uri not in cache:
+                if uri == session.request.initiator:
+                    cache[uri] = session.priority.floor_priority
+                else:
+                    request = dataclasses.replace(session.request, initiator=uri)
+                    decision = Invoker(self.rt.auditor, session.correlation_id).call(
+                        "IF-PRI", "evaluate",
+                        self.rt.loaded.hooks.priority_policy.evaluate,
+                        request, session.resolution)
+                    cache[uri] = decision.floor_priority
+            return cache[uri]
+        return priority
+
+    def _relay_sdp(self, call: Call, uri: str) -> str:
+        ep = call.media.endpoints[uri]                       # type: ignore[union-attr]
+        return build_sdp(self.media.address, ep.rtp_port, ep.floor_port,
+                         [(call.payload_type, self._codecs[call.payload_type])])
+
     def _invite_leg(self, call: Call, sig: Signal) -> None:
+        if call.media_error:
+            return
         target = sig.target or ""
         flow = self.flows_by_user.get(target)
         leg = Leg(uri=target, call_id=f"{call.cid}.leg{len(call.legs) + 1}",
@@ -256,8 +336,12 @@ class SipCore:
             leg.state = "failed"
             call.legs[leg.call_id] = leg
             return
+        sdp = call.invite.body
+        if call.media is not None:
+            call.media.add(target)
+            sdp = self._relay_sdp(call, target)
         ctx = DialogContext(call_id=leg.call_id, local_uri=self.local_uri,
-                            sdp=call.invite.body)
+                            sdp=sdp)
         req = self.adapter.render(sig, ctx, call.sr)
         req = self._with_branch(req)
         leg.txn = self.client.start(req, flow, user=leg)
@@ -306,14 +390,35 @@ class SipCore:
         leg.to_tag = m.group(1) if m else ""
         leg.state = "confirmed"
         self._send_ack(call, leg)
+        body = resp.body
+        if call.media is not None:
+            try:
+                info = parse_sdp(resp.body)
+                usable = call.payload_type in info.payload_types
+            except SipError:
+                usable = False
+            if not usable:
+                # The callee answered with a codec we did not offer (or no
+                # media at all). Hang it up rather than relay what we cannot
+                # constrain.
+                self._bye_leg(call, Signal(SignalType.BYE, target=leg.uri))
+                leg.state = "failed"
+                self._maybe_fail(call, 488)
+                return
+            call.media.set_remote(leg.uri, (info.address, info.audio_port),
+                                  (info.address, info.floor_port)
+                                  if info.floor_port else None)
+            body = self._relay_sdp(call, call.initiator)
         if not call.answered:
             call.answered = True
             headers = Headers([("Contact", f"<{self.local_uri}>")])
-            body = resp.body
             if body:
-                headers.add("Content-Type",
-                            resp.headers.get("Content-Type") or "application/sdp")
+                headers.add("Content-Type", "application/sdp")
             self._final(call.txn, Response(Status.OK, headers, body))
+            if call.media is not None:
+                # The floor starts now, when the call is answered, not when it
+                # was admitted: its timers must not run while callees ring.
+                call.media.apply(self.rt.manager.start_floor(call.cid))
 
     def _send_ack(self, call: Call, leg: Leg) -> None:
         h = Headers([
@@ -347,6 +452,7 @@ class SipCore:
     def _undo(self, cid: str, reason: str) -> None:
         self.rt.abandon(cid, reason)
         call = self.calls.pop(cid, None)
+        self.media.close(cid)
         for cid_key in [k for k, c in self._dialogs.items()
                         if c is call or k == cid]:
             del self._dialogs[cid_key]
@@ -380,6 +486,7 @@ class SipCore:
             if skip != call.initiator and not call.bye_sent_to_initiator:
                 self._bye_leg(call, Signal(SignalType.BYE, target=call.initiator))
         finally:
+            self.media.close(call.cid)
             self.calls.pop(call.cid, None)
             for k in [k for k, c in self._dialogs.items() if c is call]:
                 del self._dialogs[k]
@@ -416,7 +523,11 @@ class SipCore:
 
     # -- timers ---------------------------------------------------------------------
 
+    def close(self) -> None:
+        self.media.close_all()
+
     def tick(self) -> None:
+        self.media.tick()
         events = self.server.tick()
         for txn, text in events.retransmit:
             txn.flow.send(text)

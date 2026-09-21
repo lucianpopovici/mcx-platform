@@ -159,3 +159,11 @@ admission:
     - not-authorised
     - unknown-target
     - call-type-not-permitted
+
+# Voice codecs the deployment may carry (PLT-MED-001). PROVISIONAL: the codec
+# set per profile is an open point (PLT-SRS OP-06, VP-OP-03) and these values
+# are placeholders, not a confirmed selection.
+media:
+  codecs:
+    - {payload_type: 97, name: "AMR-WB/16000"}
+    - {payload_type: 0, name: "PCMU/8000"}

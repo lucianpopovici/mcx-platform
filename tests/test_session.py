@@ -545,3 +545,32 @@ def test_invoker_does_not_distinguish_exception_types(sink):
         with pytest.raises(HookFailure) as caught:
             inv.call("IF-SES", "admit", raiser)
         assert caught.value.reason_code == "hook-error"
+
+
+# --------------------------------------------------------------------------
+# Deferred floor start (a host that must invite the other parties first)
+# --------------------------------------------------------------------------
+
+
+def test_deferred_floor_is_built_but_not_started(mcx, sink):
+    resolver = mcx.hooks.identity_resolver
+    for i in range(3):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    resolver.register_group("grp:x", [f"sip:u{i}@mcptt.example" for i in range(3)])
+    m = SessionManager(mcx, Auditor(sink, mcx.profile.identifier(), clock=Clock()),
+                       clock=Clock(), defer_floor_start=True)
+    session, _, _ = m.establish(req(target="grp:x"))
+    assert session.floor is not None
+    assert session.floor.state.value == "start-stop"
+    assert session.floor.running_timers() == {}
+    actions = m.start_floor("s1")
+    assert session.floor.holder == "sip:u0@mcptt.example" and actions
+    assert m.start_floor("s1") == ()          # idempotent
+    assert m.start_floor("nope") == ()
+
+
+def test_start_floor_is_a_no_op_for_a_session_without_a_floor(manager):
+    session, _, _ = manager.establish(req(call_type="sds", target="grp:alpha",
+                                          media=(MediaKind.DATA,)))
+    assert session.floor is None
+    assert manager.start_floor("s1") == ()

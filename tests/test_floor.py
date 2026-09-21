@@ -519,3 +519,40 @@ def test_policy_built_from_hook_floor_policy():
     p = Policy.from_hook(FakeFloorPolicy())
     assert p.max_queue_depth == 5
     assert p.timer(T_STOP_TALKING) == 1234
+
+
+# --------------------------------------------------------------------------
+# FLOOR_ACK — stops grant retransmission (FC-OP-01)
+# --------------------------------------------------------------------------
+
+
+def _ack(fc, participant):
+    return fc.handle(Event(EventType.FLOOR_ACK, participant=participant))
+
+
+def test_ack_from_the_holder_stops_t205_only():
+    fc = machine()
+    establish(fc, "a")
+    assert T_GRANTED_RETRY in fc.running_timers()
+    actions = _ack(fc, "a")
+    assert [(a.type, a.timer) for a in actions] == [
+        (ActionType.STOP_TIMER, T_GRANTED_RETRY)]
+    assert T_GRANTED_RETRY not in fc.running_timers()
+    assert T_STOP_TALKING in fc.running_timers()      # the talk limit still runs
+    assert fc.holder == "a"
+
+
+def test_ack_from_a_non_holder_or_a_repeat_changes_nothing():
+    fc = machine()
+    establish(fc, "a")
+    assert _ack(fc, "b") == ()
+    assert T_GRANTED_RETRY in fc.running_timers()
+    _ack(fc, "a")
+    assert _ack(fc, "a") == ()
+
+
+def test_ack_when_idle_is_ignored():
+    fc = machine()
+    establish(fc, "a")
+    release(fc, "a")
+    assert _ack(fc, "a") == ()

@@ -46,6 +46,7 @@ class EventType(Enum):
     FLOOR_REQUEST = "floor-request"
     FLOOR_RELEASE = "floor-release"
     FLOOR_REVOKE = "floor-revoke"
+    FLOOR_ACK = "floor-ack"
     PARTICIPANT_LEFT = "participant-left"
     TIMER_EXPIRY = "timer-expiry"
 
@@ -182,6 +183,10 @@ class FloorControl:
         self._arrivals = 0
 
     # -- observation ----------------------------------------------------
+
+    @property
+    def policy(self) -> Policy:
+        return self._policy
 
     @property
     def state(self) -> FloorState:
@@ -431,6 +436,17 @@ class FloorControl:
             ]
         return []
 
+    def _on_ack(self, event: Event) -> List[Action]:
+        """The holder acknowledged its grant: stop retransmitting it.
+
+        Without this the grant timer re-arms for as long as the holder keeps
+        the floor (FC-OP-01). An ack from anyone else changes nothing.
+        """
+        if event.participant != self._holder or \
+                T_GRANTED_RETRY not in self._running_timers:
+            return []
+        return [Action(ActionType.STOP_TIMER, timer=T_GRANTED_RETRY)]
+
     def _on_session_released(self, event: Event) -> List[Action]:
         actions = [
             Action(ActionType.STOP_TIMER, timer=t)
@@ -469,6 +485,7 @@ FloorControl._DISPATCH = {
     (FloorState.TAKEN, EventType.FLOOR_REQUEST): FloorControl._on_request_taken,
     (FloorState.TAKEN, EventType.FLOOR_RELEASE): FloorControl._on_release,
     (FloorState.TAKEN, EventType.FLOOR_REVOKE): FloorControl._on_revoke,
+    (FloorState.TAKEN, EventType.FLOOR_ACK): FloorControl._on_ack,
     (FloorState.TAKEN, EventType.PARTICIPANT_LEFT):
         FloorControl._on_participant_left,
     (FloorState.TAKEN, EventType.TIMER_EXPIRY): FloorControl._on_timer,

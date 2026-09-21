@@ -168,7 +168,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     auditor = Auditor(store, identifier, clock=clock)
     manager = SessionManager(loaded, auditor,
                              platform=platform or fail_closed_platform(),
-                             clock=clock, functions=role_functions(config))
+                             clock=clock, functions=role_functions(config),
+                             defer_floor_start=config.sip is not None)
 
     groups = GroupDirectory(load_groups(config.groups_file),
                             load_users(config.groups_file))

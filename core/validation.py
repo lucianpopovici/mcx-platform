@@ -158,10 +158,10 @@ def build(raw: Mapping[str, Any], content_hash: str) -> model.Profile:
     c.keys("<root>", raw, allowed=(
         "$schema", "profile", "urgencies", "preemption_scopes", "applications",
         "call_types", "identity", "priority", "bearer", "interworking",
-        "interconnection", "admission",
+        "interconnection", "admission", "media",
     ), required=(
         "profile", "urgencies", "preemption_scopes", "call_types", "identity",
-        "priority", "bearer", "admission",
+        "priority", "bearer", "admission", "media",
     ))
     if not isinstance(raw, dict):
         raise ProfileValidationError(c.defects)
@@ -188,6 +188,7 @@ def build(raw: Mapping[str, Any], content_hash: str) -> model.Profile:
     interconnection = _interconnection(c, raw.get("interconnection"), scope_ids,
                                        call_type_ids)
     admission = _admission(c, raw.get("admission"), urgency_ids)
+    media = _media(c, raw.get("media"))
 
     # -- cross-cutting checks -------------------------------------------
     _priority_totality(c, call_types, priority)
@@ -212,6 +213,7 @@ def build(raw: Mapping[str, Any], content_hash: str) -> model.Profile:
         interworking=interworking,
         interconnection=interconnection,
         admission=admission,
+        media=media,
         content_hash=content_hash,
     )
 
@@ -973,3 +975,40 @@ def _admission(c: _Checker, node: Any, urgencies: Set[str]) -> model.Admission:
         reserved_for_urgency=model.freeze_map(reserved),
         reject_reason_codes=tuple(codes),
     )
+
+
+def _media(c: _Checker, node: Any) -> model.Media:
+    """PLT-MED-001: the codecs the deployment may carry. Static payload types
+    (0-95) and dynamic ones (96-127) are both valid; the pair must be unique."""
+    p = "media"
+    if not c.keys(p, node, allowed=("codecs",), required=("codecs",)):
+        return model.Media(())
+    raw = node.get("codecs")
+    cp = f"{p}.codecs"
+    if not isinstance(raw, list) or not raw:
+        c.add(cp, "bad-value", "expected a non-empty list of codecs")
+        return model.Media(())
+    out: List[model.Codec] = []
+    seen: Set[int] = set()
+    for i, item in enumerate(raw):
+        ip = f"{cp}[{i}]"
+        if not c.keys(ip, item, allowed=("payload_type", "name"),
+                      required=("payload_type", "name")):
+            continue
+        pt = c.typed(ip, item, "payload_type", int)
+        name = c.typed(ip, item, "name", str)
+        if pt is None or name is None:
+            continue
+        if not 0 <= pt <= 127:
+            c.add(f"{ip}.payload_type", "bad-value", "must be in 0..127")
+            continue
+        if not name.strip() or any(ch in name for ch in " \r\n"):
+            c.add(f"{ip}.name", "bad-value",
+                  "must be a non-empty rtpmap value with no whitespace")
+            continue
+        if pt in seen:
+            c.add(f"{ip}.payload_type", "duplicate", f"payload type {pt} repeated")
+            continue
+        seen.add(pt)
+        out.append(model.Codec(pt, name))
+    return model.Media(tuple(out))

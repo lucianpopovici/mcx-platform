@@ -121,7 +121,8 @@ class SessionManager:
     def __init__(self, loaded: LoadedProfile, auditor: Auditor,
                  platform: Optional[Platform] = None,
                  clock: Optional[Callable[[], int]] = None,
-                 functions: Optional[Mapping[str, str]] = None) -> None:
+                 functions: Optional[Mapping[str, str]] = None,
+                 defer_floor_start: bool = False) -> None:
         self._loaded = loaded
         self._hooks = loaded.hooks
         self._profile = loaded.profile
@@ -133,6 +134,11 @@ class SessionManager:
         # into the admission and establishment audit records (PLT-CC-001,
         # VP1-CC-001). Opaque to the core: e.g. {"controlling_function": ...}.
         self._functions = dict(functions or {})
+        # When True the floor machine is built at establishment but started
+        # by `start_floor`. A host that must first invite the other parties
+        # sets this so the initiator's grant timers do not run while callees
+        # are still ringing.
+        self._defer_floor = defer_floor_start
 
     # -- observation ----------------------------------------------------
 
@@ -274,10 +280,11 @@ class SessionManager:
         if floor_policy is not None:
             session.floor = floor_mod.FloorControl(
                 floor_mod.Policy.from_hook(floor_policy), clock=self._clock)
-            session.floor.handle(floor_mod.Event(
-                floor_mod.EventType.SESSION_ESTABLISHED,
-                participant=request.initiator,
-                floor_priority=priority.floor_priority))
+            if not self._defer_floor:
+                session.floor.handle(floor_mod.Event(
+                    floor_mod.EventType.SESSION_ESTABLISHED,
+                    participant=request.initiator,
+                    floor_priority=priority.floor_priority))
 
         if decision.recording_required:
             signals.append(Signal(SignalType.START_RECORDING))
@@ -384,6 +391,18 @@ class SessionManager:
         self._auditor.emit(RecordType.SESSION_RELEASED, correlation_id,
                            cause=cause)
         return tuple(signals)
+
+    def start_floor(self, correlation_id: str) -> Tuple[floor_mod.Action, ...]:
+        """Start a deferred floor machine; returns its opening actions.
+        Idempotent: a machine already started returns nothing."""
+        session = self._sessions.get(correlation_id)
+        if session is None or session.floor is None or \
+                session.floor.state is not floor_mod.FloorState.START_STOP:
+            return ()
+        return session.floor.handle(floor_mod.Event(
+            floor_mod.EventType.SESSION_ESTABLISHED,
+            participant=session.request.initiator,
+            floor_priority=session.priority.floor_priority))
 
     def abandon(self, correlation_id: str, reason: str) -> Tuple[Signal, ...]:
         """Forget a session that was established here but never became live,
