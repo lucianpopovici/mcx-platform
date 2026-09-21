@@ -1,0 +1,49 @@
+name: ci
+
+# PLT-VER-002: both profile suites run on every change, against the same
+# built artefact. Nothing here is conditional, allowed to fail, or skippable
+# by branch or label — a suite that can be skipped is not evidence.
+
+on: [push, pull_request]
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml pytest
+      - name: Boundary gate (TS-BND)
+        run: python3 tools/check_boundary.py --root .
+
+  unit:
+    runs-on: ubuntu-latest
+    needs: boundary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml pytest
+      - name: Unit and integration suites
+        run: python3 -m pytest tests/ -q
+
+  conformance:
+    runs-on: ubuntu-latest
+    needs: boundary
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [mcx, frmcs]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml pytest
+      - name: Conformance suite for profile ${{ matrix.profile }}
+        env:
+          MCX_PROFILE: ${{ matrix.profile }}
+        run: python3 -m pytest tests/test_conformance.py -q
