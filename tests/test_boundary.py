@@ -122,3 +122,24 @@ def _stage(root: Path, core_extra: str = "") -> None:
     for name in ("mcx", "frmcs"):
         (root / "profiles" / name / "profile.yaml").write_text(
             "profile:\n  name: %s\n" % name, encoding="utf-8")
+
+
+def test_priority_table_check_still_detects_a_real_table(tmp_path):
+    """The BND-013 discriminator was sharpened after a false positive on a
+    mixed-type defaults dict. Prove it still catches what it is for."""
+    _stage(tmp_path, core_extra=(
+        "PRIORITY_LEVELS = {\n"
+        '    "emergency": 90,\n'
+        '    "normal": 20,\n'
+        "}\n"))
+    violations = gate.check_no_priority_table_in_core(tmp_path)
+    assert violations and "priority table" in violations[0]
+
+
+def test_priority_table_check_ignores_a_mixed_type_defaults_dict(tmp_path):
+    """The false positive that prompted the sharpening must stay fixed."""
+    _stage(tmp_path, core_extra=(
+        "def defaults():\n"
+        '    return {"scope": "", "max_level": 0, "may_preempt": False,\n'
+        '            "priority_map": ()}\n'))
+    assert gate.check_no_priority_table_in_core(tmp_path) == []

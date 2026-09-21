@@ -12,6 +12,7 @@ data, not in its code. If that stops being true, the seam is wrong.
 from __future__ import annotations
 
 from profiles.common.tables import (
+    TableInterconnectionGateway,
     FunctionalResolver,
     PrefixInterworkingGateway,
     TableBearerSelector,
@@ -20,6 +21,7 @@ from profiles.common.tables import (
 )
 
 __all__ = [
+    "PartnerGateway",
     "FunctionalResolver",
     "TablePriorityPolicy",
     "FRMCSSessionPolicy",
@@ -44,3 +46,7 @@ class MultiBearerSelector(TableBearerSelector):
 
 class GSMRGateway(PrefixInterworkingGateway):
     """Interworking to GSM-R by target prefix (R4)."""
+
+
+class PartnerGateway(TableInterconnectionGateway):
+    """Partner reconciliation from the profile's interconnection table."""

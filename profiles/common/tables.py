@@ -14,6 +14,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from core import model
 from core.errors import (
     CALL_TYPE_NOT_PERMITTED,
+    PARTNER_NOT_PERMITTED,
     CAPACITY_EXHAUSTED,
     NOT_AUTHORISED,
     NO_BINDING,
@@ -30,6 +31,8 @@ from core.hooks import (
     LocationContext,
     MCServiceId,
     MediaKind,
+    PartnerRights,
+    PartnerRoute,
     PathSpec,
     PriorityDecision,
     Resolution,
@@ -327,6 +330,13 @@ class DirectoryResolver:
         return any(r.target_prefix and target.startswith(r.target_prefix)
                    for r in interworking.routes)
 
+    def _is_partner(self, target: TargetRef) -> bool:
+        interconnection = self._profile.interconnection
+        if interconnection is None:
+            return False
+        return any(p.target_prefix and target.startswith(p.target_prefix)
+                   for p in interconnection.partners)
+
     def _require_declared_domain(self, service_id: MCServiceId) -> None:
         # PLT-IDM-008: never resolve outside the profile's declared domains.
         domain = service_id.rpartition("@")[2]
@@ -343,6 +353,11 @@ class DirectoryResolver:
         # A target matching a declared interworking prefix belongs to a non-MC
         # system. Saying so explicitly is what lets the core route it instead
         # of failing it as unknown.
+        # Partner is checked before external: a partner MC system speaks MC
+        # protocols natively and must not be mistaken for a legacy system.
+        if self._is_partner(target):
+            return Resolution(kind=ResolutionKind.PARTNER, members=(),
+                              group_id=None, resolved_from=target)
         if self._is_external(target):
             return Resolution(kind=ResolutionKind.EXTERNAL, members=(),
                               group_id=None, resolved_from=target)
@@ -506,3 +521,128 @@ class PrefixInterworkingGateway:
             # decides from the mapped request (PLT-ICD-001 §7.2 INV-2).
             attributes={"interworking.source": foreign.get("system", "")},
         )
+
+
+# --------------------------------------------------------------------------
+# IF-ICX — interconnection with a partner MC system
+# --------------------------------------------------------------------------
+
+
+class TableInterconnectionGateway:
+    """Partner reconciliation driven by the profile's interconnection table.
+
+    The design rule this implements: a partner's priority LEVEL is never read.
+    Mapping is keyed on the partner's label and produces a local decision in a
+    local scope, capped by a declared ceiling. Two systems' levels are numbers
+    in unrelated scales, so any arithmetic across them is meaningless — and
+    would silently hand a partner whatever authority its own numbering implies.
+    """
+
+    def __init__(self, profile: model.Profile) -> None:
+        self._profile = profile
+
+    # -- routing ---------------------------------------------------------
+
+    def route(self, request: SessionRequest,
+              resolution: Resolution) -> Optional[PartnerRoute]:
+        interconnection = self._profile.interconnection
+        if interconnection is None:
+            return None
+        for partner in interconnection.partners:
+            if partner.target_prefix and \
+                    request.target.startswith(partner.target_prefix):
+                return PartnerRoute(partner_id=partner.id,
+                                    gateway=partner.gateway,
+                                    trust=partner.trust,
+                                    attributes={})
+        return None
+
+    # -- rights ----------------------------------------------------------
+
+    def rights(self, partner_id: str) -> PartnerRights:
+        partner = self._profile.partner(partner_id)
+        if partner is None:
+            # An undeclared partner gets nothing. Returning a permissive
+            # default here would make an unknown partner more powerful than a
+            # declared one.
+            raise HookContractViolation(
+                f"partner {partner_id!r} is not declared in this profile")
+        return PartnerRights(
+            scope=partner.inbound_scope,
+            max_level=partner.inbound_max_level,
+            may_preempt=partner.inbound_may_preempt,
+            allowed_call_types=partner.inbound_allowed_call_types,
+        )
+
+    # -- inbound priority -------------------------------------------------
+
+    def map_inbound_priority(self, partner_id: str,
+                             asserted: Mapping[str, str]) -> PriorityDecision:
+        partner = self._profile.partner(partner_id)
+        if partner is None:
+            raise HookContractViolation(
+                f"partner {partner_id!r} is not declared in this profile")
+
+        label = str(asserted.get("label") or "")
+        entry = next((e for e in partner.inbound_priority_map
+                      if e.from_label == label), None)
+        if entry is None:
+            # No mapping means no authority. Refusing is the only safe answer:
+            # a default would grant a partner a level nobody chose for it.
+            raise PartnerMappingFailure(
+                PARTNER_NOT_PERMITTED,
+                f"partner {partner_id!r} asserted label {label!r}, which this "
+                "profile does not map")
+
+        # The ceiling is enforced here as well as at validation: a profile
+        # edited past its validator, or a mapping added later, must not be able
+        # to exceed it at runtime.
+        level = min(entry.to_level, partner.inbound_max_level)
+        return PriorityDecision(
+            level=level,
+            scope=partner.inbound_scope,
+            # Pre-emption across a system boundary is off unless the local
+            # operator explicitly granted it to THIS partner.
+            preemption_capability=partner.inbound_may_preempt,
+            # A partner session is always vulnerable locally: a foreign session
+            # must never be harder to displace than a local one.
+            preemption_vulnerability=True,
+            floor_priority=level,
+            label=entry.to_label,
+        )
+
+    # -- outbound ---------------------------------------------------------
+
+    def map_outbound(self, request: SessionRequest,
+                     priority: PriorityDecision) -> Mapping[str, str]:
+        """What this system asserts to the partner.
+
+        Advisory by construction: the partner's own policy decides what to do
+        with it, exactly as this system treats what the partner asserts.
+        """
+        partner_id = ""
+        interconnection = self._profile.interconnection
+        if interconnection is not None:
+            for partner in interconnection.partners:
+                if partner.target_prefix and \
+                        request.target.startswith(partner.target_prefix):
+                    partner_id = partner.id
+                    if not partner.outbound_assert_label:
+                        return {"system": self._profile.name,
+                                "partner_id": partner_id}
+                    break
+        return {
+            "system": self._profile.name,
+            "partner_id": partner_id,
+            "label": priority.label,
+            "scope": priority.scope,
+            "call_type": request.call_type,
+        }
+
+
+class PartnerMappingFailure(PlatformError):
+    """A partner's assertion could not be mapped. Carries a reason code."""
+
+    def __init__(self, reason_code: str, detail: str = "") -> None:
+        self.reason_code = reason_code
+        super().__init__(f"{reason_code}: {detail}" if detail else reason_code)

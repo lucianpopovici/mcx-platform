@@ -273,7 +273,8 @@ def test_vp1_hook_001_hook_exception_fails_session(mcx, sink):
         priority_policy=Exploding(mcx.profile),
         session_policy=mcx.hooks.session_policy,
         bearer_selector=mcx.hooks.bearer_selector,
-        interworking_gateway=mcx.hooks.interworking_gateway)
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
     lp = loader.LoadedProfile(profile=mcx.profile, hooks=broken, source=mcx.source)
     mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
 
@@ -311,7 +312,8 @@ def test_vp1_hook_002_contract_violation_is_distinguished(mcx, sink):
         priority_policy=mcx.hooks.priority_policy,
         session_policy=mcx.hooks.session_policy,
         bearer_selector=mcx.hooks.bearer_selector,
-        interworking_gateway=mcx.hooks.interworking_gateway)
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
     lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
     mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
 
@@ -478,7 +480,8 @@ def test_scope_check_is_a_backstop_for_a_broken_compare(mcx, sink):
         priority_policy=ScopeBlindPolicy(mcx.profile),
         session_policy=mcx.hooks.session_policy,
         bearer_selector=mcx.hooks.bearer_selector,
-        interworking_gateway=mcx.hooks.interworking_gateway)
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
     lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
     mcx.hooks.identity_resolver.register_user("sip:u0@mcptt.example")
     mcx.hooks.identity_resolver.register_group(

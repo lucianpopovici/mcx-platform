@@ -46,7 +46,10 @@ HOOK_FIELDS = (
     "session_policy",
     "bearer_selector",
     "interworking_gateway",
+    "interconnection_gateway",
 )
+
+TRUST_MECHANISMS = ("mutual-tls", "signed-assertion")
 
 
 @dataclass(frozen=True)
@@ -155,7 +158,7 @@ def build(raw: Mapping[str, Any], content_hash: str) -> model.Profile:
     c.keys("<root>", raw, allowed=(
         "$schema", "profile", "urgencies", "preemption_scopes", "applications",
         "call_types", "identity", "priority", "bearer", "interworking",
-        "admission",
+        "interconnection", "admission",
     ), required=(
         "profile", "urgencies", "preemption_scopes", "call_types", "identity",
         "priority", "bearer", "admission",
@@ -182,6 +185,8 @@ def build(raw: Mapping[str, Any], content_hash: str) -> model.Profile:
                          application_ids, urgency_ids)
     bearer = _bearer(c, raw.get("bearer"), call_type_ids)
     interworking = _interworking(c, raw.get("interworking"))
+    interconnection = _interconnection(c, raw.get("interconnection"), scope_ids,
+                                       call_type_ids)
     admission = _admission(c, raw.get("admission"), urgency_ids)
 
     # -- cross-cutting checks -------------------------------------------
@@ -205,6 +210,7 @@ def build(raw: Mapping[str, Any], content_hash: str) -> model.Profile:
         priority=priority,
         bearer=bearer,
         interworking=interworking,
+        interconnection=interconnection,
         admission=admission,
         content_hash=content_hash,
     )
@@ -751,6 +757,168 @@ def _interworking(c: _Checker, node: Any) -> Optional[model.Interworking]:
         gateway=gateway if isinstance(gateway, str) else None,
         routes=tuple(routes),
     )
+
+
+def _interconnection(c: _Checker, node: Any, scopes: Set[str],
+                     call_types: Set[str]) -> Optional[model.Interconnection]:
+    """Validate partner declarations.
+
+    The rules here are the scope-mapping model made mechanical. Each one exists
+    because its absence is a way a partner system could obtain authority in
+    this system that its operator never granted.
+    """
+    if node is None:
+        return None
+    p = "interconnection"
+    if not c.keys(p, node, allowed=("partners",), required=("partners",)):
+        return None
+
+    raw = node.get("partners")
+    if not isinstance(raw, list) or not raw:
+        c.add(f"{p}.partners", "bad-value",
+              "expected a non-empty list; omit the whole block for no partners")
+        return None
+
+    partners: List[model.PartnerConfig] = []
+    seen_ids, seen_prefixes = set(), set()
+    for i, item in enumerate(raw):
+        pp = f"{p}.partners[{i}]"
+        if not c.keys(pp, item, allowed=(
+                "id", "domains", "target_prefix", "gateway", "trust",
+                "inbound", "outbound"),
+                required=("id", "domains", "target_prefix", "gateway", "trust",
+                          "inbound")):
+            continue
+        ident = c.typed(pp, item, "id", str, "")
+        if ident in seen_ids:
+            c.add(f"{pp}.id", "duplicate", f"partner {ident!r} already declared")
+            continue
+        seen_ids.add(ident)
+
+        prefix = c.typed(pp, item, "target_prefix", str, "") or ""
+        if not prefix:
+            c.add(f"{pp}.target_prefix", "bad-value", "must be non-empty")
+        elif prefix in seen_prefixes:
+            c.add(f"{pp}.target_prefix", "duplicate",
+                  f"prefix {prefix!r} already claimed by another partner")
+        else:
+            seen_prefixes.add(prefix)
+
+        # An unauthenticated partner identity is not an identity.
+        c.enum(f"{pp}.trust", item.get("trust"), TRUST_MECHANISMS)
+
+        domains: List[str] = []
+        raw_domains = item.get("domains")
+        if not isinstance(raw_domains, list) or not raw_domains:
+            c.add(f"{pp}.domains", "bad-value",
+                  "expected a non-empty list of partner domains")
+        else:
+            for j, d in enumerate(raw_domains):
+                if not isinstance(d, str) or not d:
+                    c.add(f"{pp}.domains[{j}]", "bad-value",
+                          "expected a non-empty string")
+                    continue
+                domains.append(d)
+
+        inbound = _partner_inbound(c, f"{pp}.inbound", item.get("inbound"),
+                                   scopes, call_types)
+        outbound = item.get("outbound") or {}
+        assert_label = True
+        if outbound:
+            if c.keys(f"{pp}.outbound", outbound, allowed=("assert_label",)):
+                assert_label = bool(c.typed(f"{pp}.outbound", outbound,
+                                            "assert_label", bool, True,
+                                            required=False))
+
+        partners.append(model.PartnerConfig(
+            id=ident or "", domains=tuple(domains), target_prefix=prefix,
+            gateway=c.typed(pp, item, "gateway", str, "") or "",
+            trust=item.get("trust") if isinstance(item.get("trust"), str) else "",
+            inbound_scope=inbound["scope"],
+            inbound_max_level=inbound["max_level"],
+            inbound_may_preempt=inbound["may_preempt"],
+            inbound_allowed_call_types=inbound["allowed_call_types"],
+            inbound_priority_map=inbound["priority_map"],
+            outbound_assert_label=assert_label,
+        ))
+    return model.Interconnection(partners=tuple(partners))
+
+
+def _partner_inbound(c: _Checker, path: str, node: Any, scopes: Set[str],
+                     call_types: Set[str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"scope": "", "max_level": 0, "may_preempt": False,
+                           "allowed_call_types": (), "priority_map": ()}
+    if not c.keys(path, node, allowed=(
+            "scope", "max_level", "may_preempt", "allowed_call_types",
+            "priority_map"),
+            required=("scope", "max_level", "priority_map")):
+        return out
+
+    scope = c.typed(path, node, "scope", str, "")
+    # A partner session occupies a LOCAL scope, so it is arbitrated by local
+    # rules and can never introduce a scope of its own.
+    c.ref(f"{path}.scope", scope, scopes, "pre-emption scope")
+    out["scope"] = scope or ""
+
+    max_level = c.typed(path, node, "max_level", int, 0)
+    if max_level is None or max_level < 0:
+        c.add(f"{path}.max_level", "bad-value", "must not be negative")
+        max_level = 0
+    out["max_level"] = max_level
+
+    # Pre-emption across a system boundary is off unless explicitly granted.
+    out["may_preempt"] = bool(c.typed(path, node, "may_preempt", bool, False,
+                                      required=False))
+
+    allowed: List[str] = []
+    raw_types = node.get("allowed_call_types") or []
+    if not isinstance(raw_types, list):
+        c.add(f"{path}.allowed_call_types", "bad-type", "expected a list")
+    else:
+        for j, ct in enumerate(raw_types):
+            if not isinstance(ct, str):
+                c.add(f"{path}.allowed_call_types[{j}]", "bad-type",
+                      "expected a string")
+                continue
+            c.ref(f"{path}.allowed_call_types[{j}]", ct, call_types, "call type")
+            allowed.append(ct)
+    out["allowed_call_types"] = tuple(allowed)
+
+    entries: List[model.PriorityMapEntry] = []
+    raw_map = node.get("priority_map")
+    mp = f"{path}.priority_map"
+    if not isinstance(raw_map, list) or not raw_map:
+        c.add(mp, "bad-value",
+              "expected a non-empty list; a partner with no mapping cannot be "
+              "given a local priority")
+        raw_map = []
+    seen_labels = set()
+    for j, entry in enumerate(raw_map):
+        ep = f"{mp}[{j}]"
+        if not c.keys(ep, entry, allowed=("from_label", "to_level", "to_label"),
+                      required=("from_label", "to_level", "to_label")):
+            continue
+        from_label = c.typed(ep, entry, "from_label", str, "")
+        if from_label in seen_labels:
+            c.add(f"{ep}.from_label", "duplicate",
+                  f"{from_label!r} already mapped")
+            continue
+        seen_labels.add(from_label)
+        to_level = c.typed(ep, entry, "to_level", int, 0)
+        if to_level is None or to_level < 0:
+            c.add(f"{ep}.to_level", "bad-value", "must not be negative")
+            to_level = 0
+        # The ceiling is the whole point: no mapping may exceed it, so a
+        # partner cannot be granted more authority than the ceiling states.
+        if to_level > max_level:
+            c.add(f"{ep}.to_level", "inconsistent",
+                  f"mapped level {to_level} exceeds the partner ceiling "
+                  f"max_level {max_level}")
+        entries.append(model.PriorityMapEntry(
+            from_label=from_label or "", to_level=to_level,
+            to_label=c.typed(ep, entry, "to_label", str, "") or ""))
+    out["priority_map"] = tuple(entries)
+    return out
 
 
 def _admission(c: _Checker, node: Any, urgencies: Set[str]) -> model.Admission:

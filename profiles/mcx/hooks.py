@@ -7,6 +7,7 @@ bearers, prefix-routed interworking. Nothing here is imported by `core/`.
 from __future__ import annotations
 
 from profiles.common.tables import (
+    TableInterconnectionGateway,
     DirectoryResolver,
     PrefixInterworkingGateway,
     TableBearerSelector,
@@ -15,6 +16,7 @@ from profiles.common.tables import (
 )
 
 __all__ = [
+    "PartnerGateway",
     "DirectoryResolver",
     "TablePriorityPolicy",
     "MCXSessionPolicy",
@@ -35,3 +37,7 @@ class SinglePathSelector(TableBearerSelector):
 
 class P25TetraGateway(PrefixInterworkingGateway):
     """Interworking to TETRA or P25 by target prefix (R4)."""
+
+
+class PartnerGateway(TableInterconnectionGateway):
+    """Partner reconciliation from the profile's interconnection table."""

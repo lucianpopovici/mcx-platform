@@ -21,6 +21,7 @@ profile:
     priority_policy: profiles.frmcs.hooks:TablePriorityPolicy
     session_policy: profiles.frmcs.hooks:FRMCSSessionPolicy
     bearer_selector: profiles.frmcs.hooks:MultiBearerSelector
+    interconnection_gateway: profiles.frmcs.hooks:PartnerGateway
     interworking_gateway: profiles.frmcs.hooks:GSMRGateway
 
 urgencies:
@@ -233,6 +234,31 @@ interworking:
     - match: {target_prefix: "gsmr:"}
       gateway: "sip:gsmr-gw@frmcs.example"
       attributes: {}
+
+# Interconnection with partner MC systems (IF-ICX). Provisional, like the rest
+# of this stub. Note the asymmetry with the partner's own file: each operator
+# declares what the OTHER may do here, and the two need not agree.
+interconnection:
+  partners:
+    - id: public-safety-operator
+      domains: ["mcptt.example"]
+      target_prefix: "icx:ps:"
+      gateway: "sip:icx@mcptt.example"
+      trust: mutual-tls
+      inbound:
+        scope: railway
+        # Well below the railway-emergency level (95): a non-railway system
+        # must never be able to outrank railway emergency traffic.
+        max_level: 45
+        may_preempt: false
+        allowed_call_types: [driver-controller]
+        priority_map:
+          - {from_label: emergency, to_level: 45, to_label: partner-urgent}
+          - {from_label: imminent-peril, to_level: 35, to_label: partner-elevated}
+          - {from_label: normal, to_level: 15, to_label: partner-routine}
+          - {from_label: normal-private, to_level: 15, to_label: partner-routine}
+      outbound:
+        assert_label: true
 
 admission:
   max_concurrent_sessions: 5000

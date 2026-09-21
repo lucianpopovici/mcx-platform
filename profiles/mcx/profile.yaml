@@ -12,6 +12,7 @@ profile:
     priority_policy: profiles.mcx.hooks:TablePriorityPolicy
     session_policy: profiles.mcx.hooks:MCXSessionPolicy
     bearer_selector: profiles.mcx.hooks:SinglePathSelector
+    interconnection_gateway: profiles.mcx.hooks:PartnerGateway
     interworking_gateway: profiles.mcx.hooks:P25TetraGateway
 
 urgencies:
@@ -183,6 +184,35 @@ interworking:
     - match: {target_prefix: "tetra:"}
       gateway: "sip:iwf@mcptt.example"
       attributes: {}
+
+# Interconnection with partner MC systems (IF-ICX).
+#
+# The far side speaks MC protocols natively, so nothing is translated; what is
+# reconciled is POLICY. A partner's priority levels are never read: mapping is
+# keyed on its label and capped by max_level, so a partner can never obtain
+# more authority here than this operator explicitly granted.
+interconnection:
+  partners:
+    - id: rail-operator
+      domains: ["frmcs.example"]
+      target_prefix: "icx:rail:"
+      gateway: "sip:icx@frmcs.example"
+      trust: mutual-tls
+      inbound:
+        # Partner sessions occupy a LOCAL scope, arbitrated by local rules.
+        scope: public-safety
+        # Ceiling. No mapping may exceed it, and it sits below the local
+        # emergency level (90) so a partner cannot outrank a local emergency.
+        max_level: 60
+        # Pre-emption across a system boundary is off unless explicitly granted.
+        may_preempt: false
+        allowed_call_types: [private, prearranged-group]
+        priority_map:
+          - {from_label: railway-emergency, to_level: 60, to_label: partner-urgent}
+          - {from_label: etcs-data, to_level: 40, to_label: partner-operational}
+          - {from_label: operational, to_level: 25, to_label: partner-routine}
+      outbound:
+        assert_label: true
 
 admission:
   max_concurrent_sessions: 2000

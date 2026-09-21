@@ -138,7 +138,8 @@ def test_unrouted_external_target_is_refused_not_localised(wired, mcx):
         priority_policy=mcx.hooks.priority_policy,
         session_policy=mcx.hooks.session_policy,
         bearer_selector=mcx.hooks.bearer_selector,
-        interworking_gateway=NoRoute(mcx.profile))
+        interworking_gateway=NoRoute(mcx.profile),
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
     lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
     sink = MemorySink()
     mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
@@ -315,7 +316,8 @@ def test_external_resolution_with_members_is_a_contract_violation(wired, mcx):
         priority_policy=mcx.hooks.priority_policy,
         session_policy=mcx.hooks.session_policy,
         bearer_selector=mcx.hooks.bearer_selector,
-        interworking_gateway=mcx.hooks.interworking_gateway)
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
     lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
     sink = MemorySink()
     mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
@@ -351,7 +353,8 @@ def test_external_resolution_without_resolved_from_is_a_contract_violation(mcx):
         priority_policy=mcx.hooks.priority_policy,
         session_policy=mcx.hooks.session_policy,
         bearer_selector=mcx.hooks.bearer_selector,
-        interworking_gateway=mcx.hooks.interworking_gateway)
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
     lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
     sink = MemorySink()
     mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))

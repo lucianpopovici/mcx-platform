@@ -1,7 +1,7 @@
 # Mission-critical services platform — Software Requirements Specification
 
 **Document:** PLT-SRS
-**Version:** 0.1 (draft)
+**Version:** 0.2 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 
@@ -29,10 +29,10 @@ the legacy systems reached through interworking.
 ### 1.3 Product concept
 
 One core implements the profile-agnostic MC protocol machinery. A **profile** —
-a validated, immutable configuration package plus five hook implementations —
+a validated, immutable configuration package plus six hook implementations —
 specialises it. Exactly one profile is selected at deployment time. The MCX and
 FRMCS profiles differ in identity resolution, priority, session policy, bearer
-selection and interworking, and in nothing else.
+selection, interworking and interconnection, and in nothing else.
 
 ### 1.4 Definitions
 
@@ -40,7 +40,7 @@ selection and interworking, and in nothing else.
 |---|---|
 | Core | Profile-agnostic MC service implementation |
 | Profile | Configuration package + hook implementations for one deployment type |
-| Hook | One of the five interfaces through which a profile influences the core |
+| Hook | One of the six interfaces through which a profile influences the core |
 | Controlling function | Per-session arbitrating function (TS 23.379) |
 | Participating function | Per-user home-system function (TS 23.379) |
 | CSC | Common services core: IdMS, KMS, GMS, CMS, LMS |
@@ -65,7 +65,7 @@ recorded justification; *may* = optional.
 |---|---|---|
 | **R1** | Core, profile framework, MCX profile, on-network MCPTT private and prearranged group calls, floor control | Two clients complete a group call with floor arbitration; both CI suites green |
 | **R2** | Security (TS 33.180), MCData SDS, emergency and imminent-peril calls, full group/config management | End-to-end encrypted emergency group call; KMS-issued keys only |
-| **R3** | FRMCS profile: functional addressing, REC, multi-bearer transport, MCData IPcon | FRMCS conformance suite green against unmodified core |
+| **R3** | FRMCS profile: functional addressing, REC, multi-bearer transport, MCData IPcon; interconnection with partner MC systems | FRMCS conformance suite green against unmodified core; a partner cannot exceed its declared ceiling |
 | **R4** | MBS/broadcast delivery, off-network (ProSe), interworking (TETRA/P25/GSM-R), MCVideo | Interworked call to a legacy system; broadcast group call over MBS |
 
 ---
@@ -158,7 +158,7 @@ profile-aware core behaviour is a defect in this document.
 
 | ID | Phase | Requirement | V |
 |---|---|---|---|
-| PLT-PRF-001 | R1 | A profile shall consist of a declarative configuration package and implementations of the five hook interfaces, with no other mechanism for influencing core behaviour. | I |
+| PLT-PRF-001 | R1 | A profile shall consist of a declarative configuration package and implementations of the six hook interfaces, with no other mechanism for influencing core behaviour. | I |
 | PLT-PRF-002 | R1 | The platform shall validate a profile against the published profile schema before use. | T |
 | PLT-PRF-003 | R1 | Validation shall reject any key not defined in the schema. Unknown keys shall be errors, not warnings. | T |
 | PLT-PRF-004 | R1 | Validation shall reject any unresolved internal reference, including a call type naming an undeclared urgency, application, pre-emption scope or initiator role. | T |
@@ -169,7 +169,7 @@ profile-aware core behaviour is a defect in this document.
 | PLT-PRF-009 | R1 | After successful validation the profile shall be immutable for the lifetime of the process. | T |
 | PLT-PRF-010 | R1 | The platform shall not support hot reload, partial reload or runtime modification of a loaded profile. A profile change shall require redeployment. | I |
 | PLT-PRF-011 | R1 | The platform shall compute and record a cryptographic hash over the canonicalised profile content at load time. | T |
-| PLT-PRF-012 | R1 | All five hooks shall be mandatory. The platform shall not supply a default implementation for any hook. | I |
+| PLT-PRF-012 | R1 | All six hooks shall be mandatory. The platform shall not supply a default implementation for any hook. | I |
 | PLT-PRF-013 | R1 | The platform shall verify at load time that each configured hook implements its declared interface, and shall refuse to start otherwise. | T |
 
 ### 5.2 Vocabulary opacity
@@ -407,6 +407,62 @@ profile-aware core behaviour is a defect in this document.
 
 ---
 
+## 14A. Interconnection with partner MC systems (PLT-ICX)
+
+Interconnection is distinct from interworking (§14 / PLT-HOK-050..052). A partner
+MC system speaks MC protocols natively, so nothing is translated; what must be
+reconciled is **policy**. It is also the only mechanism by which a system outside
+the operator's control obtains authority *inside* their system, which is why the
+requirements below are written as constraints on what a partner cannot do.
+
+### 14A.1 The scope-mapping model
+
+| ID | Phase | Requirement | V |
+|---|---|---|---|
+| PLT-ICX-001 | R3 | The platform shall treat a target in a partner MC system as a distinct resolution outcome from a target in a non-MC system. | T |
+| PLT-ICX-002 | R3 | A partner resolution shall carry no local members, and shall record the partner target for audit. | T |
+| PLT-ICX-003 | R3 | A session routed to a partner shall be established toward the partner gateway only, and shall never also be established locally. | T |
+| PLT-ICX-004 | R3 | The platform shall never derive a local priority from a partner's asserted priority level. Mapping shall be by declared label. | T |
+| PLT-ICX-005 | R3 | Each partner shall be assigned a local pre-emption scope. A partner shall not introduce a pre-emption scope of its own. | T |
+| PLT-ICX-006 | R3 | Each partner shall be assigned a maximum priority level. No mapping shall yield a level above it, enforced at validation and again at runtime. | T |
+| PLT-ICX-007 | R3 | The ceiling for a partner shall be configurable below the local levels the operator wishes to protect, and the platform shall not prevent it being set to zero. | I |
+| PLT-ICX-008 | R3 | A partner shall have no pre-emption capability unless explicitly granted to that partner. | T |
+| PLT-ICX-009 | R3 | A session originating from a partner shall always be locally pre-emptible: it shall never be harder to displace than a local session. | T |
+| PLT-ICX-010 | R3 | An assertion the profile does not map shall be refused. The platform shall not supply a default priority for an unmapped assertion. | T |
+| PLT-ICX-011 | R3 | An undeclared partner shall receive no rights. The platform shall not supply default rights for an unknown partner. | T |
+| PLT-ICX-012 | R3 | Each partner shall declare which call types are permitted with it; a call type outside that set shall be refused with a distinct reason code. | T |
+| PLT-ICX-013 | R3 | A partner target for which no route is produced shall be refused, never established locally. | T |
+
+### 14A.2 Trust and authentication
+
+| ID | Phase | Requirement | V |
+|---|---|---|---|
+| PLT-ICX-020 | R3 | A partner system shall be authenticated by a declared mechanism. A partner identity asserted in an unauthenticated field shall not be accepted as an identity. | T |
+| PLT-ICX-021 | R3 | The authentication mechanism in force shall be recorded with the session. | T |
+| PLT-ICX-022 | R3 | Rights shall be declared per partner. The platform shall not support a rights declaration applying to all partners collectively. | I |
+| PLT-ICX-023 | R4 | Key management across a system boundary shall follow TS 33.180. Cross-domain key management is not in R3 scope and interconnection before R4 shall be confined to deployments sharing a security domain. | A |
+
+### 14A.3 Asymmetry and governance
+
+| ID | Phase | Requirement | V |
+|---|---|---|---|
+| PLT-ICX-030 | R3 | Each deployment shall declare what a partner may do within it, independently of what that partner declares in return. The platform shall not require the two declarations to agree. | T |
+| PLT-ICX-031 | R3 | A partner declaration shall be validated against the local profile: an undeclared scope, call type or reason code shall prevent start. | T |
+| PLT-ICX-032 | R3 | A profile declaring no partners shall be valid, and shall produce no partner resolution. | T |
+| PLT-ICX-033 | R3 | Every session involving a partner shall record the partner identity, the asserted values and the mapped local decision, so an operator can reconstruct what authority was granted and why. | T |
+
+### 14A.4 Open points
+
+| # | Question | Needed by |
+|---|---|---|
+| ICX-OP-01 | Confirm interconnection reference-point naming and whether the target release uses an MC gateway server as the edge entity (TS 23.280). | R3 start |
+| ICX-OP-02 | Migration (a user of one system registering into another) is out of scope here and needs its own requirements. Decide whether it is required at all. | R3 planning |
+| ICX-OP-03 | Floor control across an interconnection: which system arbitrates a group spanning both, and what happens to queue and override semantics. | R3 start |
+| ICX-OP-04 | Cross-domain key management under TS 33.180 (PLT-ICX-023) is a substantial piece in its own right; scope it before committing to a date. | R4 planning |
+
+
+---
+
 ## 15. Security (PLT-SEC)
 
 | ID | Phase | Requirement | V |
@@ -497,4 +553,5 @@ profile-aware core behaviour is a defect in this document.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.2 | 2026-09-19 | Added §14A (PLT-ICX, 26 requirements) for interconnection with partner MC systems, distinct from interworking. R3 exit criterion extended. |
 | 0.1 | 2026-09-19 | Initial draft |

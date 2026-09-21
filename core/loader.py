@@ -45,6 +45,9 @@ HOOK_INTERFACES: Mapping[str, Tuple[type, Tuple[str, ...]]] = {
     "bearer_selector": (hook_ifaces.BearerSelector, ("select", "on_path_event")),
     "interworking_gateway": (hook_ifaces.InterworkingGateway,
                              ("route", "map_inbound")),
+    "interconnection_gateway": (hook_ifaces.InterconnectionGateway,
+                                ("route", "rights", "map_inbound_priority",
+                                 "map_outbound")),
 }
 
 
@@ -99,6 +102,7 @@ class LoadedHooks:
     session_policy: Any
     bearer_selector: Any
     interworking_gateway: Any
+    interconnection_gateway: Any
 
 
 def _import_symbol(spec: str) -> Any:
@@ -213,7 +217,7 @@ def load(directory: Path, *, resolve: bool = True) -> LoadedProfile:
     """Read, validate, freeze and resolve one profile package."""
     raw = read_package(directory)
     profile = validation.build(raw, content_hash(raw))
-    hooks = resolve_hooks(profile) if resolve else LoadedHooks(*(None,) * 5)
+    hooks = resolve_hooks(profile) if resolve else LoadedHooks(*(None,) * 6)
     return LoadedProfile(profile=profile, hooks=hooks, source=directory)
 
 

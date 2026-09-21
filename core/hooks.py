@@ -47,6 +47,10 @@ class ResolutionKind(Enum):
     # The target belongs to a non-MC system. No local member set exists; the
     # session is routed to a gateway instead of being established locally.
     EXTERNAL = "external"
+    # The target belongs to a partner MC system. Like EXTERNAL it carries no
+    # local members, but the far side speaks MC protocols natively: what is
+    # needed is policy reconciliation, not protocol translation.
+    PARTNER = "partner"
 
 
 # --------------------------------------------------------------------------
@@ -154,6 +158,32 @@ class BearerDecision:
 
 
 @dataclass(frozen=True)
+class PartnerRoute:
+    """Where a partner MC system is reached, and under whose authority."""
+
+    partner_id: str
+    gateway: str
+    # How the partner system authenticated itself. A partner identity taken
+    # from an unauthenticated header is not an identity.
+    trust: str = ""
+    attributes: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PartnerRights:
+    """What a partner system may do inside THIS system.
+
+    Defaults are the safe ones: no pre-emption, no call types. A partner gains
+    a capability only by an explicit declaration.
+    """
+
+    scope: PreemptionScope           # local scope partner sessions occupy
+    max_level: int = 0               # ceiling on any mapped priority level
+    may_preempt: bool = False
+    allowed_call_types: Sequence[CallTypeId] = ()
+
+
+@dataclass(frozen=True)
 class InterworkingRoute:
     system: str  # profile-declared legacy system identifier
     gateway: str
@@ -236,6 +266,32 @@ class BearerSelector(Protocol):
     def on_path_event(
         self, session_id: str, event: Mapping[str, str]
     ) -> Optional[BearerDecision]: ...
+
+
+@runtime_checkable
+class InterconnectionGateway(Protocol):
+    """Hook 6 (IF-ICX). Sessions spanning this system and a partner MC system.
+
+    Distinct from IF-IWF because the problem is different. A partner speaks the
+    same protocols, so nothing needs translating; what needs reconciling is
+    policy. Two systems' priority LEVELS are not commensurable — one system's
+    90 and another's 95 are numbers in unrelated scales — so mapping is
+    declared pair-wise and never derived by comparing them.
+    """
+
+    def route(
+        self, request: SessionRequest, resolution: Resolution
+    ) -> Optional[PartnerRoute]: ...
+
+    def rights(self, partner_id: str) -> PartnerRights: ...
+
+    def map_inbound_priority(
+        self, partner_id: str, asserted: Mapping[str, str]
+    ) -> PriorityDecision: ...
+
+    def map_outbound(
+        self, request: SessionRequest, priority: PriorityDecision
+    ) -> Mapping[str, str]: ...
 
 
 @runtime_checkable

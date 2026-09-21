@@ -155,6 +155,41 @@ class Interworking:
 
 
 @dataclass(frozen=True)
+class PriorityMapEntry:
+    """One pair-wise mapping from a partner's asserted decision to a local one.
+
+    Keyed on the partner's LABEL, never its level: levels in two systems are
+    numbers in unrelated scales and comparing them is meaningless.
+    """
+
+    from_label: str
+    to_level: int
+    to_label: str
+
+
+@dataclass(frozen=True)
+class PartnerConfig:
+    id: str
+    domains: Tuple[str, ...]
+    target_prefix: str
+    gateway: str
+    trust: str
+    # Inbound: what the partner may do here. Defaults are restrictive.
+    inbound_scope: str
+    inbound_max_level: int
+    inbound_may_preempt: bool
+    inbound_allowed_call_types: Tuple[str, ...]
+    inbound_priority_map: Tuple[PriorityMapEntry, ...]
+    # Outbound: what we assert to the partner.
+    outbound_assert_label: bool
+
+
+@dataclass(frozen=True)
+class Interconnection:
+    partners: Tuple[PartnerConfig, ...]
+
+
+@dataclass(frozen=True)
 class Admission:
     max_concurrent_sessions: int
     reserved_for_urgency: Mapping[str, int]
@@ -168,6 +203,7 @@ class HookPaths:
     session_policy: str
     bearer_selector: str
     interworking_gateway: str
+    interconnection_gateway: str
 
 
 @dataclass(frozen=True)
@@ -191,6 +227,7 @@ class Profile:
     priority: Priority
     bearer: Bearer
     interworking: Optional[Interworking]
+    interconnection: Optional[Interconnection]
     admission: Admission
     content_hash: str
 
@@ -211,6 +248,14 @@ class Profile:
         for f in self.identity.functional:
             if f.id == identity_id:
                 return f
+        return None
+
+    def partner(self, partner_id: str) -> Optional[PartnerConfig]:
+        if self.interconnection is None:
+            return None
+        for p in self.interconnection.partners:
+            if p.id == partner_id:
+                return p
         return None
 
     def identifier(self) -> str:

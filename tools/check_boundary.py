@@ -106,6 +106,8 @@ HOOK_METHODS = {
     "session_policy": {"admit", "decide", "floor_policy"},
     "bearer_selector": {"select", "on_path_event"},
     "interworking_gateway": {"route", "map_inbound"},
+    "interconnection_gateway": {"route", "rights", "map_inbound_priority",
+                                "map_outbound"},
 }
 
 
@@ -315,7 +317,7 @@ def check_floor_machine_isolated(root: Path) -> List[str]:
 # VP1-BND-010 — reference-point naming
 # --------------------------------------------------------------------------
 
-INTERFACE_IDS = {"IF-IDR", "IF-PRI", "IF-SES", "IF-BER", "IF-IWF"}
+INTERFACE_IDS = {"IF-IDR", "IF-PRI", "IF-SES", "IF-BER", "IF-IWF", "IF-ICX"}
 
 
 def check_reference_point_naming(root: Path) -> List[str]:
@@ -396,26 +398,45 @@ def check_no_priority_table_in_core(root: Path) -> List[str]:
 
     Comparing a floor priority the profile supplied is required by PLT-FC-005,
     so comparison itself cannot be forbidden. What is forbidden is the core
-    deriving a priority: a literal mapping onto a priority-named variable.
+    DERIVING a priority: a lookup table mapping labels onto levels.
+
+    Two discriminators, both needed. Uniformity: a priority table maps string
+    keys onto integer levels and nothing else, where a defaults or accumulator
+    dict holds mixed types — flagging those made this check cry wolf on the
+    validator's own scaffolding. And context: the giveaway is usually the name
+    it is bound to, not the literal, so the assignment target is inspected too.
     """
     violations: List[str] = []
+    markers = ("priority", "level", "urgency", "preempt")
     for path in _iter_python(root, CORE):
         if path.name == "hooks.py":
             continue
+        source = path.read_text(encoding="utf-8")
         for node in ast.walk(_parse(path)):
-            if isinstance(node, ast.Dict):
-                for key in node.keys:
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                        parent_src = ast.get_source_segment(
-                            path.read_text(encoding="utf-8"), node) or ""
-                        if "priority" in parent_src.lower() and \
-                                any(isinstance(v, ast.Constant)
-                                    and isinstance(v.value, int)
-                                    for v in node.values):
-                            violations.append(
-                                f"{path.relative_to(root)}:{node.lineno}: core "
-                                "contains a literal priority mapping")
-                            break
+            dicts: List[Tuple[ast.Dict, str]] = []
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+                names = " ".join(_target_name(x) for x in node.targets)
+                dicts.append((node.value, names))
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Dict):
+                dicts.append((node.value, _target_name(node.target)))
+            for d, context in dicts:
+                if len(d.keys) < 2:
+                    continue
+                keys_are_strings = all(
+                    isinstance(k, ast.Constant) and isinstance(k.value, str)
+                    for k in d.keys)
+                values_all_int = all(
+                    isinstance(v, ast.Constant) and isinstance(v.value, int)
+                    and not isinstance(v.value, bool)
+                    for v in d.values)
+                if not (keys_are_strings and values_all_int):
+                    continue
+                haystack = (context + " " +
+                            (ast.get_source_segment(source, d) or "")).lower()
+                if any(m in haystack for m in markers):
+                    violations.append(
+                        f"{path.relative_to(root)}:{d.lineno}: core contains a "
+                        "label-to-level mapping, which is a priority table")
     return violations
 
 

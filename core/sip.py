@@ -28,6 +28,8 @@ from .errors import (
     CALL_TYPE_NOT_PERMITTED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
+    PARTNER_NOT_PERMITTED,
+    PARTNER_UNAVAILABLE,
     HOOK_CONTRACT_VIOLATION,
     HOOK_ERROR,
     HOOK_TIMEOUT,
@@ -106,6 +108,10 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     # The gateway to a non-MC system could not be reached or produced no
     # route. A service-level condition, not a fault in the platform.
     GATEWAY_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
+    # A partner system unreachable is a service condition; a partner asking for
+    # something it was never granted is a refusal, and must not look like a fault.
+    PARTNER_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
+    PARTNER_NOT_PERMITTED: Status.FORBIDDEN,
     HOOK_TIMEOUT: Status.SERVER_ERROR,
     HOOK_ERROR: Status.SERVER_ERROR,
     HOOK_CONTRACT_VIOLATION: Status.SERVER_ERROR,
@@ -122,6 +128,8 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     RECORDING_UNAVAILABLE: (106, "recording unavailable"),
     QOS_UNAVAILABLE: (107, "requested quality of service unavailable"),
     GATEWAY_UNAVAILABLE: (108, "interworking gateway unavailable"),
+    PARTNER_UNAVAILABLE: (109, "partner system unavailable"),
+    PARTNER_NOT_PERMITTED: (110, "not permitted with this partner system"),
 }
 
 

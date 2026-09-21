@@ -28,6 +28,8 @@ from . import floor as floor_mod
 from .audit import Auditor, RecordType
 from .errors import (
     GATEWAY_UNAVAILABLE,
+    PARTNER_NOT_PERMITTED,
+    PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
 )
@@ -60,6 +62,7 @@ class SignalType(Enum):
     RELEASE_QOS = "release-qos"
     START_RECORDING = "start-recording"
     ROUTE_EXTERNAL = "route-external"
+    ROUTE_PARTNER = "route-partner"
 
 
 @dataclass(frozen=True)
@@ -90,9 +93,10 @@ class Session:
     floor: Optional[floor_mod.FloorControl] = None
     controlling: bool = True
     members: Tuple[str, ...] = ()
-    # Set when the session was routed to a non-MC system. A session has
-    # either members or a gateway, never both.
+    # Set when the session was routed to a non-MC system or a partner MC
+    # system. A session has either members or a gateway, never both.
     gateway: Optional[str] = None
+    partner_id: Optional[str] = None
 
 
 class Platform:
@@ -160,6 +164,33 @@ class SessionManager:
             # session pays nothing, and "this call leaves the MC domain" is an
             # explicit resolution outcome rather than something inferred from a
             # hook's return value.
+            # 2b — IF-ICX, for a target in a partner MC system. Separate from
+            # IF-IWF because nothing needs translating; what needs reconciling
+            # is policy, and the partner's own levels are never read.
+            partner = None
+            if resolution.kind is ResolutionKind.PARTNER:
+                partner = invoker.call(
+                    "IF-ICX", "route",
+                    self._hooks.interconnection_gateway.route,
+                    request, resolution)
+                if partner is None:
+                    return self._refuse(cid, request, PARTNER_UNAVAILABLE,
+                                        "no partner route for a partner target")
+                rights = invoker.call(
+                    "IF-ICX", "rights",
+                    self._hooks.interconnection_gateway.rights,
+                    partner.partner_id)
+                if rights.allowed_call_types and \
+                        request.call_type not in rights.allowed_call_types:
+                    return self._refuse(
+                        cid, request, PARTNER_NOT_PERMITTED,
+                        f"call type {request.call_type!r} is not permitted "
+                        f"with partner {partner.partner_id!r}")
+                signals.append(Signal(SignalType.ROUTE_PARTNER,
+                                      target=partner.gateway,
+                                      detail={"partner_id": partner.partner_id,
+                                              "trust": partner.trust}))
+
             route = None
             if resolution.kind is ResolutionKind.EXTERNAL:
                 route = invoker.call("IF-IWF", "route",
@@ -246,7 +277,22 @@ class SessionManager:
         if decision.recording_required:
             signals.append(Signal(SignalType.START_RECORDING))
 
-        if route is not None:
+        if partner is not None:
+            # Like a routed session: the partner gateway alone, never also a
+            # local fan-out. The resolution carries no local members.
+            session.gateway = partner.gateway
+            session.partner_id = partner.partner_id
+            asserted = self._hooks.interconnection_gateway.map_outbound(
+                request, priority)
+            signals.append(Signal(SignalType.INVITE, target=partner.gateway,
+                                  detail={
+                                      "auto_answer": decision.auto_answer,
+                                      "acknowledgement_required":
+                                          decision.acknowledgement_required,
+                                      "partner_target":
+                                          resolution.resolved_from or request.target,
+                                      "asserted": dict(asserted)}))
+        elif route is not None:
             # A routed session establishes toward the gateway ONLY. It is never
             # also fanned out locally: the resolution carries no members, and
             # doing both would place the same call twice.
@@ -388,15 +434,15 @@ class SessionManager:
                 raise HookContractViolation("GROUP resolution has no group_id")
             if not resolution.members:
                 raise HookContractViolation("GROUP resolution has no members")
-        if resolution.kind is ResolutionKind.EXTERNAL:
+        if resolution.kind in (ResolutionKind.EXTERNAL, ResolutionKind.PARTNER):
             if resolution.members:
                 raise HookContractViolation(
-                    "EXTERNAL resolution must carry no members, found "
-                    f"{len(resolution.members)}")
+                    f"{resolution.kind.value} resolution must carry no members, "
+                    f"found {len(resolution.members)}")
             if not resolution.resolved_from:
                 raise HookContractViolation(
-                    "EXTERNAL resolution must record the foreign target in "
-                    "resolved_from")
+                    f"{resolution.kind.value} resolution must record the target "
+                    "in resolved_from")
         if len(set(resolution.members)) != len(resolution.members):
             raise HookContractViolation("resolution contains duplicate members")
 

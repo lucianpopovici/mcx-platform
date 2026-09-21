@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.2 (draft)
+**Version:** 0.3 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -11,7 +11,7 @@
 
 ## 1. Purpose
 
-PLT-SRS §6 states *what* the five profile hooks must do. This document states
+PLT-SRS §6 and §14A state *what* the six profile hooks must do. This document states
 *how* they are called: the contract each side must honour, the ordering and
 timing of invocations, what every error means, and which invariants the core
 relies on.
@@ -28,8 +28,9 @@ document plus `core/hooks.py`, without reading core source.
 | IF-SES | `SessionPolicy` | core → profile | PLT-HOK-030..033 |
 | IF-BER | `BearerSelector` | core → profile | PLT-HOK-040..043 |
 | IF-IWF | `InterworkingGateway` | core → profile | PLT-HOK-050..052 |
+| IF-ICX | `InterconnectionGateway` | core → profile | PLT-ICX-001..033 |
 
-All five are synchronous, in-process, single-direction calls. No hook calls back
+All six are synchronous, in-process, single-direction calls. No hook calls back
 into the core. There is no profile-initiated interface in this release; the
 runtime events a profile must react to are delivered as hook invocations
 (IF-BER `on_path_event`).
@@ -62,7 +63,7 @@ be handled gracefully: the core fails the session and records the violation
 
 | ID | Rule |
 |---|---|
-| ICD-GEN-010 | The core shall apply a deadline to every hook invocation. Default budgets: IF-IDR 50 ms, IF-PRI 5 ms, IF-SES 5 ms, IF-BER 10 ms, IF-IWF 20 ms. |
+| ICD-GEN-010 | The core shall apply a deadline to every hook invocation. Default budgets: IF-IDR 50 ms, IF-PRI 5 ms, IF-SES 5 ms, IF-BER 10 ms, IF-IWF 20 ms, IF-ICX 20 ms. |
 | ICD-GEN-011 | On deadline expiry the core shall abandon the invocation, fail the session with `hook-timeout`, and record the interface and elapsed time. |
 | ICD-GEN-012 | The core shall not retry a timed-out invocation on the session-establishment path. |
 | ICD-GEN-013 | Budgets are deployment-configurable downward but not upward beyond the §6 latency allowance of PLT-SRS. |
@@ -488,5 +489,6 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.3 | 2026-09-19 | Added IF-ICX (interconnection with partner MC systems) as a sixth hook, with `ResolutionKind.PARTNER`, `partner-unavailable` and `partner-not-permitted`. Scope mapping is label-keyed, ceiling-capped and default-deny; a partner never introduces a scope and is always locally pre-emptible. |
 | 0.2 | 2026-09-19 | §8.1 step 2 made conditional on `ResolutionKind.EXTERNAL`; step 8 branches between local fan-out and gateway routing; `EXTERNAL` added to §3.2 POST-1; `gateway-unavailable` added to §9; ICD-OP-06 and ICD-OP-07 opened. Fixes the defect that made IF-IWF unreachable. |
 | 0.1 | 2026-09-19 | Initial draft |
