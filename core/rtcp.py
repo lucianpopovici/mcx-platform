@@ -41,16 +41,27 @@ class RtcpError(ValueError):
 
 
 class MsgType(IntEnum):
-    REQUEST = 0
-    GRANTED = 1
-    DENY = 2
-    RELEASE = 3
-    IDLE = 4
-    TAKEN = 5
-    REVOKE = 6
-    QUEUE_POSITION_REQUEST = 7
-    QUEUE_POSITION_INFO = 8
-    ACK = 9
+    """RTCP APP subtype values, TS 24.380 table 8.2.2-1.
+
+    These are 1-based in the specification. They were previously 0-based here,
+    which put every floor control message on the wire one subtype low — see the
+    commit that corrected them.
+    """
+
+    REQUEST = 1
+    GRANTED = 2
+    DENY = 3
+    RELEASE = 4
+    IDLE = 5
+    TAKEN = 6
+    REVOKE = 7
+    QUEUE_POSITION_REQUEST = 8
+    QUEUE_POSITION_INFO = 9
+    ACK = 10
+    # Not implemented, reserved so an inbound message decodes rather than
+    # raising "unknown subtype":
+    RELEASE_MULTI_TALKER = 11
+    QUEUED_FLOOR_REQUESTS = 12
 
 
 class FieldId(IntEnum):

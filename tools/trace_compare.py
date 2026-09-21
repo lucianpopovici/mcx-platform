@@ -26,9 +26,9 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 NAME = b"MCPT"
-TYPES = {0: "request", 1: "granted", 2: "deny", 3: "release", 4: "idle",
-         5: "taken", 6: "revoke", 7: "queue-position-request",
-         8: "queue-position-info", 9: "ack"}
+TYPES = {1: "request", 2: "granted", 3: "deny", 4: "release",
+       5: "idle", 6: "taken", 7: "revoke", 8: "queue-position-request",
+       9: "queue-position-info", 10: "ack"}
 FROM_CLIENT = {"request", "release", "queue-position-request", "ack"}
 FROM_SERVER = {"granted", "deny", "idle", "taken", "revoke",
                "queue-position-info"}

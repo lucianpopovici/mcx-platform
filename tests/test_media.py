@@ -38,8 +38,12 @@ PT = 97
 
 
 def test_known_answer_idle_message_bytes():
-    """Hand-assembled, not produced by the encoder under test."""
-    expected = bytes.fromhex("84cc0003" "4d435801" "4d435054" "08020001")
+    """Hand-assembled from TS 24.380 table 8.2.2-1 (subtype 5 = Floor Idle).
+
+    The earlier value was hand-assembled from the same recollection as the
+    encoder, so it agreed with a wrong encoder. See FC-OP-03.
+    """
+    expected = bytes.fromhex("85cc0003" "4d435801" "4d435054" "08020001")
     got = rtcp.encode(rtcp.message(MsgType.IDLE, 0x4D435801, rtcp.f_sequence(1)))
     assert got == expected
 
@@ -50,7 +54,7 @@ def test_known_answer_taken_message_with_padded_string():
             + bytes([5, 2, 0, 1])                       # permission = 1
             + bytes([8, 2, 0, 9]))                      # sequence = 9
     words = (12 + len(body)) // 4 - 1
-    expected = (bytes([0x85, 0xCC]) + struct.pack(">H", words)
+    expected = (bytes([0x86, 0xCC]) + struct.pack(">H", words)
                 + struct.pack(">I", 7) + b"MCPT" + body)
     got = rtcp.encode(rtcp.message(MsgType.TAKEN, 7, rtcp.f_granted_party(uri),
                                    rtcp.f_permission(True), rtcp.f_sequence(9)))
