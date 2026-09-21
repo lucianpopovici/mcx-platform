@@ -413,7 +413,7 @@ not by relaxing its pass criterion.
 | # | Question | Blocks |
 |---|---|---|
 | VP-OP-01 | Which two SIP core implementations satisfy VP1-SIG-001? Interoperability against a single core does not evidence PLT-SIG-001. | VP1-SIG-001 |
-| VP-OP-02 | Does the trace comparator need golden captures from a third-party implementation, or are specification-derived expected flows sufficient for R1? | VP1-FC-002, VP1-CC-003 |
+| VP-OP-02 | ~~Golden captures or specification-derived flows?~~ **DECIDED 2026-09-21: specification-derived accepted.** See PLT-CONF-AUDIT §5. | closed |
 | VP-OP-03 | Confirm the codec set per profile (PLT-SRS OP-06) before VP1-MED-001 can have a pass criterion. | VP1-MED-001 |
 | VP-OP-04 | Is VP1-FC-010 exhaustive over the full state/event product, or over reachable pairs only? Exhaustive is preferable and needs the machine's state space bounded first. | VP1-FC-010 |
 | VP-OP-05 | Define the production indicator referenced by PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008. Three requirements depend on a term not yet specified. | VP1-LOAD-005, VP1-SIG-007 |
