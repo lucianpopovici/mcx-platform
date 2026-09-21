@@ -48,37 +48,52 @@ class MsgType(IntEnum):
     commit that corrected them.
     """
 
-    REQUEST = 1
-    GRANTED = 2
-    DENY = 3
-    RELEASE = 4
-    IDLE = 5
-    TAKEN = 6
-    REVOKE = 7
-    QUEUE_POSITION_REQUEST = 8
-    QUEUE_POSITION_INFO = 9
-    ACK = 10
+    REQUEST = 0                                                 # 00000
+    GRANTED = 1                                                 # x0001
+    DENY = 3                                                    # x0011
+    RELEASE = 4                                                 # x0100
+    IDLE = 5                                                    # x0101
+    TAKEN = 2                                                   # x0010
+    REVOKE = 6                                                  # 00110
+    QUEUE_POSITION_REQUEST = 8                                  # 01000
+    QUEUE_POSITION_INFO = 9                                     # x1001
+    ACK = 10                                                    # 01010
     # Not implemented, reserved so an inbound message decodes rather than
     # raising "unknown subtype":
-    RELEASE_MULTI_TALKER = 11
-    QUEUED_FLOOR_REQUESTS = 12
+    UNICAST_MEDIA_FLOW_CONTROL = 11                             # x1011
+    QUEUED_FLOOR_REQUESTS = 14                                  # x1110
+    RELEASE_MULTI_TALKER = 15                                   # 01111
+    REWOKE_REQUEST = 7                                          # 00111
+
 
 
 class FieldId(IntEnum):
-    FLOOR_PRIORITY = 0
-    DURATION = 1
-    REJECT_CAUSE = 2
-    QUEUE_INFO = 3
-    GRANTED_PARTY = 4
-    PERMISSION_TO_REQUEST = 5
-    USER_ID = 6
-    QUEUE_SIZE = 7
-    SEQUENCE_NUMBER = 8
-    QUEUED_USER_ID = 9
-    SOURCE = 10
-    TRACK_INFO = 11
-    ACKED_MESSAGE_TYPE = 12
-    FLOOR_INDICATOR = 13
+    FLOOR_PRIORITY = 0                                   # Release 13
+    DURATION = 1                                         # Release 13
+    REJECT_CAUSE = 2                                     # Release 13
+    QUEUE_INFO = 3                                       # Release 13
+    GRANTED_PARTY = 4                                    # Release 13
+    PERMISSION_TO_REQUEST = 5                            # Release 13
+    USER_ID = 6                                          # Release 13
+    QUEUE_SIZE = 7                                       # Release 13
+    SEQUENCE_NUMBER = 8                                  # Release 13
+    QUEUED_USER_ID = 9                                   # Release 13
+    SOURCE = 10                                          # Release 13
+    TRACK_INFO = 11                                      # Release 13
+    ACKED_MESSAGE_TYPE = 12                              # Release 13
+    FLOOR_INDICATOR = 13                                 # Release 13
+    AUDIO_SSRC_OF_GRANTED_PARTICIPANT = 14               # Release 13
+    GRANTED_USERS = 15                                   # Release 15
+    LIST_OF_SSRC =	16                                   # Release 15
+    FUNCTIONAL_ALIAS = 17                                # Release 15
+    LIST_OF_FUNCTIONAL_ALIASES = 18                      # Release 15
+    LOCATION = 19                                        # Release 15
+    LIST_OF_LOCATION = 20                                # Release 15
+    QUEUED_FLOOR_REQUESTS_PURPOSE = 21                   # Release 17
+    LIST_OF_QUEUED_USERS = 22                            # Release 17
+    RESPONSE_STATE = 23                                  # Release 17
+    MEDIA_FLOW_CONTROL_INDICATOR = 24                    # Release 17
+    FLOOR_REWOKE_REQUEST_USER_ID = 25                    # Release 19
 
 
 # Fixed-size fields: id -> value length in octets. Others are variable.
