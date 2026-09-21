@@ -8,11 +8,11 @@ profile:
   version: 0.1.0
   description: Generic public-safety MCPTT/MCData deployment
   hooks:
-    identity_resolver: mcx_platform.profiles.mcx.identity:DirectoryResolver
-    priority_policy: mcx_platform.profiles.mcx.priority:TablePriorityPolicy
-    session_policy: mcx_platform.profiles.mcx.session:MCXSessionPolicy
-    bearer_selector: mcx_platform.profiles.mcx.bearer:SinglePathSelector
-    interworking_gateway: mcx_platform.profiles.mcx.iwf:P25TetraGateway
+    identity_resolver: profiles.mcx.hooks:DirectoryResolver
+    priority_policy: profiles.mcx.hooks:TablePriorityPolicy
+    session_policy: profiles.mcx.hooks:MCXSessionPolicy
+    bearer_selector: profiles.mcx.hooks:SinglePathSelector
+    interworking_gateway: profiles.mcx.hooks:P25TetraGateway
 
 urgencies:
   - {id: normal, label: Normal}

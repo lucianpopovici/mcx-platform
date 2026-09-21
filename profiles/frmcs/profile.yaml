@@ -17,11 +17,11 @@ profile:
   version: 0.0.1-stub
   description: Railway FRMCS profile (placeholder values)
   hooks:
-    identity_resolver: mcx_platform.profiles.frmcs.identity:FunctionalResolver
-    priority_policy: mcx_platform.profiles.frmcs.priority:TablePriorityPolicy
-    session_policy: mcx_platform.profiles.frmcs.session:FRMCSSessionPolicy
-    bearer_selector: mcx_platform.profiles.frmcs.bearer:MultiBearerSelector
-    interworking_gateway: mcx_platform.profiles.frmcs.iwf:GSMRGateway
+    identity_resolver: profiles.frmcs.hooks:FunctionalResolver
+    priority_policy: profiles.frmcs.hooks:TablePriorityPolicy
+    session_policy: profiles.frmcs.hooks:FRMCSSessionPolicy
+    bearer_selector: profiles.frmcs.hooks:MultiBearerSelector
+    interworking_gateway: profiles.frmcs.hooks:GSMRGateway
 
 urgencies:
   - {id: normal, label: Normal}
@@ -214,7 +214,8 @@ bearer:
         arp_preemption_vulnerability: true
         redundancy: multipath
         paths:
-          - {id: bearer-a, transport: udp, primary: true, weight: 1, attributes: {}}
+          - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
+          - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
     - match: {call_type: "*", media: data}
       decision:
         qos_identifier: 70

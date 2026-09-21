@@ -1,7 +1,7 @@
 """Profile hook interfaces.
 
-These five Protocols are the ONLY places where MCX and FRMCS behaviour is
-allowed to diverge. Nothing below this line may import a profile package,
+These five Protocols are the ONLY places where deployment-specific behaviour
+is allowed to diverge. Nothing below this line may import a profile package,
 and no core module may branch on the profile name.
 
 Core rule: call types, urgency labels, application ids and pre-emption
@@ -19,12 +19,12 @@ from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
 # Opaque identifiers. Profile-defined vocabulary, core-defined plumbing.
 # --------------------------------------------------------------------------
 
-MCServiceId = str  # e.g. "sip:driver-4711@rail.example"
+MCServiceId = str  # e.g. "sip:user-4711@example.org"
 GroupId = str
 TargetRef = str  # service id, group id, or a functional identity
-CallTypeId = str  # "private", "prearranged-group", "railway-emergency", ...
-ApplicationId = str  # FRMCS application category, or None for plain MCX voice
-UrgencyId = str  # "normal", "emergency", "imminent-peril", "rec", ...
+CallTypeId = str  # profile-declared, e.g. "private", "prearranged-group"
+ApplicationId = str  # profile-declared application category, or None
+UrgencyId = str  # profile-declared, e.g. "normal", "emergency"
 PreemptionScope = str  # sessions only arbitrate against the same scope
 
 
@@ -56,9 +56,9 @@ class ResolutionKind(Enum):
 class LocationContext:
     """Whatever the access network and the client reported.
 
-    Generic MCX uses cell/TAI. FRMCS location-dependent addressing uses
-    track section, direction and train id, carried in `attributes` so the
-    core never learns railway vocabulary.
+    Cell and tracking area are the common cases. A profile needing richer
+    location semantics carries them in `attributes`, so the core never learns a
+    deployment's location vocabulary.
     """
 
     cell_id: Optional[str] = None
@@ -146,7 +146,7 @@ class BearerDecision:
 
 @dataclass(frozen=True)
 class InterworkingRoute:
-    system: str  # "p25", "tetra", "gsm-r", ...
+    system: str  # profile-declared legacy system identifier
     gateway: str
     attributes: Mapping[str, str] = field(default_factory=dict)
 
@@ -160,9 +160,9 @@ class InterworkingRoute:
 class IdentityResolver(Protocol):
     """Hook 1. Turns a target reference into concrete members.
 
-    Plain MCX looks up a directory. FRMCS resolves functional identities and
-    location-dependent addresses, which is why `location` is passed in and
-    why bindings are mutable at runtime.
+    The simplest implementation is a directory lookup. A profile may instead
+    resolve role-based or location-dependent identities, which is why `location`
+    is passed in and why bindings are mutable at runtime.
     """
 
     def resolve(
@@ -215,7 +215,7 @@ class SessionPolicy(Protocol):
 
 @runtime_checkable
 class BearerSelector(Protocol):
-    """Hook 4. QoS mapping and, for FRMCS, multi-bearer path selection."""
+    """Hook 4. QoS mapping and, where a profile requires it, multi-path selection."""
 
     def select(
         self,
@@ -231,7 +231,7 @@ class BearerSelector(Protocol):
 
 @runtime_checkable
 class InterworkingGateway(Protocol):
-    """Hook 5. Legacy system routing: P25/TETRA for MCX, GSM-R for FRMCS."""
+    """Hook 5. Routing to a non-MC system, where a profile declares one."""
 
     def route(
         self, request: SessionRequest, resolution: Resolution
