@@ -38,6 +38,7 @@ change set.
 ```bash
 python3 -m pytest tests/ -q                   # must stay green: 280 tests
 python3 tools/check_boundary.py --root .      # must stay 18/18
+MCX_PROFILE=mcx MCX_IDMS=stub MCX_DATA_DIR=/tmp/mcx python3 -m service   # run it
 MCX_PROFILE=mcx     python3 -m pytest tests/test_conformance.py -q
 MCX_PROFILE=frmcs   python3 -m pytest tests/test_conformance.py -q
 MCX_PROFILE=utility python3 -m pytest tests/test_conformance.py -q
@@ -56,6 +57,7 @@ core/invoke.py      the hook invocation boundary: deadlines, error mapping
 core/session.py     the establishment sequence (PLT-ICD-001 §8.1)
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
+service/            the host process: `python -m service` (env config, SQLite store, HTTP)
 profiles/common/    shared table-driven hook implementations
 profiles/{mcx,frmcs,utility}/
 ```

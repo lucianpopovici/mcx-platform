@@ -417,6 +417,10 @@ not by relaxing its pass criterion.
 | VP-OP-03 | Confirm the codec set per profile (PLT-SRS OP-06) before VP1-MED-001 can have a pass criterion. | VP1-MED-001 |
 | VP-OP-04 | Is VP1-FC-010 exhaustive over the full state/event product, or over reachable pairs only? Exhaustive is preferable and needs the machine's state space bounded first. | VP1-FC-010 |
 | VP-OP-05 | Define the production indicator referenced by PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008. Three requirements depend on a term not yet specified. | VP1-LOAD-005, VP1-SIG-007 |
+| SVC-OP-01 | The TS 24.481 schema is not in the repository. Group documents are rendered as RFC 4826 `list-service` XML and checked for well-formedness and round-trip to the configuration only; namespaces, extensions and media type are unconfirmed. Obtain the schema and validate against it. | VP1-DOC-001 ("schema-valid" clause) |
+| SVC-OP-02 | Restart semantics for sessions that were `established` when the process died: records survive, but signalling and media state do not. Should they be released with a recovery cause, or resumed? Needs the SIP transport (task 2) to answer. | VP1-OAM-005 (beyond "no record lost") |
+| SVC-OP-03 | Group configuration has no home in the profile schema, so it is read from deployment data (`MCX_GROUPS_FILE`). Confirm that is intended; "matches the profile's group configuration" in VP1-DOC-001 is otherwise unsatisfiable literally. | VP1-DOC-001 |
+| SVC-OP-04 | No stub identity provider existed in the code. `MCX_IDMS=stub` is introduced as the explicit selector; it is required (no default) and refused under the production indicator. | VP1-SIG-007 |
 
 ---
 
