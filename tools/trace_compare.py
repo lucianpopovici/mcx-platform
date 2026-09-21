@@ -52,27 +52,52 @@ FIELDS = {0: ("priority", 2), 1: ("duration", 2), 2: ("reject-cause", None),
           # a conformant Floor Taken carrying it was reported as "field id 14".
           14: ("ssrc", 6)}
 # message -> (required, permitted-in-addition)
+#
+# TS 24.380 message content tables, clauses 8.2.4 to 8.2.17, extracted from all
+# of Rel-15, Rel-17, Rel-19 and Rel-20 (PLT-CONF-AUDIT CA-13). Before that this
+# table had never been checked against the specification at all, and it was
+# wrong in both directions: it required fields the messages do not define, and
+# omitted most of what they permit, so it reported CONFORMANT traffic as
+# deviating.
+#
+# Two rules shape what is listed.
+#
+# ON-NETWORK ONLY. This platform is an on-network floor control server
+# (PLT-CONF-AUDIT 3.2 -- it runs the T2/T8/T20 server timers). Fields the
+# specification marks "only applicable in off-network" are therefore NOT
+# permitted, even though the message tables draw them: User ID in most
+# messages, and Queue Size, Queued User ID, Queue Info and SSRC-of-queued in
+# Floor Granted. Listing them would hide a genuine off-network leak.
+#
+# PERMITTED IS THE UNION ACROSS RELEASES. `ssrc` reaches Floor Granted and
+# Floor Taken in Rel-19 and `location` reaches Floor Ack in Rel-17. Permitting
+# a superset can only miss a deviation, never invent one; narrowing it per
+# release is CA-14.
+#
+# `sequence` is in exactly two messages. Clause 8.2.3.10: the Message Sequence
+# Number "is used to bind a number of Floor Taken or bind a number of Floor
+# Idle messages together", and it appears in those two tables and no others in
+# every release from Rel-15 on. It was previously required in four more.
 SHAPE = {
-    "request": ({"priority"}, {"user-id", "track-info", "sequence"}),
-    "release": (set(), {"track-info", "sequence", "user-id"}),
-    "queue-position-request": (set(), {"track-info", "sequence", "user-id"}),
-    "ack": ({"acked-type"}, {"sequence", "user-id"}),
-    "granted": ({"priority", "duration", "sequence"},
-                {"queue-info", "granted-party", "track-info", "ssrc",
-                 "user-id", "queue-size", "queued-user-id",
-                 "floor-indicator"}),
-    "deny": ({"reject-cause", "sequence"}, {"track-info"}),
-    "idle": ({"sequence"}, {"track-info"}),
-    # Table 8.2.9-1 permits nine more fields than were listed here; the
-    # comparator reported a conformant Floor Taken carrying any of them as a
-    # deviation. Only the ones this platform can encode are added: the rest
-    # are CA-13 (see PLT-CONF-AUDIT), because SHAPE has never been verified
-    # against the message content tables as a whole.
+    # client -> server
+    "request": ({"priority"},
+                {"track-info", "floor-indicator", "functional-alias",
+                 "location"}),
+    "release": (set(), {"track-info", "floor-indicator"}),
+    "queue-position-request": (set(), {"track-info"}),
+    "ack": ({"acked-type"}, {"source", "track-info", "location"}),
+
+    # server -> client
+    "granted": ({"priority", "duration"},
+                {"track-info", "floor-indicator", "ssrc"}),
+    "deny": ({"reject-cause"}, {"track-info", "floor-indicator"}),
+    "idle": ({"sequence"}, {"track-info", "floor-indicator"}),
     "taken": ({"granted-party", "sequence"},
-              {"permission", "track-info", "ssrc", "user-id",
-               "floor-indicator"}),
-    "revoke": ({"reject-cause", "sequence"}, {"track-info"}),
-    "queue-position-info": ({"queue-info", "sequence"}, {"track-info"}),
+              {"permission", "track-info", "floor-indicator", "ssrc",
+               "functional-alias", "location"}),
+    "revoke": ({"reject-cause"}, {"track-info", "floor-indicator"}),
+    "queue-position-info": ({"queue-info"},
+                            {"track-info", "floor-indicator"}),
 }
 
 

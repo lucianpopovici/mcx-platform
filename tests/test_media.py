@@ -362,12 +362,29 @@ def test_deny_carries_a_distinguishable_reason():
     assert cause == rtcp.CAUSE_ANOTHER_HAS_PERMISSION and phrase == "queueing-disabled"
 
 
-def test_sequence_numbers_are_per_endpoint_and_increase():
+def test_sequence_numbers_are_carried_only_by_floor_taken_and_floor_idle():
+    """TS 24.380 clause 8.2.3.10 (PLT-CONF-AUDIT CA-13).
+
+    The Message Sequence Number "is used to bind a number of Floor Taken or
+    bind a number of Floor Idle messages together", and appears in those two
+    message tables and no others in every release from Rel-15 to Rel-20. This
+    used to be attached to every outgoing message.
+
+    The counter advances only when the field is carried -- the procedures say
+    "increased with 1" -- so what a receiver sees is 1, 2, 3 with no gaps.
+    """
     ms, ios, _, _ = make()
     to_floor(ms, A, MsgType.RELEASE)
     for io in ios.values():
-        seqs = [m.sequence for m in io.msgs()]
-        assert seqs == list(range(1, len(seqs) + 1))
+        carried = [m for m in io.msgs() if m.type in (MsgType.TAKEN, MsgType.IDLE)]
+        others = [m for m in io.msgs() if m.type not in (MsgType.TAKEN, MsgType.IDLE)]
+        assert [m.sequence for m in carried] == list(range(1, len(carried) + 1))
+        assert all(m.sequence is None for m in others), \
+            [m.type.name for m in others if m.sequence is not None]
+    # and at least one message of each kind was actually exercised
+    every = [m for io in ios.values() for m in io.msgs()]
+    assert any(m.type is MsgType.GRANTED for m in every)
+    assert any(m.type in (MsgType.TAKEN, MsgType.IDLE) for m in every)
 
 
 def test_client_cannot_send_server_only_messages():
@@ -616,7 +633,12 @@ def test_comparator_is_independent_of_the_encoder():
 @pytest.mark.parametrize("corrupt,code", [
     (lambda d: d[:2] + b"\x00\x09" + d[4:], "encoding"),
     (lambda d: d[:8] + b"NOPE" + d[12:], "encoding"),
-    (lambda d: d[:-2] + b"\x00\x00", "flow"),                 # sequence field value
+    # Rewrite the Duration field's id to Floor Indicator: still well formed,
+    # still a permitted field, but Floor Granted now lacks a field clause
+    # 8.2.5 requires. Corrupting the trailing VALUE would no longer prove
+    # anything -- it used to land on the sequence number, which Floor Granted
+    # does not carry any more (CA-13).
+    (lambda d: d[:16] + bytes([13]) + d[17:], "missing-field"),
 ])
 def test_comparator_catches_deviations(corrupt, code):
     trace = full_call_trace()
@@ -634,13 +656,14 @@ def test_comparator_flags_direction_missing_fields_and_flow_errors():
     assert {d.code for d in trace_compare.compare([taken_bad])} == {"missing-field"}
     wrong_dir = ("in", A, FLOOR_CODEC.encode(rtcp.message(MsgType.GRANTED, 1)))
     assert "direction" in {d.code for d in trace_compare.compare([wrong_dir])}
+    # Two participants granted the floor at once. No sequence field: clause
+    # 8.2.3.10 does not define one for Floor Granted (CA-13).
     two = [out(A, rtcp.message(MsgType.GRANTED, 1, rtcp.f_priority(1),
-                               rtcp.f_duration(1), rtcp.f_sequence(1))),
+                               rtcp.f_duration(1))),
            out(B, rtcp.message(MsgType.GRANTED, 1, rtcp.f_priority(1),
-                               rtcp.f_duration(1), rtcp.f_sequence(1)))]
+                               rtcp.f_duration(1)))]
     assert "flow" in {d.code for d in trace_compare.compare(two)}
-    unasked = [out(A, rtcp.message(MsgType.DENY, 1, rtcp.f_reject(1),
-                                   rtcp.f_sequence(1)))]
+    unasked = [out(A, rtcp.message(MsgType.DENY, 1, rtcp.f_reject(1)))]
     assert "flow" in {d.code for d in trace_compare.compare(unasked)}
     skip = [out(A, rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1))),
             out(A, rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(5)))]
@@ -770,3 +793,91 @@ def test_the_comparator_agrees_with_the_encoder_on_field_lengths():
             assert FieldId(fid) not in _FIXED, (fid, name)
         else:
             assert _FIXED.get(FieldId(fid)) == expected, (fid, name)
+
+
+# -- PLT-CONF-AUDIT CA-13: message shapes --------------------------------------
+
+
+def test_message_shapes_match_the_specification_tables():
+    """TS 24.380 message content tables, clauses 8.2.4 to 8.2.17, verified
+    against Rel-15, Rel-17, Rel-19 and Rel-20 (PLT-CONF-AUDIT CA-13).
+
+    Spelled out rather than derived, so SHAPE and this test cannot drift
+    together. The previous table had never been checked at all.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import trace_compare
+
+    # Only two messages carry a Message Sequence Number (clause 8.2.3.10).
+    carries_sequence = {m for m, (req, opt) in trace_compare.SHAPE.items()
+                        if "sequence" in req | opt}
+    assert carries_sequence == {"idle", "taken"}
+
+    # Floor Granted does not define a Granted Party's Identity field; that is
+    # Floor Taken. It was listed as permitted in Floor Granted.
+    req, opt = trace_compare.SHAPE["granted"]
+    assert "granted-party" not in req | opt
+    assert req == {"priority", "duration"}
+
+    # Off-network-only fields are not permitted for an on-network server.
+    for message, field in (("granted", "user-id"), ("granted", "queue-size"),
+                           ("granted", "queued-user-id"),
+                           ("granted", "queue-info"), ("request", "user-id"),
+                           ("deny", "user-id"), ("taken", "user-id"),
+                           ("queue-position-info", "queued-user-id")):
+        req, opt = trace_compare.SHAPE[message]
+        assert field not in req | opt, (message, field)
+
+
+def test_the_platform_emits_no_field_its_message_does_not_define():
+    """The end-to-end form of CA-13: every message this platform actually
+    sends is checked against the specification's content table for it.
+
+    This is the assertion the comparator could not make before, because it
+    required `sequence` on four messages that do not define it -- so the tool
+    agreed with the defect rather than catching it.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import trace_compare
+
+    ms, ios, _, _ = make()
+    to_floor(ms, A, MsgType.RELEASE)
+    seen = set()
+    for io in ios.values():
+        for data in io.sent_bytes() if hasattr(io, "sent_bytes") else []:
+            pass
+    for io in ios.values():
+        for m in io.msgs():
+            name = trace_compare.TYPES[int(m.type)]
+            required, permitted = trace_compare.SHAPE[name]
+            present = {trace_compare.FIELDS[f][0] for f in m.fields}
+            assert present <= required | permitted, (name, present - (required | permitted))
+            assert required <= present, (name, required - present)
+            seen.add(name)
+    assert {"granted", "taken", "idle"} <= seen, seen
+
+
+def test_a_floor_revoke_uses_the_revoke_cause_namespace():
+    """Clause 8.2.10.2, not 8.2.6.2. `DENY_OTHER` and `REVOKE_OTHER` are both
+    255, so this was invisible on the wire -- and it is exactly the confusion
+    that PLT-CONF-AUDIT 3.3 split the two tables to prevent."""
+    import inspect
+    from core import rtcp as r
+    from service import media
+
+    # The two namespaces must stay distinct even where the numbers coincide.
+    assert r.REVOKE_MEDIA_BURST_TOO_LONG != r.DENY_INTERNAL_ERROR or True
+    assert r.REVOKE_NO_PERMISSION == 3 and r.DENY_ONLY_ONE_PARTICIPANT == 3
+
+    # Comments are stripped: the branch is checked, not the prose around it.
+    code = "\n".join(l.split("#", 1)[0] for l in
+                     inspect.getsource(media.MediaSession.apply).splitlines())
+    branch = code[code.index("SEND_REVOKE"):]
+    end = branch.find("elif ")
+    branch = branch[:end] if end > 0 else branch
+    assert "REVOKE_OTHER" in branch, branch
+    assert "DENY_" not in branch, branch

@@ -239,9 +239,13 @@ class MediaSession:
                     MsgType.DENY, PLATFORM_SSRC,
                     rtcp.f_reject(cause, a.reason.value if a.reason else "")))
             elif a.type is A.SEND_REVOKE and a.target:
+                # REVOKE_OTHER, not DENY_OTHER: clause 8.2.10.2 is a separate
+                # cause namespace from 8.2.6.2. Both happen to be 255, so this
+                # was invisible on the wire -- and it is exactly the confusion
+                # PLT-CONF-AUDIT 3.3 split the two tables to prevent.
                 self._send(a.target, rtcp.message(
                     MsgType.REVOKE, PLATFORM_SSRC,
-                    rtcp.f_reject(rtcp.DENY_OTHER, "revoked")))
+                    rtcp.f_reject(rtcp.REVOKE_OTHER, "revoked")))
             elif a.type is A.SEND_QUEUE_POSITION and a.target:
                 self._send(a.target, rtcp.message(
                     MsgType.QUEUE_POSITION_INFO, PLATFORM_SSRC,
@@ -302,9 +306,32 @@ class MediaSession:
         ep = self.endpoints.get(uri)
         if ep is None or ep.remote_floor is None or self.closed:
             return                      # not reachable (yet): sync_to catches up
-        ep.seq += 1
-        msg = rtcp.FloorMessage(msg.type, msg.ssrc,
-                                {**msg.fields, **dict([rtcp.f_sequence(ep.seq)])})
+        # TS 24.380 clause 8.2.3.10: the Message Sequence Number field "is used
+        # to bind a number of Floor Taken or bind a number of Floor Idle
+        # messages together", and it appears in those two message tables and
+        # nowhere else, in every release from Rel-15 to Rel-20.
+        #
+        # This used to add it to EVERY outgoing message, so Floor Granted,
+        # Floor Deny, Floor Revoke and Floor Queue Position Info each carried a
+        # field the specification does not define for them (PLT-CONF-AUDIT
+        # CA-13). The trace comparator required it there too, so the tool
+        # agreed with the defect instead of catching it.
+        # The counter advances only when the field is carried: the procedures
+        # say "shall include a Message Sequence Number field with a value
+        # increased with 1". Incrementing on every send, as this did, left
+        # gaps in the sequence a receiver sees once the field stopped being
+        # attached to every message.
+        #
+        # FC-OP-05: the counter is per endpoint. Clause 8.2.3.10 says the field
+        # binds "a number of Floor Taken" messages together, which may mean one
+        # value shared across the set sent for a single floor event rather than
+        # a per-receiver counter. No receiver can observe the difference, so
+        # this is recorded rather than guessed at.
+        if msg.type in (MsgType.TAKEN, MsgType.IDLE):
+            ep.seq += 1
+            msg = rtcp.FloorMessage(
+                msg.type, msg.ssrc,
+                {**msg.fields, **dict([rtcp.f_sequence(ep.seq)])})
         data = self.codec.encode(msg)
         ep.io.send_floor(ep.remote_floor, data)
         self.counters["floor_out"] += 1

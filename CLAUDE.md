@@ -101,11 +101,18 @@ disabled; `tests/test_icx.py` has worked examples.
 
 ## Protocol constants
 
-Six of the seven constant sets checked against their specification have been
-wrong. The later defects were not wrong values but **absent rules**: eleven
+Seven of the eight constant sets checked against their specification have
+been wrong. The later defects were not wrong values but **absent rules**: eleven
 RTCP field ids had no length constraint at all, so `decode` accepted them at
 any length. A wrong value fails the first time it meets a conformant peer; a
-missing rule never fails, it just accepts what it should not. `docs/PLT-CONF-AUDIT.md` records
+missing rule never fails, it just accepts what it should not.
+
+**`tools/trace_compare.py` does not import `core/`, and that is the point.**
+It is the independent check on the encoder. Structural independence is not
+epistemic independence, though: both were once written from the same
+recollection and shared the same wrong belief about which messages carry a
+Message Sequence Number, so the tool endorsed the defect. When you change one,
+derive the change from the specification, not from the other. `docs/PLT-CONF-AUDIT.md` records
 what was checked, what it was, and what is still unverified.
 
 **Before you add or change a protocol constant**, read it from the documents in

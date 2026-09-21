@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.6
+**Version:** 0.7
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -18,7 +18,7 @@ consistency check only".
 That is the circular-validation trap, and it was correct. The first constant set
 ever checked against a real specification was wrong, and so was the second.
 
-**Six of the seven constant sets checked have contained defects.** The one
+**Seven of the eight constant sets checked have contained defects.** The one
 exception, the floor control timer defaults, is recorded in 4.11 as
 prominently as the failures. That is the prior to carry into the items still
 unverified in §5, and it is strong enough that "probably fine" should not be
@@ -601,17 +601,104 @@ full extraction. Until that is done, a clean comparator run means less than it
 appears to, which is why `VP1-FC-002` stays open — now for a sharper reason
 than "the constants are unverified".
 
+### 4.16 CA-13 — the platform was sending a field its messages do not define
+
+**Source:** TS 24.380 message content tables, clauses 8.2.4 to 8.2.17, and
+clause 8.2.3.10, extracted from Rel-15, Rel-17, Rel-19 and Rel-20.
+
+CA-13 was opened as a defect in a verification tool. It turned out to be a
+defect in the platform that the tool was **agreeing with**.
+
+Clause 8.2.3.10 states the Message Sequence Number field "is used to bind a
+number of Floor Taken or bind a number of Floor Idle messages together", and
+it appears in exactly those two message tables, in every release from Rel-15
+to Rel-20. `service/media.py` attached it to **every outgoing message**, so
+Floor Granted, Floor Deny, Floor Revoke and Floor Queue Position Info each
+carried a field the specification does not define for them.
+
+`SHAPE` in `tools/trace_compare.py` **required** it on four of those same
+messages. So the comparator did not merely fail to catch the defect — it
+would have flagged the corrected behaviour as a deviation.
+
+This is FC-OP-03's warning arriving in its most complete form. The two
+artefacts were structurally independent (the comparator does not import
+`core.rtcp`) and still shared a false belief, because both were written by
+the same hand from the same recollection. **Structural independence is not
+epistemic independence, and only a specification breaks the tie.**
+
+**Corrected:** the field is attached to Floor Taken and Floor Idle only, and
+the counter advances only when it is carried — the procedures say "shall
+include a Message Sequence Number field with a value increased with 1", so
+incrementing per message left gaps in what a receiver sees.
+
+### 4.17 CA-13b — `SHAPE` was wrong in both directions
+
+Rewritten from the message content tables. It had never been checked against
+them at all, and two rules govern what belongs:
+
+**On-network only.** This platform is an on-network floor control server
+(§3.2, the T2/T8/T20 timers). The specification marks several fields "only
+applicable in off-network": User ID in most messages, and Queue Size, Queued
+User ID, Queue Info and SSRC-of-queued in Floor Granted. `SHAPE` permitted
+them, which would have concealed a genuine off-network leak.
+
+**Fields that belong to a different message.** `SHAPE` permitted
+`granted-party` in Floor Granted. Granted Party's Identity is a Floor **Taken**
+field; table 8.2.5-1 does not list it.
+
+And in the other direction, table 8.2.9-1 permits a Floor Taken to carry Floor
+Indicator, Audio SSRC, Functional Alias, List of Granted Users, Location and
+List of Locations — `SHAPE` listed none of them, so a conformant Floor Taken
+carrying any one was reported as deviating.
+
+### 4.18 A Deny cause was being sent in a Floor Revoke
+
+Found while reading the send path. `SEND_REVOKE` built its Reject Cause with
+`DENY_OTHER` rather than `REVOKE_OTHER`.
+
+Both constants are 255, so **nothing was wrong on the wire and no test could
+have caught it by observation**. It is recorded because it is precisely the
+confusion §3.3 split the two tables to prevent, and because the next person to
+change that line would have picked the neighbouring Deny cause — where the
+numbers do not coincide, and a revoked talker is told the server had an
+internal error.
+
+Pinned by a test that reads the branch with comments stripped.
+
+### 4.19 What this leaves
+
+`VP1-FC-002` is no longer blocked on an unverified comparator. Two things
+remain, both recorded rather than assumed:
+
+- **CA-14:** `SHAPE` permits the union of fields across Rel-15 to Rel-20
+  rather than narrowing per release. A superset can only miss a deviation,
+  never invent one, so this is a sensitivity limit and not a false-positive
+  source. Narrowing it means giving the comparator a release, which it
+  currently has no way to know.
+- **FC-OP-05:** the sequence counter is per endpoint. Clause 8.2.3.10 says the
+  field binds "a number of Floor Taken" messages together, which may mean one
+  value shared across the set sent for a single floor event. No receiver can
+  observe the difference, so it is recorded rather than guessed at.
+
+One observation that is not a defect: the platform never sends a **Floor
+Indicator** field, whose bitmap (clause 8.2.3.15-2) carries "Emergency call",
+"Imminent peril call", "Broadcast group call" and "Queueing supported". The
+specification does not require it, so this is conformant — but a platform
+whose purpose is priority and emergency handling is not signalling any of that
+in the floor layer. Recorded as **FC-OP-06**.
+
 ---
 
 ## 5. NOT verified — the work that remains
 
-CA-01 through CA-06 and CA-11 are closed. What is left, ordered by
-consequence:
+CA-01 through CA-06, CA-11 and CA-13 are closed. What is left, ordered
+by consequence:
 
 | # | What | Where to look | Status |
 |---|---|---|---|
 | CA-03 | Field value lengths, `core/rtcp.py` | TS 24.380 clause 8.2.3 | **Closed.** See 4.12-4.14. |
-| CA-13 | `SHAPE` in `tools/trace_compare.py`: which fields each message may carry | TS 24.380 clauses 8.2.4-8.2.17 | **Open.** Demonstrably incomplete — the comparator reports conformant traffic as deviating. Now the only thing holding `VP1-FC-002`. |
+| CA-13 | Message shapes, `tools/trace_compare.py` and the send path | TS 24.380 clauses 8.2.4-8.2.17 | **Closed.** See 4.16-4.19. It was a platform defect, not only a tool defect. |
+| CA-14 | Per-release narrowing of `SHAPE` | TS 24.380, all releases | **Open, low consequence.** The comparator permits the union across releases; a superset can miss a deviation but cannot invent one. |
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all releases | **Open.** The floor control layer is release-parameterised; the SIP layer has not been examined at all. REL-OP-01, PLT-REL-009. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
@@ -627,7 +714,7 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-**Seven constant sets have now been checked against a primary source. Six
+**Eight constant sets have now been checked against a primary source. Seven
 were wrong; one was right.** That is the prior for everything in the table
 above — not a certainty of defect, but nowhere near a presumption of
 correctness.
@@ -644,10 +731,11 @@ correctness.
   against the specification for the first time, and it was wrong in four
   independent ways — Warning codes, Warning shape, Accept-Contact, and
   Answer-Mode branches.
-- `VP1-FC-002` stays **OPEN**, and CA-13 is now the only thing holding it.
-  The reason has sharpened twice: it began as "the constants are unverified",
-  became "the field lengths are unverified", and is now "the comparator flags
-  conformant traffic as deviating, so a clean run proves less than it looks".
+- `VP1-FC-002` can now be **attempted**. Every constant the comparator and the
+  encoder share has been checked against TS 24.380, and the two were corrected
+  from the specification separately, so agreement between them is evidence
+  rather than a shared assumption. What remains is running it against a real
+  capture, which is a test-environment question rather than a conformance one.
 - `VP-OP-02` (specification-derived expected flows) is now carrying weight it
   could not carry before: the flows are derived from the documents in
   `docs/3GPP/`, not from recollection.
@@ -658,11 +746,14 @@ correctness.
 
 ## 7. Recommendation
 
-**CA-13 is the last item closable from the documents already in this
-repository**, and it is now the only thing holding `VP1-FC-002` and, through
-it, R1's exit criterion. The method is the one that closed CA-03: the message
-content tables in clauses 8.2.4 to 8.2.17 are ASCII art, but the field names
-inside them extract cleanly, and the prose beneath says which are conditional.
+**Nothing further can be closed from the documents in this repository.**
+CA-14 and FC-OP-05 are open but low-consequence and both are recorded with
+their reasoning. Everything else needs a document this project does not have.
+
+**CA-12 is now the largest open item by consequence**: the TS 24.379
+signalling layer has never been examined for release dependence, while the
+floor control layer now is. The same extraction method applies and the
+document is already here.
 
 CA-07 through CA-10 need four documents this project does not have. CA-08
 (OMA XDM Group) is the only one with a verification case behind it.
@@ -679,6 +770,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 0.7 | 2026-09-21 | CA-13 closed, and it was a platform defect rather than only a tool defect: the Message Sequence Number was attached to every outgoing message, where clause 8.2.3.10 defines it for Floor Taken and Floor Idle alone — and the trace comparator REQUIRED it on four messages that do not define it, so the tool agreed with the defect instead of catching it. `SHAPE` rewritten from the message content tables. A Deny cause was being sent in a Floor Revoke. New CA-14, FC-OP-05, FC-OP-06. |
 | 0.6 | 2026-09-21 | CA-03 closed against TS 24.380 clause 8.2.3, read from the prose beneath each field diagram. Eleven of twenty-six field ids had no length rule at all; Source was in the wrong class and SSRC is 6 octets, not the 4 that would have been guessed. Track Info was being UTF-8 validated, so a conformant Floor Request carrying it was rejected as malformed. The field framing was checked and found already correct. New CA-13: the trace comparator's message shapes are incomplete and flag conformant traffic. |
 | 0.5 | 2026-09-21 | CA-11 closed by making the 3GPP release a deployment parameter (`MCX_RELEASE`), on an axis independent of the profile. Per-release tables for subtypes, field IDs and revoke causes extracted mechanically from all eight published versions of TS 24.380. Corrects v0.3: subtype 14 changed meaning at Rel-18, not Rel-19. New CA-12: the TS 24.379 layer is not release-parameterised. |
 | 0.4 | 2026-09-21 | CA-05 closed against TS 24.380 table 11.1.3-1: all three timer defaults correct — the first clean set in six. The clause reference published in 0.3 was itself written from recollection and was wrong; corrected. |
