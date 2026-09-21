@@ -19,11 +19,13 @@ urgencies:
   - {id: normal, label: Normal}
   - {id: imminent-peril, label: Imminent peril}
   - {id: emergency, label: Emergency}
+  - {id: elevated, label: Elevated}
 
 preemption_scopes:
   - {id: public-safety, label: Public safety}
 
-applications: []
+applications:
+  - {id: coordination, label: Multi-agency coordination, media: [voice], safety_relevant: false}
 
 call_types:
   - id: private
@@ -110,6 +112,24 @@ call_types:
       max_queue_depth: 0
       timers_ms: {}
 
+  - id: coordination-group
+    label: Multi-agency coordination call
+    media: [voice]
+    session_model: on-demand
+    urgency: elevated
+    application: coordination
+    auto_answer: false
+    acknowledgement_required: true
+    recording_required: true
+    max_participants: 50
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: true
+      max_queue_depth: 6
+      timers_ms: {T201: 100, T203: 3500, T205: 100, T206: 100}
+
 identity:
   domains: ["mcptt.example"]
   functional: []          # generic MCX: directory lookup only
@@ -133,6 +153,14 @@ priority:
         preemption_vulnerability: false
         floor_priority: 200
         label: imminent-peril
+    - match: {call_type: "*", application: "*", urgency: elevated}
+      decision:
+        level: 50
+        scope: public-safety
+        preemption_capability: false
+        preemption_vulnerability: true
+        floor_priority: 150
+        label: elevated
     - match: {call_type: private, application: "*", urgency: "*"}
       decision:
         level: 30
