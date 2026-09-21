@@ -556,3 +556,39 @@ def test_ack_when_idle_is_ignored():
     establish(fc, "a")
     release(fc, "a")
     assert _ack(fc, "a") == ()
+
+
+# -- PLT-CONF-AUDIT CA-05 ------------------------------------------------------
+
+
+def test_default_timer_values_match_the_specification_table():
+    """TS 24.380 table 11.1.3-1 (floor control server procedures), V17.7.0,
+    corroborated against V20.0.0.
+
+    The three values are spelled out rather than imported, so that changing a
+    default cannot move the code and the assertion together.
+
+    Note what the specification actually says for T2: "Default **maximum**
+    value: 30 seconds", and it is obtained from <time-limit> of <transmit-time>
+    in TS 24.484 -- not from <fc-timers-counters> like T8 and T20. A deployment
+    configuring it is setting a talk-time limit, not a retry interval.
+    """
+    from core.floor import DEFAULT_TIMERS_MS
+    assert dict(DEFAULT_TIMERS_MS) == {
+        "T2": 30000,      # Default maximum value: 30 seconds
+        "T20": 1000,      # Default value: 1 second
+        "T8": 1000,       # Default value: 1 second
+    }
+
+
+def test_the_known_timer_set_matches_the_server_procedures_table():
+    """Every timer in table 11.1.3-1 that the platform can accept, and no
+    off-network one. T11 and T12 are the dual-talker pair; they are absent
+    deliberately, because floor override is not implemented -- a profile
+    declaring one would be configuring a machine that does not exist.
+    """
+    from core.validation import FLOOR_TIMERS
+    assert set(FLOOR_TIMERS) == {"T1", "T2", "T3", "T4", "T7", "T8", "T20"}
+    assert not {"T11", "T12"} & set(FLOOR_TIMERS)
+    # off-network participant timers stay rejected (PLT-CONF-AUDIT 3.2)
+    assert not {"T201", "T203", "T205", "T206", "T207", "T230"} & set(FLOOR_TIMERS)

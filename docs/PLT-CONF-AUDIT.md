@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.3
+**Version:** 0.4
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -18,10 +18,11 @@ consistency check only".
 That is the circular-validation trap, and it was correct. The first constant set
 ever checked against a real specification was wrong, and so was the second.
 
-**Five of five constant sets checked have contained defects.** Not one has
-survived contact with its specification. That is the prior to carry into the
-items still unverified in §5, and it is now strong enough that "probably fine"
-should not be said about any of them.
+**Five of the six constant sets checked have contained defects.** The one
+exception, the floor control timer defaults, is recorded in 4.11 as
+prominently as the failures. That is the prior to carry into the items still
+unverified in §5, and it is strong enough that "probably fine" should not be
+said about any of them.
 
 ---
 
@@ -436,15 +437,51 @@ that imports the constant it is pinning is not a conformance test.**
 
 ---
 
+### 4.11 CA-05 — the first constant set that was already right
+
+**Source:** TS 24.380 V17.7.0 table 11.1.3-1 (floor control server
+procedures), corroborated against V20.0.0, which is identical.
+
+| Timer | Code | Specification |
+|---|---|---|
+| T2 (Stop talking) | 30000 ms | Default **maximum** value: 30 seconds |
+| T8 (Floor Revoke) | 1000 ms | Default value: 1 second |
+| T20 (Floor Granted) | 1000 ms | Default value: 1 second |
+
+**Three for three.** After five consecutive constant sets that were wrong, this
+one was not. It is recorded as prominently as the defects, because an audit
+that only reports failures stops being evidence and becomes a search for
+confirmation.
+
+Two things the values alone do not show:
+
+- **T2 is a maximum, not a duration.** The specification says "Default
+  *maximum* value", and it is obtained from `<time-limit>` of `<transmit-time>`
+  in TS 24.484 — a talk-time limit — while T8 and T20 come from
+  `<fc-timers-counters>`. A deployment tuning T2 is changing how long a user
+  may hold the floor, not a retry interval.
+- **T11 and T12 are absent from `FLOOR_TIMERS` and should stay absent.** They
+  are the dual-talker pair in the same table, and floor override is not
+  implemented. A profile declaring one would be configuring a state machine
+  that does not exist — the category error clause 3.2 is about.
+
+**The clause reference published in v0.3 was wrong.** It said "TS 24.380 clause
+15"; the timers are in clause 11.1. That reference was written from
+recollection while listing what remained unverified — the habit this document
+exists to correct, appearing in the document itself.
+
+---
+
 ## 5. NOT verified — the work that remains
 
-CA-01, CA-02, CA-04 and CA-06 are closed. What is left, ordered by consequence:
+CA-01, CA-02, CA-04, CA-05 and CA-06 are closed. What is left, ordered by
+consequence:
 
 | # | What | Where to look | Status |
 |---|---|---|---|
 | CA-03 | Field value lengths in `_FIXED` / `_VARIABLE`, `core/rtcp.py` | TS 24.380 clause 8.2.3 onward | **Open, and now closable here.** The ASCII-art diagrams garble, but the prose beneath each one states the length in words -- "has the value '2'", "is a 16 bit binary value". That is a better source than the diagram anyway. A wrong length desynchronises the whole field parse, not just one field. |
 | CA-11 | Release baseline: four Rel-19 constants in a codebase declaring Rel-17 | 3A above | **Open, needs a project decision.** Subtype 14 means different messages in the two releases. |
-| CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 15 | **Open.** The names are now right; the values are still invented. |
+| CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
 | CA-07 | MCData and MCVideo feature tags | TS 24.282, TS 24.281 | **Open, blocked.** Neither specification is in this repository. Marked `# unverified` in `core/sip.py`. |
 | CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
@@ -457,8 +494,9 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-Everything in the table above remains on the footing of the five items that
-turned out to be wrong.
+**Six constant sets have now been checked against a primary source. Five were
+wrong; one was right.** That is the prior for everything in the table above —
+not a certainty of defect, but nowhere near a presumption of correctness.
 
 ---
 
@@ -472,7 +510,8 @@ turned out to be wrong.
   against the specification for the first time, and it was wrong in four
   independent ways — Warning codes, Warning shape, Accept-Contact, and
   Answer-Mode branches.
-- `VP1-FC-002` is unchanged and stays **OPEN** pending CA-03.
+- `VP1-FC-002` stays **OPEN**, and CA-03 is now the only thing holding it:
+  closing CA-05 took the timer defaults off that list.
 - `VP-OP-02` (specification-derived expected flows) is now carrying weight it
   could not carry before: the flows are derived from the documents in
   `docs/3GPP/`, not from recollection.
@@ -483,14 +522,18 @@ turned out to be wrong.
 
 ## 7. Recommendation
 
-CA-03, CA-05 and CA-11 are the items that can be settled with the documents
-already in this repository, and on a record of five for five the first two
-should not be assumed clean. CA-03 in particular now has a route that does not
-need a human with a PDF: the field lengths are stated in prose.
+**CA-11 should be settled first.** It is a decision, not an investigation, and
+it fixes what "conformant" means for everything else here: the platform cannot
+be measured against Rel-17 while its RTCP layer implements Rel-19.
 
-**CA-11 should be settled first**, because it decides what "conformant" means
-for everything else in this document. CA-07 through CA-10 need four documents this project does not
-have; CA-08 (OMA XDM Group) is the one with a verification case behind it.
+**CA-03 is the last item closable from the documents already in this
+repository**, and it has a route that needs no human with a PDF — the field
+lengths are stated in prose beneath each diagram, which is a better source than
+the ASCII-art anyway. It is also the only thing still holding `VP1-FC-002` and,
+through it, R1's exit criterion.
+
+CA-07 through CA-10 need four documents this project does not have. CA-08
+(OMA XDM Group) is the only one with a verification case behind it.
 
 **Do not schedule interoperability testing before CA-03 closes.** A field
 length error desynchronises the parse, which presents as an unrelated failure
@@ -504,4 +547,5 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 0.4 | 2026-09-21 | CA-05 closed against TS 24.380 table 11.1.3-1: all three timer defaults correct — the first clean set in six. The clause reference published in 0.3 was itself written from recollection and was wrong; corrected. |
 | 0.3 | 2026-09-21 | TS 24.379 and TS 24.481 read from source. CA-01 re-verified and written up as 3.3; release baseline mismatch recorded as CA-11. CA-02, CA-04 and CA-06 closed: 0 of 11 warning codes correct, the Warning header itself malformed, the ICSI absent from every INVITE, `Priv-Answer-Mode` on every call, two configuration values hard-coded in `core/`, and the group document invalid in four ways. All corrected and pinned. One surviving mutant in a test written for this audit, recorded in 4.10. |
