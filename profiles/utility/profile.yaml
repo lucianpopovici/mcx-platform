@@ -1,0 +1,161 @@
+# Utility operator profile — grid and field operations.
+#
+# Written to verify PLT-PRF-023. Every hook is a shared table implementation
+# used unchanged; everything that makes this deployment different is data.
+
+$schema: "https://mcx-platform.invalid/schema/profile/v1"
+
+profile:
+  name: utility
+  version: 0.1.0
+  description: Energy utility field and control-room operations
+  hooks:
+    identity_resolver: profiles.utility.hooks:DirectoryResolver
+    priority_policy: profiles.utility.hooks:TablePriorityPolicy
+    session_policy: profiles.utility.hooks:TableSessionPolicy
+    bearer_selector: profiles.utility.hooks:TableBearerSelector
+    interworking_gateway: profiles.utility.hooks:PrefixInterworkingGateway
+    interconnection_gateway: profiles.utility.hooks:TableInterconnectionGateway
+
+urgencies:
+  - {id: routine, label: Routine}
+  - {id: fault, label: Fault response}
+  - {id: safety-critical, label: Safety critical}
+
+preemption_scopes:
+  - {id: utility-operations, label: Utility operations}
+
+applications:
+  - {id: field-voice, label: Field crew voice, media: [voice], safety_relevant: false}
+  - {id: switching, label: Switching operations, media: [voice], safety_relevant: true}
+  - {id: telemetry, label: Grid telemetry, media: [data], safety_relevant: true}
+
+call_types:
+  - id: crew-call
+    label: Field crew call
+    media: [voice]
+    session_model: on-demand
+    urgency: routine
+    application: field-voice
+    auto_answer: false
+    acknowledgement_required: false
+    recording_required: true
+    max_participants: 20
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: false
+      max_queue_depth: 5
+      timers_ms: {T201: 100, T203: 5000, T205: 100, T206: 100}
+
+  - id: switching-order
+    label: Switching order call
+    media: [voice]
+    session_model: on-demand
+    urgency: safety-critical
+    application: switching
+    auto_answer: true
+    acknowledgement_required: true
+    recording_required: true
+    max_participants: 4
+    initiator_roles: [control-engineer]
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: false
+      override_allowed: true
+      max_queue_depth: 0
+      timers_ms: {T201: 100, T203: 2000, T205: 100, T206: 100}
+
+  - id: telemetry-session
+    label: Grid telemetry session
+    media: [data]
+    session_model: pre-established
+    urgency: fault
+    application: telemetry
+    auto_answer: true
+    acknowledgement_required: false
+    recording_required: true
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: false
+      queueing_enabled: false
+      override_allowed: false
+      max_queue_depth: 0
+      timers_ms: {}
+
+identity:
+  domains: ["utility.example"]
+  functional:
+    - id: control-engineer
+      label: Control room engineer on shift
+      binding: dynamic
+      location_dependent: false
+      multiplicity: single
+      resolves_to: user
+
+priority:
+  default_scope: utility-operations
+  rules:
+    - match: {call_type: "*", application: switching, urgency: "*"}
+      decision:
+        level: 90
+        scope: utility-operations
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 250
+        label: switching
+    - match: {call_type: "*", application: telemetry, urgency: "*"}
+      decision:
+        level: 70
+        scope: utility-operations
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 200
+        label: telemetry
+    - match: {call_type: "*", application: "*", urgency: "*"}
+      decision:
+        level: 20
+        scope: utility-operations
+        preemption_capability: false
+        preemption_vulnerability: true
+        floor_priority: 80
+        label: routine
+
+bearer:
+  rules:
+    - match: {call_type: switching-order, media: voice}
+      decision:
+        qos_identifier: 65
+        arp_level: 2
+        arp_preemption_capability: true
+        arp_preemption_vulnerability: false
+        redundancy: single
+        paths: [{id: default, transport: udp, primary: true, weight: 1, attributes: {}}]
+    - match: {call_type: "*", media: voice}
+      decision:
+        qos_identifier: 65
+        arp_level: 7
+        arp_preemption_capability: false
+        arp_preemption_vulnerability: true
+        redundancy: single
+        paths: [{id: default, transport: udp, primary: true, weight: 1, attributes: {}}]
+    - match: {call_type: "*", media: data}
+      decision:
+        qos_identifier: 70
+        arp_level: 6
+        arp_preemption_capability: true
+        arp_preemption_vulnerability: false
+        redundancy: single
+        paths: [{id: default, transport: tcp, primary: true, weight: 1, attributes: {}}]
+
+admission:
+  max_concurrent_sessions: 800
+  reserved_for_urgency:
+    safety-critical: 100
+    fault: 50
+  reject_reason_codes:
+    - capacity-exhausted
+    - not-authorised
+    - unknown-target
+    - call-type-not-permitted
