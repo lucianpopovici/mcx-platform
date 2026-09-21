@@ -645,3 +645,128 @@ def test_comparator_flags_direction_missing_fields_and_flow_errors():
     skip = [out(A, rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1))),
             out(A, rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(5)))]
     assert "sequence" in {d.code for d in trace_compare.compare(skip)}
+
+
+# -- PLT-CONF-AUDIT CA-03: field value lengths ---------------------------------
+
+
+def test_field_value_lengths_match_the_specification():
+    """TS 24.380 clauses 8.2.3.2 to 8.2.3.27, read from the prose under each
+    field's diagram. Rel-15, Rel-17, Rel-19 and Rel-20 agree on every value.
+
+    Spelled out as literals rather than imported, so the table and the
+    assertion cannot drift together (PLT-CONF-AUDIT 4.10).
+    """
+    from core.rtcp import _FIXED
+    assert {int(k): v for k, v in _FIXED.items()} == {
+        0: 2,    # Floor Priority
+        1: 2,    # Duration
+        3: 2,    # Queue Info
+        5: 2,    # Permission to Request the Floor
+        7: 2,    # Queue Size
+        8: 2,    # Message Sequence Number
+        10: 2,   # Source -- was classed variable, so never checked
+        12: 2,   # Message Type
+        13: 2,   # Floor Indicator
+        14: 6,   # SSRC: 32-bit SSRC plus 16 spare bits, not 4
+        21: 2,   # Queued Floor Requests Purpose
+        23: 2,   # Response State
+        24: 2,   # Media Flow Control Indicator
+    }
+
+
+def test_every_field_id_is_classified():
+    """The defect CA-03 actually found was not a wrong length. It was eleven
+    field ids in no group at all, which `decode` accepted at any length.
+
+    This is the guard that makes adding a field id without its length a test
+    failure rather than a silent hole.
+    """
+    from core.rtcp import (FieldId, _CAUSE_AND_PHRASE, _FIXED, _STRUCTURED,
+                           _TEXT)
+    groups = (set(_FIXED), set(_TEXT), set(_STRUCTURED), set(_CAUSE_AND_PHRASE))
+    for a in range(len(groups)):
+        for b in range(a + 1, len(groups)):
+            assert not (groups[a] & groups[b]), (a, b, groups[a] & groups[b])
+    classified = set().union(*groups)
+    missing = sorted(int(f) for f in FieldId if f not in classified)
+    assert missing == [], f"field ids with no length rule: {missing}"
+
+
+def test_a_field_with_the_wrong_fixed_length_is_rejected():
+    """A wrong length does not corrupt one field, it desynchronises the parse
+    of everything after it, so this must fail at the field, not downstream."""
+    import struct
+    from core.rtcp import FieldId
+    for field_id, good in ((FieldId.SOURCE, 2),
+                           (FieldId.AUDIO_SSRC_OF_GRANTED_PARTICIPANT, 6),
+                           (FieldId.MEDIA_FLOW_CONTROL_INDICATOR, 2)):
+        ok = rtcp.message(MsgType.TAKEN, 1, (int(field_id), b"\x00" * good))
+        assert FLOOR_CODEC.decode(FLOOR_CODEC.encode(ok)) == ok
+        for bad in (good - 1, good + 1):
+            if bad < 0:
+                continue
+            wire = FLOOR_CODEC.encode(
+                rtcp.message(MsgType.TAKEN, 1, (int(field_id), b"\x00" * bad)))
+            with pytest.raises(RtcpError, match="length"):
+                FLOOR_CODEC.decode(wire)
+
+
+def test_track_info_with_a_high_bit_queueing_capability_is_not_malformed():
+    """The regression this replaces.
+
+    Track Info's first octet is a <Queueing Capability> bitfield (clause
+    8.2.3.13). It was in the group that gets UTF-8 validated, so any value
+    with the high bit set decoded as invalid UTF-8 and a conformant Floor
+    Request carrying Track Info was rejected as malformed.
+    """
+    from core.rtcp import FieldId
+    value = b"\x80\x04user\x00\x00\x00\x01"        # capability 0x80, then data
+    msg = rtcp.message(MsgType.REQUEST, 1, (int(FieldId.TRACK_INFO), value))
+    assert FLOOR_CODEC.decode(FLOOR_CODEC.encode(msg)).fields[
+        int(FieldId.TRACK_INFO)] == value
+
+
+def test_binary_fields_are_not_validated_as_text():
+    """Location carries latitude and longitude as binary (clause 8.2.3.21),
+    and Source is a 16-bit enumeration. Neither is text."""
+    from core.rtcp import FieldId, _TEXT
+    assert FieldId.LOCATION not in _TEXT
+    assert FieldId.SOURCE not in _TEXT
+    assert FieldId.TRACK_INFO not in _TEXT
+    for field_id, value in ((FieldId.LOCATION, b"\x06\xff\xfe\xfd\xfc\xfb"),
+                            (FieldId.LIST_OF_SSRC, b"\x02\x00\xff\xff")):
+        msg = rtcp.message(MsgType.TAKEN, 1, (int(field_id), value))
+        assert FLOOR_CODEC.decode(FLOOR_CODEC.encode(msg)).fields[
+            int(field_id)] == value
+
+
+def test_text_fields_are_still_validated_as_text():
+    """The UTF-8 check was not removed, only narrowed to the fields whose
+    value the specification defines as an ABNF string."""
+    from core.rtcp import FieldId
+    wire = FLOOR_CODEC.encode(
+        rtcp.message(MsgType.TAKEN, 1, (int(FieldId.USER_ID), b"\xff\xfe")))
+    with pytest.raises(RtcpError, match="UTF-8"):
+        FLOOR_CODEC.decode(wire)
+
+
+def test_the_comparator_agrees_with_the_encoder_on_field_lengths():
+    """PLT-CONF-AUDIT CA-03 / FC-OP-03.
+
+    The comparator does not import `core.rtcp`, which is what makes agreement
+    between them evidence rather than a tautology. Both were corrected against
+    TS 24.380 clause 8.2.3 separately; this asserts they landed in the same
+    place, and would fail if either drifted.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+    import trace_compare
+    from core.rtcp import FieldId, _FIXED
+
+    for fid, (name, expected) in trace_compare.FIELDS.items():
+        if expected is None:
+            assert FieldId(fid) not in _FIXED, (fid, name)
+        else:
+            assert _FIXED.get(FieldId(fid)) == expected, (fid, name)

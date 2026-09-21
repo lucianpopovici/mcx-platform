@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.5
+**Version:** 0.6
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -18,11 +18,19 @@ consistency check only".
 That is the circular-validation trap, and it was correct. The first constant set
 ever checked against a real specification was wrong, and so was the second.
 
-**Five of the six constant sets checked have contained defects.** The one
+**Six of the seven constant sets checked have contained defects.** The one
 exception, the floor control timer defaults, is recorded in 4.11 as
 prominently as the failures. That is the prior to carry into the items still
 unverified in §5, and it is strong enough that "probably fine" should not be
 said about any of them.
+
+The defects have also changed character. The early ones were wrong values.
+The later ones are **absent rules** — eleven field ids with no length
+constraint at all (4.12), a UTF-8 check applied to a binary field (4.13), a
+comparator table missing most of what the specification permits (4.15). A
+wrong value fails loudly the first time it meets a conformant peer. A missing
+rule never fails at all; it just accepts things it should not, until one of
+them matters.
 
 ---
 
@@ -504,16 +512,106 @@ Two things the values alone do not show:
 recollection while listing what remained unverified — the habit this document
 exists to correct, appearing in the document itself.
 
+### 4.12 CA-03 — eleven fields had no length rule at all
+
+**Source:** TS 24.380 clauses 8.2.3.2 to 8.2.3.27, corroborated across Rel-15,
+Rel-17, Rel-19 and Rel-20, which agree on every value.
+
+The method that unlocked this is worth stating: the field layouts are
+ASCII-art diagrams that do not survive extraction, which is why this sat
+unverified through four revisions. But **the prose beneath each diagram states
+the length in words** — "has the value '2'", "has the value '6'", "is a 16 bit
+binary value". It was readable all along, in a better form than the diagram.
+
+The expected defect was a wrong number. The actual defect was worse:
+
+| | Was | Is |
+|---|---|---|
+| Field 10, Source | classed variable-length | **fixed, 2 octets** |
+| Field 14, SSRC | **no rule at all** | **fixed, 6 octets** |
+| Fields 21, 23, 24 | **no rule at all** | fixed, 2 octets each |
+| Fields 15-20, 22, 25 | **no rule at all** | variable |
+
+Eleven of the twenty-six field ids were in neither the fixed nor the variable
+group, so `decode` accepted them **at any length, without comment**. The
+guard that now prevents this is not a better table — it is
+`test_every_field_id_is_classified`, which fails if any field id is in no
+group. A wrong entry is one bad field; a missing entry is a silent hole.
+
+**Field 14 is the one that would have been guessed wrong.** An RFC 3550 SSRC
+is 32 bits, so 4 is the obvious answer. The field is **6**: the SSRC plus 16
+spare bits. It is also the third release-dependent name found in this audit —
+"SSRC field" up to Rel-17, "Audio SSRC of Granted Participant" from Rel-18 —
+though the length is unchanged from Rel-15 onward.
+
+### 4.13 CA-03b — a valid Floor Request was being rejected as malformed
+
+Found while re-classifying the fields, and the only defect in this audit with
+a live operational effect on ordinary traffic.
+
+The variable-length group was UTF-8 validated as a whole. Two of its members
+are not text:
+
+- **Track Info** (clause 8.2.3.13) begins with a `<Queueing Capability>`
+  bitfield, followed by an 8-bit length, a text item and 32-bit references.
+  **Any queueing capability value with the high bit set is not valid UTF-8**,
+  so a conformant Floor Request carrying Track Info was rejected with "field
+  TRACK_INFO is not UTF-8" — reported as a malformed message from a peer that
+  was behaving correctly.
+- **Source** (clause 8.2.3.12) is a 16-bit enumeration, validated as text
+  because it was in the wrong group to begin with.
+
+The UTF-8 check was not removed, it was narrowed to the five fields whose
+value the specification defines as an ABNF string, plus the phrase half of
+Reject Cause. Structured fields keep their framing checks and an opaque
+payload.
+
+### 4.14 The framing was already correct — checked, not assumed
+
+TS 24.380 pads field values by two different rules: "(2 + multiple of 4)" for
+User ID, Location and Functional Alias, and "(1 + multiple of 4)" for the list
+fields, whose declared length **excludes** the internal padding. That second
+family looked like a desynchronisation waiting to happen, since a declared
+length shorter than the octets consumed would throw off every field after it.
+
+Working it through, `_pad(2 + declared_length)` computes the right padding for
+**both** families: for the list fields the declared length is `1 + S` and the
+padded sum is the smallest `1 + 4k ≥ S`, which differs from `S` by
+`(1 - S) mod 4` — exactly what `(-(3 + S)) mod 4` yields.
+
+Recorded because "we checked the dangerous-looking thing and it was right" is
+a finding, and because the alternative was to "fix" working code on a hunch.
+
+### 4.15 CA-13 (new) — the trace comparator's message shapes are incomplete
+
+`tools/trace_compare.py` carried the same two length defects and was corrected
+independently, from the specification rather than from `core/rtcp.py`, which
+it deliberately does not import. A new test asserts the two agree — agreement
+is evidence only because they were derived separately (FC-OP-03).
+
+But its `SHAPE` table, which says which fields each message may carry, has
+never been checked against the message content tables in clauses 8.2.4 to
+8.2.17. It is demonstrably incomplete: table 8.2.9-1 permits a Floor Taken to
+carry Floor Indicator, Audio SSRC, Functional Alias, List of Granted Users,
+Location and List of Locations, and `SHAPE` listed **none** of them.
+
+**The comparator therefore reports conformant traffic as deviating.** The
+fields this platform can actually encode have been added; the rest need the
+full extraction. Until that is done, a clean comparator run means less than it
+appears to, which is why `VP1-FC-002` stays open — now for a sharper reason
+than "the constants are unverified".
+
 ---
 
 ## 5. NOT verified — the work that remains
 
-CA-01, CA-02, CA-04, CA-05, CA-06 and CA-11 are closed. What is left,
-ordered by consequence:
+CA-01 through CA-06 and CA-11 are closed. What is left, ordered by
+consequence:
 
 | # | What | Where to look | Status |
 |---|---|---|---|
-| CA-03 | Field value lengths in `_FIXED` / `_VARIABLE`, `core/rtcp.py` | TS 24.380 clause 8.2.3 onward | **Open, and now closable here.** The ASCII-art diagrams garble, but the prose beneath each one states the length in words -- "has the value '2'", "is a 16 bit binary value". That is a better source than the diagram anyway. A wrong length desynchronises the whole field parse, not just one field. |
+| CA-03 | Field value lengths, `core/rtcp.py` | TS 24.380 clause 8.2.3 | **Closed.** See 4.12-4.14. |
+| CA-13 | `SHAPE` in `tools/trace_compare.py`: which fields each message may carry | TS 24.380 clauses 8.2.4-8.2.17 | **Open.** Demonstrably incomplete — the comparator reports conformant traffic as deviating. Now the only thing holding `VP1-FC-002`. |
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all releases | **Open.** The floor control layer is release-parameterised; the SIP layer has not been examined at all. REL-OP-01, PLT-REL-009. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
@@ -529,9 +627,10 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-**Six constant sets have now been checked against a primary source. Five were
-wrong; one was right.** That is the prior for everything in the table above —
-not a certainty of defect, but nowhere near a presumption of correctness.
+**Seven constant sets have now been checked against a primary source. Six
+were wrong; one was right.** That is the prior for everything in the table
+above — not a certainty of defect, but nowhere near a presumption of
+correctness.
 
 ---
 
@@ -545,8 +644,10 @@ not a certainty of defect, but nowhere near a presumption of correctness.
   against the specification for the first time, and it was wrong in four
   independent ways — Warning codes, Warning shape, Accept-Contact, and
   Answer-Mode branches.
-- `VP1-FC-002` stays **OPEN**, and CA-03 is now the only thing holding it:
-  closing CA-05 took the timer defaults off that list.
+- `VP1-FC-002` stays **OPEN**, and CA-13 is now the only thing holding it.
+  The reason has sharpened twice: it began as "the constants are unverified",
+  became "the field lengths are unverified", and is now "the comparator flags
+  conformant traffic as deviating, so a clean run proves less than it looks".
 - `VP-OP-02` (specification-derived expected flows) is now carrying weight it
   could not carry before: the flows are derived from the documents in
   `docs/3GPP/`, not from recollection.
@@ -557,11 +658,11 @@ not a certainty of defect, but nowhere near a presumption of correctness.
 
 ## 7. Recommendation
 
-**CA-03 is the last item closable from the documents already in this
-repository**, and it has a route that needs no human with a PDF — the field
-lengths are stated in prose beneath each diagram, which is a better source than
-the ASCII-art anyway. It is also the only thing still holding `VP1-FC-002` and,
-through it, R1's exit criterion.
+**CA-13 is the last item closable from the documents already in this
+repository**, and it is now the only thing holding `VP1-FC-002` and, through
+it, R1's exit criterion. The method is the one that closed CA-03: the message
+content tables in clauses 8.2.4 to 8.2.17 are ASCII art, but the field names
+inside them extract cleanly, and the prose beneath says which are conditional.
 
 CA-07 through CA-10 need four documents this project does not have. CA-08
 (OMA XDM Group) is the only one with a verification case behind it.
@@ -578,6 +679,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 0.6 | 2026-09-21 | CA-03 closed against TS 24.380 clause 8.2.3, read from the prose beneath each field diagram. Eleven of twenty-six field ids had no length rule at all; Source was in the wrong class and SSRC is 6 octets, not the 4 that would have been guessed. Track Info was being UTF-8 validated, so a conformant Floor Request carrying it was rejected as malformed. The field framing was checked and found already correct. New CA-13: the trace comparator's message shapes are incomplete and flag conformant traffic. |
 | 0.5 | 2026-09-21 | CA-11 closed by making the 3GPP release a deployment parameter (`MCX_RELEASE`), on an axis independent of the profile. Per-release tables for subtypes, field IDs and revoke causes extracted mechanically from all eight published versions of TS 24.380. Corrects v0.3: subtype 14 changed meaning at Rel-18, not Rel-19. New CA-12: the TS 24.379 layer is not release-parameterised. |
 | 0.4 | 2026-09-21 | CA-05 closed against TS 24.380 table 11.1.3-1: all three timer defaults correct — the first clean set in six. The clause reference published in 0.3 was itself written from recollection and was wrong; corrected. |
 | 0.3 | 2026-09-21 | TS 24.379 and TS 24.481 read from source. CA-01 re-verified and written up as 3.3; release baseline mismatch recorded as CA-11. CA-02, CA-04 and CA-06 closed: 0 of 11 warning codes correct, the Warning header itself malformed, the ICSI absent from every INVITE, `Priv-Answer-Mode` on every call, two configuration values hard-coded in `core/`, and the group document invalid in four ways. All corrected and pinned. One surviving mutant in a test written for this audit, recorded in 4.10. |

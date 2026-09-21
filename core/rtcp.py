@@ -124,15 +124,71 @@ class FieldId(IntEnum):
     FLOOR_REVOKE_REQUEST_USER_ID = 25                    # Release 19
 
 
-# Fixed-size fields: id -> value length in octets. Others are variable.
+# Field value lengths, TS 24.380 clause 8.2.3.2 through 8.2.3.27 (PLT-CONF-AUDIT
+# CA-03). Read from the prose under each field's diagram -- "has the value '2'",
+# "has the value '6'" -- which states the length in words. The ASCII-art diagrams
+# above them do not survive extraction, and are the reason this went unchecked
+# for so long; the prose was there all along.
+#
+# Every field id must appear in exactly one of the three groups below.
+# `test_every_field_id_is_classified` enforces that, because the failure mode
+# this replaces was not a wrong entry -- it was fields with NO entry, which the
+# decoder accepted at any length without comment.
+
+# id -> exact value length in octets.
 _FIXED = {
-    FieldId.FLOOR_PRIORITY: 2, FieldId.DURATION: 2, FieldId.QUEUE_INFO: 2,
-    FieldId.PERMISSION_TO_REQUEST: 2, FieldId.SEQUENCE_NUMBER: 2,
-    FieldId.ACKED_MESSAGE_TYPE: 2, FieldId.FLOOR_INDICATOR: 2,
-    FieldId.QUEUE_SIZE: 2,
+    FieldId.FLOOR_PRIORITY: 2,               # 8.2.3.2
+    FieldId.DURATION: 2,                     # 8.2.3.3
+    FieldId.QUEUE_INFO: 2,                   # 8.2.3.5
+    FieldId.PERMISSION_TO_REQUEST: 2,        # 8.2.3.7
+    FieldId.QUEUE_SIZE: 2,                   # 8.2.3.9
+    FieldId.SEQUENCE_NUMBER: 2,              # 8.2.3.10
+    # 8.2.3.12. A 16-bit binary value, NOT a variable-length item: this sat in
+    # the variable group, so it was never length-checked and was handed to the
+    # UTF-8 validator as if it were text.
+    FieldId.SOURCE: 2,
+    FieldId.ACKED_MESSAGE_TYPE: 2,           # 8.2.3.14
+    FieldId.FLOOR_INDICATOR: 2,              # 8.2.3.15
+    # 8.2.3.16. SIX, not four: an RFC 3550 SSRC is 32 bits and the field
+    # carries 16 spare bits after it. Called the "SSRC field" up to Rel-17 and
+    # renamed "Audio SSRC of Granted Participant" in Rel-18; the length is the
+    # same in every release from Rel-15 on.
+    FieldId.AUDIO_SSRC_OF_GRANTED_PARTICIPANT: 6,
+    FieldId.QUEUED_FLOOR_REQUESTS_PURPOSE: 2,   # 8.2.3.23
+    FieldId.RESPONSE_STATE: 2,                  # 8.2.3.25
+    FieldId.MEDIA_FLOW_CONTROL_INDICATOR: 2,    # 8.2.3.26
 }
-_VARIABLE = (FieldId.REJECT_CAUSE, FieldId.GRANTED_PARTY, FieldId.USER_ID,
-             FieldId.QUEUED_USER_ID, FieldId.SOURCE, FieldId.TRACK_INFO)
+
+# Variable-length fields whose value is a text string (an ABNF string value in
+# the specification's own tables). Only these may be UTF-8 validated.
+_TEXT = (
+    FieldId.GRANTED_PARTY,                   # 8.2.3.6, coded as <User ID>
+    FieldId.USER_ID,                         # 8.2.3.8
+    FieldId.QUEUED_USER_ID,                  # 8.2.3.11, coded as <User ID>
+    FieldId.FUNCTIONAL_ALIAS,                # 8.2.3.19
+    FieldId.FLOOR_REVOKE_REQUEST_USER_ID,    # 8.2.3.27, coded as <User ID>
+)
+
+# Variable-length fields with internal binary structure. Validating these as
+# UTF-8 is wrong and was actively harmful for Track Info, whose first octet is
+# a <Queueing Capability> bitfield: any value with the high bit set is not
+# valid UTF-8, so a conformant Floor Request carrying Track Info was rejected
+# as malformed. The framing is still checked; the payload is opaque here.
+_STRUCTURED = (
+    FieldId.TRACK_INFO,                      # 8.2.3.13
+    FieldId.GRANTED_USERS,                   # 8.2.3.17
+    FieldId.LIST_OF_SSRC,                    # 8.2.3.18
+    FieldId.LIST_OF_FUNCTIONAL_ALIASES,      # 8.2.3.20
+    FieldId.LOCATION,                        # 8.2.3.21
+    FieldId.LIST_OF_LOCATION,                # 8.2.3.22
+    FieldId.LIST_OF_QUEUED_USERS,            # 8.2.3.24
+)
+
+# 8.2.3.4 is its own shape: a 16-bit <Reject Cause> followed by an optional
+# <Reject Phrase> text item, so it is neither fixed nor wholly text.
+_CAUSE_AND_PHRASE = (FieldId.REJECT_CAUSE,)
+
+_VARIABLE = _TEXT + _STRUCTURED + _CAUSE_AND_PHRASE
 
 # Reject causes (16-bit). See the OPEN note above.
 # Floor Deny rejection causes, clause 8.2.6.2.
@@ -375,7 +431,7 @@ def decode(data: bytes, release: Release) -> FloorMessage:
         pad = _pad(2 + length)
         if data[end:end + pad] != b"\x00" * pad or end + pad > len(data):
             raise RtcpError(f"field {known.name} padding is not zero/complete")
-        if known in _VARIABLE:
+        if known in _TEXT or known is FieldId.REJECT_CAUSE:
             try:
                 (value[2:] if known is FieldId.REJECT_CAUSE else value).decode("utf-8")
             except UnicodeDecodeError:

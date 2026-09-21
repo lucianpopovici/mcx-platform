@@ -34,12 +34,23 @@ TYPES = {0: "request", 1: "granted", 2: "taken", 3: "deny", 4: "release",
 FROM_CLIENT = {"request", "release", "queue-position-request", "ack"}
 FROM_SERVER = {"granted", "deny", "idle", "taken", "revoke",
                "queue-position-info"}
+# id -> (name, exact value length in octets or None if variable).
+# TS 24.380 clause 8.2.3.x, read from the prose under each field diagram
+# (PLT-CONF-AUDIT CA-03). Read from the specification independently of
+# core/rtcp.py, which this tool deliberately does not import -- agreeing with
+# the encoder is only evidence if the two were derived separately.
 FIELDS = {0: ("priority", 2), 1: ("duration", 2), 2: ("reject-cause", None),
           3: ("queue-info", 2), 4: ("granted-party", None),
           5: ("permission", 2), 6: ("user-id", None), 7: ("queue-size", 2),
-          8: ("sequence", 2), 9: ("queued-user-id", None), 10: ("source", None),
+          8: ("sequence", 2), 9: ("queued-user-id", None),
+          # 8.2.3.12: a 16-bit binary value. Was None here and in the encoder,
+          # in both cases unchecked.
+          10: ("source", 2),
           11: ("track-info", None), 12: ("acked-type", 2),
-          13: ("floor-indicator", 2)}
+          13: ("floor-indicator", 2),
+          # 8.2.3.16: 32-bit SSRC plus 16 spare bits. Absent here entirely, so
+          # a conformant Floor Taken carrying it was reported as "field id 14".
+          14: ("ssrc", 6)}
 # message -> (required, permitted-in-addition)
 SHAPE = {
     "request": ({"priority"}, {"user-id", "track-info", "sequence"}),
@@ -47,10 +58,19 @@ SHAPE = {
     "queue-position-request": (set(), {"track-info", "sequence", "user-id"}),
     "ack": ({"acked-type"}, {"sequence", "user-id"}),
     "granted": ({"priority", "duration", "sequence"},
-                {"queue-info", "granted-party", "track-info"}),
+                {"queue-info", "granted-party", "track-info", "ssrc",
+                 "user-id", "queue-size", "queued-user-id",
+                 "floor-indicator"}),
     "deny": ({"reject-cause", "sequence"}, {"track-info"}),
     "idle": ({"sequence"}, {"track-info"}),
-    "taken": ({"granted-party", "sequence"}, {"permission", "track-info"}),
+    # Table 8.2.9-1 permits nine more fields than were listed here; the
+    # comparator reported a conformant Floor Taken carrying any of them as a
+    # deviation. Only the ones this platform can encode are added: the rest
+    # are CA-13 (see PLT-CONF-AUDIT), because SHAPE has never been verified
+    # against the message content tables as a whole.
+    "taken": ({"granted-party", "sequence"},
+              {"permission", "track-info", "ssrc", "user-id",
+               "floor-indicator"}),
     "revoke": ({"reject-cause", "sequence"}, {"track-info"}),
     "queue-position-info": ({"queue-info", "sequence"}, {"track-info"}),
 }
