@@ -1,0 +1,427 @@
+# Release 1 — Verification Plan
+
+**Document:** PLT-VP-R1
+**Version:** 0.1 (draft)
+**Date:** 2026-09-19
+**Status:** Draft for review — not baselined
+**Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
+**References:** PLT-ICD-001 v0.1
+
+---
+
+## 1. Purpose and scope
+
+This plan defines how each of the 83 R1 requirements of PLT-SRS is verified, by
+which test case, and what constitutes a pass. §9 is the traceability matrix;
+PLT-VER-008 requires every requirement to reach at least one verification
+artefact, and the matrix is the evidence of that.
+
+**R1 exit criterion (PLT-SRS §1.6):** two clients complete a prearranged group
+call with floor arbitration, and both profile conformance suites pass.
+
+### 1.1 What R1 does and does not verify
+
+R1 verifies the core, the profile framework, the MCX profile, on-network MCPTT
+private and prearranged group calls, and floor control.
+
+Not in R1, and not verified here: MC security per TS 33.180 (R2), real identity
+management (R2 — R1 runs a stub under PLT-IDM-007), MCData, emergency and
+imminent-peril handling, pre-emption behaviour, the FRMCS profile, MBS, and
+off-network operation. Requirements for these carry later phases and appear in
+their own plans.
+
+**One consequence worth stating plainly.** R1 has no pre-emption requirement in
+scope, but `IF-PRI.compare` is fully exercised here (TS-HOOK-020..024) because
+the properties it must hold are cheap to test now and expensive to retrofit once
+R2 depends on them.
+
+### 1.2 Verification methods
+
+| Method | Meaning | Evidence |
+|---|---|---|
+| **T** Test | Automated, repeatable, pass/fail without judgement | CI run record |
+| **D** Demonstration | Executed against a running system, observed | Recorded session + capture |
+| **A** Analysis | Reasoned argument over design or measurement | Signed analysis note |
+| **I** Inspection | Static examination of code, config or document | Gate result or review record |
+
+R1 requirement methods, as specified: 54 T, 26 I, 3 A, 0 D.
+
+### 1.3 Test case identification
+
+`VP1-<SUITE>-<nnn>`. A test case may verify several requirements; a requirement
+may need several cases. Both are recorded in §9.
+
+### 1.4 Independence
+
+Per PLT-SRS §18, conformance suites run against the same binary for both
+profiles. The FRMCS profile is a stub in R1 (§14 of PLT-SRS is `[PROVISIONAL]`),
+so its suite verifies **framework** behaviour only — that the core loads,
+validates and operates against a second profile — not railway semantics. That
+is sufficient for the boundary-leak detection PLT-VER-003 depends on, and is the
+reason the FRMCS stub exists this early.
+
+---
+
+## 2. Test environment
+
+### 2.1 Configurations
+
+| ID | Name | Composition |
+|---|---|---|
+| ENV-UNIT | Unit | Core modules in isolation, no network, no SIP, no media |
+| ENV-INT | Integration | Platform + SIP core + HTTP proxy + stub IdMS, containerised, single host |
+| ENV-E2E | End-to-end | ENV-INT + two MC clients + packet capture + trace comparator |
+| ENV-CI | Static | Source tree, static analysis and gate tooling only |
+
+### 2.2 Instrumentation
+
+| Item | Purpose | Used by |
+|---|---|---|
+| Trace comparator | Diffs captured signalling against expected message flow per call type | TS-CC, TS-FC, TS-E2E |
+| Packet capture | SIP and RTP/RTCP on all interfaces, retained per run | TS-SIG, TS-FC, TS-MED, TS-E2E |
+| Malformed profile corpus | One profile per rejection class of PLT-SRS §5.1 | TS-LOAD |
+| Property-based test engine | Generates decision spaces from a loaded profile | TS-HOOK |
+| Audit log reader | Parses structured audit output for assertions | TS-OAM |
+
+### 2.3 Entry criteria
+
+A requirement enters verification only when its implementation is merged and the
+static gates of TS-BND pass. TS-BND failures block the suite: a boundary
+violation invalidates the conformance argument for everything above it.
+
+---
+
+## 3. TS-LOAD — profile loading and validation
+
+Environment: ENV-UNIT (validation), ENV-INT (startup behaviour).
+
+The malformed-profile corpus is the substance of this suite. Each case supplies
+a profile differing from the valid MCX profile in exactly one respect, so a
+rejection is attributable to that one defect.
+
+| Case | Title | Steps | Pass criterion |
+|---|---|---|---|
+| VP1-LOAD-001 | Valid profile loads | Start with the MCX profile | Process reaches ready; profile name, version and hash logged at start |
+| VP1-LOAD-002 | No profile configured | Start with profile configuration absent | Refuses to start; diagnostic names the missing configuration; no listening socket opened |
+| VP1-LOAD-003 | Named profile absent | Configure a profile name with no package | Refuses to start; diagnostic names the profile sought |
+| VP1-LOAD-004 | Two profiles configured | Configure both MCX and FRMCS, not in test mode | Refuses to start; diagnostic states that exactly one profile is permitted |
+| VP1-LOAD-005 | Test mode with production indicator | Set test mode and a production indicator together | Refuses to start; refusal attributable to the production indicator, not the profile |
+| VP1-LOAD-006 | Test mode legitimate | Set test mode, no production indicator, two profiles | Starts; both profiles loaded and independently addressable |
+| VP1-LOAD-010 | Unknown key rejected | Profile with one undeclared key | Rejected; diagnostic gives the key's path within the package |
+| VP1-LOAD-011 | Undeclared urgency reference | Call type naming an undeclared urgency | Rejected; diagnostic names both the call type and the urgency |
+| VP1-LOAD-012 | Undeclared scope reference | Priority rule naming an undeclared pre-emption scope | Rejected; diagnostic names the rule and the scope |
+| VP1-LOAD-013 | Undeclared application reference | Call type naming an undeclared application | Rejected; diagnostic names both |
+| VP1-LOAD-014 | Undeclared initiator role | Call type naming an undeclared role | Rejected; diagnostic names both |
+| VP1-LOAD-015 | Priority table not total | Declared call type with no matching priority rule | Rejected; diagnostic names the uncovered call type |
+| VP1-LOAD-016 | Bearer table not total | Declared (call type, media) with no matching bearer rule | Rejected; diagnostic names the uncovered combination |
+| VP1-LOAD-017 | Undeclared reason code | Session policy returning a code outside the declared set | Rejected at validation where statically determinable; otherwise `hook-contract-violation` at runtime |
+| VP1-LOAD-018 | Unknown floor timer name | Floor policy with a timer name not in TS 24.380 | Rejected; diagnostic names the timer |
+| VP1-LOAD-020 | Hook missing | Profile omitting one of the five hooks | Rejected; diagnostic names the missing hook |
+| VP1-LOAD-021 | Hook does not implement interface | Hook lacking a required method | Refuses to start; diagnostic names the hook and the missing method |
+| VP1-LOAD-022 | No default hook substituted | Remove each hook in turn, five runs | Five refusals; no run starts with a substituted default |
+| VP1-LOAD-030 | Validation failure prevents start | Any rejected profile | No listening socket; readiness never true; exit status non-zero |
+| VP1-LOAD-031 | No partial start | Profile rejected after partial parse | No component initialised; no side effect on any configured store |
+| VP1-LOAD-040 | Profile immutable after load | Attempt mutation of the loaded profile object from a test hook | Mutation rejected or has no effect; decisions unchanged thereafter |
+| VP1-LOAD-041 | Content hash stable and sensitive | Load same profile twice; then alter one value and reload | Identical hash across identical loads; different hash after the alteration |
+| VP1-LOAD-042 | Call type set is profile-determined | Request a call type declared in FRMCS while MCX is loaded | Rejected as undeclared; no session established |
+
+---
+
+## 4. TS-BND — boundary and static gates
+
+Environment: ENV-CI. These run on every change (PLT-VER-002) and block merge.
+
+| Case | Title | Steps | Pass criterion |
+|---|---|---|---|
+| VP1-BND-001 | No profile-specific identifiers in core | Scan `core/` for profile names and profile-specific domain terms, in identifiers, literals and comments | Zero matches. Any match fails the build and names file and line |
+| VP1-BND-002 | Core does not import profiles | Static import-graph analysis | No edge from `core/` to `profiles/` |
+| VP1-BND-003 | Hook interfaces are the only crossing | Static analysis of call sites | Every `core/` → profile call is through a §6 interface |
+| VP1-BND-004 | Value objects immutable | Inspect all hook parameter and return types | Every type frozen; no mutable field |
+| VP1-BND-005 | Hooks do not call back | Static analysis of profile packages | No reference from any profile to a core symbol other than the hook types |
+| VP1-BND-006 | Single image, all profiles | Inspect build output | One artefact; both profile packages present; no per-profile build variant |
+| VP1-BND-007 | No default profile in code or config | Inspect configuration defaults and code paths | No path yields a profile without explicit configuration |
+| VP1-BND-008 | No hot reload mechanism | Inspect for reload handlers, watchers and signal handlers touching the profile | None present |
+| VP1-BND-009 | Core owns the protocol state machines | Inspect floor control, SIP session and document modules | No transition, guard or state parameterised by profile input; timers excepted |
+| VP1-BND-010 | Reference-point naming | Inspect module boundaries against PLT-SRS §3.1 | Each boundary corresponding to a reference point is named for it |
+| VP1-BND-011 | Priority table is declarative | Inspect the MCX profile | Priority expressed as configuration data; no imperative priority logic in the hook |
+| VP1-BND-012 | No QoS mapping in core | Inspect core for QoS identifier and ARP literals | None present outside the bearer hook interface types |
+| VP1-BND-013 | No priority logic in core | Inspect core for priority comparison or ordering | All priority decisions traced to `IF-PRI` |
+| VP1-BND-014 | Resolver receives full context | Inspect the resolve call site | Initiator, call type, application and location all passed |
+| VP1-BND-015 | Floor state machine independently testable | Inspect its dependencies | No dependency on SIP, media or network; instantiable in ENV-UNIT |
+| VP1-BND-016 | Time discipline | Inspect configuration, logs and audit records | All timestamps UTC; all durations in milliseconds; no local-time formatting |
+| VP1-BND-020 | Both suites run per change | Inspect CI configuration | Both profile suites execute on every change; neither is skippable by branch or label |
+| VP1-BND-021 | Per-profile suite exists | Inspect the suites | One suite per profile, both targeting the same built artefact |
+
+---
+
+## 5. TS-HOOK — hook contracts
+
+Environment: ENV-UNIT, with property-based generation over the loaded profile's
+declared decision space. Contracts are those of PLT-ICD-001.
+
+| Case | Title | Steps | Pass criterion |
+|---|---|---|---|
+| VP1-HOOK-001 | Hook exception fails the session | Inject a raising hook at each of the five interfaces | Session fails with `hook-error`; no default result substituted; no session established |
+| VP1-HOOK-002 | Contract violation distinguished | Return a value failing a POST check | Fails with `hook-contract-violation`, distinct from `hook-error` |
+| VP1-HOOK-003 | Invocations audited | Establish a session | Audit trail contains one record per invocation with interface ID, correlation ID, elapsed time and outcome |
+| VP1-HOOK-004 | Decisions audited in full | Establish a session | Priority, session and bearer decisions each recorded with all fields |
+| VP1-HOOK-010 | Resolution kinds consistent | Resolve a user, a group, and an unknown target | `USER` → exactly 1 member; `GROUP` → `group_id` set and ≥ 1 member; unknown → raises |
+| VP1-HOOK-011 | Member set well-formed | Resolve a group with a duplicated member in configuration | Returned members deduplicated and stably ordered across repeated calls |
+| VP1-HOOK-012 | Domain restriction | Resolve a target outside the profile's declared domains | Refused; no member returned from an undeclared domain |
+| VP1-HOOK-013 | `resolved_from` recorded | Resolve via any indirect reference | `resolved_from` populated and present in the audit record |
+| VP1-HOOK-014 | No partial resolution | Resolve a group whose backing store is partially unavailable | Raises with `resolver-unavailable`; no partial member set returned |
+| VP1-HOOK-015 | Resolution failure codes distinct | Resolve an unknown target, then an unheld declared identity | `unknown-target` and `no-binding` respectively; codes not conflated |
+| VP1-HOOK-020 | Priority decision complete | Evaluate every declared call type | Every decision carries level, scope, both pre-emption flags, floor priority and label |
+| VP1-HOOK-021 | Priority totality | Evaluate all declared call types | No evaluation fails to produce a decision |
+| VP1-HOOK-022 | Cross-scope comparison is zero | Generate decision pairs with differing scopes | `compare` returns 0 for every such pair, unconditionally |
+| VP1-HOOK-023 | Comparison properties | Property-based over the profile's decision space | Antisymmetry, transitivity within a scope, and reflexive equality all hold; no counterexample |
+| VP1-HOOK-024 | Determinism | Evaluate identical inputs repeatedly within one process | Identical decisions every time |
+| VP1-HOOK-030 | Admission returns, never raises | Drive refusal conditions | Refusal arrives as `permitted=False` with a code; no exception raised for a business decision |
+| VP1-HOOK-031 | Reason codes declared | Drive every refusal path | Every code returned is a member of the profile's declared set |
+| VP1-HOOK-032 | Refused session not established | Refuse admission | No SIP invitation sent; no session record created; refusal audited |
+| VP1-HOOK-033 | Session decision applied verbatim | Vary auto-answer, acknowledgement, recording and participant limit | Observed behaviour matches the decision exactly; core infers nothing |
+| VP1-HOOK-034 | Floor policy consistency | Return queueing disabled with non-zero depth, and the converse | Both rejected as contract violations |
+| VP1-HOOK-040 | Bearer decision well-formed | Select for every declared (call type, media) | Exactly one primary path; unique path IDs; redundancy consistent with path count |
+| VP1-HOOK-041 | ARP consistency | Return ARP pre-emption capability against a non-capable priority decision | Rejected as a contract violation |
+
+---
+
+## 6. TS-FC — floor control
+
+Environment: ENV-UNIT for the state machine, ENV-E2E for protocol conformance.
+PLT-FC-004 requires the machine to be testable without media or SIP, and this
+suite depends on that: VP1-FC-010..014 run in ENV-UNIT.
+
+| Case | Title | Steps | Pass criterion |
+|---|---|---|---|
+| VP1-FC-001 | Message set implemented | Exercise each message in ENV-E2E | Request, granted, taken, deny, release, idle, revoke and queue position all sent and parsed per TS 24.380 |
+| VP1-FC-002 | RTCP encoding conformant | Capture floor control traffic | Every message matches TS 24.380 encoding; trace comparator reports no deviation |
+| VP1-FC-010 | Exhaustive transitions | Drive every state/event pair in ENV-UNIT | Every defined transition reached; no undefined pair produces an unhandled state |
+| VP1-FC-011 | Single floor holder | Concurrent requests from all participants, repeated | At no observed point does more than one participant hold the floor |
+| VP1-FC-012 | Arbitration by floor priority | Competing requests at differing floor priorities | Highest floor priority granted; result traced to the `IF-PRI` decision, not to arrival order |
+| VP1-FC-013 | Queue bounded and ordered | Requests exceeding `max_queue_depth` | Queue never exceeds the declared depth; grants follow declared order; excess requests denied not dropped |
+| VP1-FC-014 | Deny when queueing disabled | Request while floor held, queueing disabled | Deny returned; no queue entry created |
+| VP1-FC-020 | Timers taken from profile | Load two profiles differing only in floor timer values | Observed timing follows each profile; transition sequence identical in both |
+| VP1-FC-021 | Transitions recorded | Complete a call with contention | Every transition recorded with trigger, timestamp and resulting state; sequence reconstructible from the audit trail alone |
+
+---
+
+## 7. TS-SIG, TS-CC, TS-MED, TS-DOC, TS-OAM
+
+### 7.1 TS-SIG — SIP signalling (ENV-INT)
+
+| Case | Title | Pass criterion |
+|---|---|---|
+| VP1-SIG-001 | Third-party SIP core interoperability | Platform completes registration and session setup against at least two distinct SIP core implementations, with no implementation-specific configuration |
+| VP1-SIG-002 | Third-party registration | Registration state maintained per MC service ID; state observable and correct after client re-registration and after expiry |
+| VP1-SIG-003 | Feature tags | Every request and response carries the MC service feature tags and media feature parameters of TS 24.379; verified by trace comparator |
+| VP1-SIG-004 | Malformed request rejected | Malformed, replayed and unknown-session requests each rejected with the status code specified in TS 24.379 |
+| VP1-SIG-005 | No state after failure | After each final failure response, session store contains no record; verified by direct inspection, not by absence of symptoms |
+| VP1-SIG-006 | TLS enforced | Plaintext connection attempts refused on every external interface; mutual authentication performed where the peer supports it |
+| VP1-SIG-007 | Stub IdMS refused in production | Start with the stub identity provider and a production indicator | Refuses to start |
+
+### 7.2 TS-CC — call control (ENV-E2E)
+
+| Case | Title | Pass criterion |
+|---|---|---|
+| VP1-CC-001 | Function separation | Participating and controlling functions deployable and observable as distinct roles; a session names its controlling function in the audit record |
+| VP1-CC-002 | Single controlling function | Across concurrent group calls including simultaneous origination on one group, exactly one controlling function exists per session at all times |
+| VP1-CC-003 | Private call, manual commencement | Call established after callee acceptance; trace matches the expected flow |
+| VP1-CC-004 | Private call, automatic commencement | Call established without callee action where the session decision sets auto-answer |
+| VP1-CC-005 | Prearranged group call | Invitations sent to exactly the resolved member set, no more and no fewer; late joiners handled per the session decision |
+| VP1-CC-006 | Session decision applied | Behaviour matches the session decision for every field; no field inferred by the core |
+| VP1-CC-007 | One priority decision per session | Each session carries exactly one decision, taken at admission, unchanged for its lifetime |
+
+### 7.3 TS-MED — media (ENV-E2E)
+
+| Case | Title | Pass criterion |
+|---|---|---|
+| VP1-MED-001 | RTP with declared codecs | Media flows using only codecs declared by the loaded profile |
+| VP1-MED-002 | SDP negotiation | Offer with no acceptable codec rejected; offer with an acceptable codec negotiated correctly |
+| VP1-MED-003 | Replication to participants | Media from the floor holder reaches every participant; verified by capture at each endpoint |
+| VP1-MED-004 | No media without floor | A non-holder transmitting produces no media at any other participant |
+
+### 7.4 TS-DOC — document server (ENV-INT)
+
+| Case | Title | Pass criterion |
+|---|---|---|
+| VP1-DOC-001 | Group documents served | Group documents retrievable over HTTP per TS 24.481; schema-valid; content matches the profile's group configuration |
+
+### 7.5 TS-OAM — observability (ENV-INT)
+
+| Case | Title | Pass criterion |
+|---|---|---|
+| VP1-OAM-001 | Profile identity in logs and audit | Name, version and hash logged at start and present on every audit record; values match the health endpoint |
+| VP1-OAM-002 | Health endpoint | Name, version and hash exposed; readiness false until the profile is validated and loaded |
+| VP1-OAM-003 | Session lifecycle audited | Admission, refusal, establishment and release each produce an audit record; refusals carry their reason code |
+| VP1-OAM-004 | Structured logs | Logs machine-parsable; one stable correlation identifier per session, present on every record of that session across all components |
+| VP1-OAM-005 | Restart without committed-record loss | Restart an instance mid-run | No committed session record lost; platform returns to service |
+
+---
+
+## 8. Analyses
+
+Each requires a written note, reviewed and signed. An analysis that cannot cite
+a concrete artefact is not evidence.
+
+| Case | Requirement | Argument required |
+|---|---|---|
+| VP1-ANL-001 | PLT-PRF-022 | Demonstrate by worked change that adding a call type, urgency and application to the MCX profile requires no change under `core/`. Evidence: the change set, showing files touched. |
+| VP1-ANL-002 | PLT-PRF-023 | Demonstrate by the FRMCS stub's own history that introducing a profile touched no file under `core/`. Evidence: the diff. |
+| VP1-ANL-003 | PLT-VER-003 | Define the procedure for handling a change that breaks one profile suite and not the other, including who classifies it and how a boundary defect is recorded. Evidence: the procedure, plus one worked example from the R1 period. |
+
+> VP1-ANL-001 and VP1-ANL-002 are the two that matter most in R1. They are the
+> only direct evidence that the architecture's central claim holds. If either
+> cannot be argued from a real change set, the boundary is in the wrong place
+> and R1 should not exit.
+
+---
+
+## 9. Traceability matrix
+
+All 83 R1 requirements. Method as specified in PLT-SRS.
+
+| Requirement | M | Verified by |
+|---|---|---|
+| PLT-GEN-001 | I | VP1-BND-006 |
+| PLT-GEN-002 | T | VP1-LOAD-001 |
+| PLT-GEN-003 | T | VP1-LOAD-002, VP1-LOAD-003, VP1-LOAD-004 |
+| PLT-GEN-004 | I | VP1-BND-007 |
+| PLT-GEN-005 | T | VP1-LOAD-005, VP1-LOAD-006 |
+| PLT-GEN-006 | I | VP1-BND-001 |
+| PLT-GEN-007 | I | VP1-BND-002, VP1-BND-003 |
+| PLT-GEN-008 | T | VP1-OAM-002 |
+| PLT-GEN-009 | T | VP1-OAM-005 |
+| PLT-GEN-011 | I | VP1-BND-016 |
+| PLT-PRF-001 | I | VP1-BND-003, VP1-BND-011 |
+| PLT-PRF-002 | T | VP1-LOAD-001 |
+| PLT-PRF-003 | T | VP1-LOAD-010 |
+| PLT-PRF-004 | T | VP1-LOAD-011, VP1-LOAD-012, VP1-LOAD-013, VP1-LOAD-014 |
+| PLT-PRF-005 | T | VP1-LOAD-015 |
+| PLT-PRF-006 | T | VP1-LOAD-016 |
+| PLT-PRF-007 | T | VP1-LOAD-030 |
+| PLT-PRF-008 | T | VP1-LOAD-010, VP1-LOAD-011, VP1-LOAD-015 |
+| PLT-PRF-009 | T | VP1-LOAD-040 |
+| PLT-PRF-010 | I | VP1-BND-008 |
+| PLT-PRF-011 | T | VP1-LOAD-041 |
+| PLT-PRF-012 | I | VP1-LOAD-022, VP1-BND-007 |
+| PLT-PRF-013 | T | VP1-LOAD-020, VP1-LOAD-021 |
+| PLT-PRF-020 | I | VP1-BND-001, VP1-BND-009 |
+| PLT-PRF-021 | T | VP1-LOAD-042 |
+| PLT-PRF-022 | A | VP1-ANL-001 |
+| PLT-PRF-023 | A | VP1-ANL-002 |
+| PLT-PRF-030 | I | VP1-BND-009 |
+| PLT-PRF-031 | I | VP1-BND-009, VP1-FC-020 |
+| PLT-PRF-032 | I | VP1-BND-010 |
+| PLT-HOK-001 | I | VP1-BND-004 |
+| PLT-HOK-002 | I | VP1-BND-004, VP1-BND-005 |
+| PLT-HOK-003 | T | VP1-HOOK-001, VP1-HOOK-002 |
+| PLT-HOK-005 | T | VP1-HOOK-003, VP1-HOOK-004 |
+| PLT-HOK-010 | T | VP1-HOOK-010, VP1-HOOK-011 |
+| PLT-HOK-011 | I | VP1-BND-014 |
+| PLT-HOK-014 | T | VP1-HOOK-013 |
+| PLT-HOK-015 | T | VP1-HOOK-014, VP1-HOOK-015 |
+| PLT-HOK-020 | T | VP1-HOOK-020, VP1-HOOK-021 |
+| PLT-HOK-021 | I | VP1-BND-013 |
+| PLT-HOK-022 | T | VP1-HOOK-022, VP1-HOOK-023 |
+| PLT-HOK-023 | I | VP1-BND-011 |
+| PLT-HOK-030 | T | VP1-HOOK-030, VP1-HOOK-031 |
+| PLT-HOK-031 | T | VP1-HOOK-033 |
+| PLT-HOK-032 | T | VP1-HOOK-034, VP1-FC-013, VP1-FC-014 |
+| PLT-HOK-033 | T | VP1-HOOK-032 |
+| PLT-HOK-040 | T | VP1-HOOK-040, VP1-HOOK-041 |
+| PLT-HOK-043 | I | VP1-BND-012 |
+| PLT-IDM-007 | T | VP1-SIG-007 |
+| PLT-SIG-001 | T | VP1-SIG-001 |
+| PLT-SIG-002 | T | VP1-SIG-002 |
+| PLT-SIG-003 | T | VP1-SIG-003 |
+| PLT-SIG-004 | T | VP1-SIG-004 |
+| PLT-SIG-005 | T | VP1-SIG-005 |
+| PLT-CC-001 | T | VP1-CC-001 |
+| PLT-CC-002 | T | VP1-CC-002 |
+| PLT-CC-003 | T | VP1-CC-003, VP1-CC-004 |
+| PLT-CC-004 | T | VP1-CC-005 |
+| PLT-CC-005 | T | VP1-CC-006, VP1-HOOK-033 |
+| PLT-FC-001 | T | VP1-FC-002 |
+| PLT-FC-002 | T | VP1-FC-001 |
+| PLT-FC-003 | T | VP1-FC-011 |
+| PLT-FC-004 | I | VP1-BND-015 |
+| PLT-FC-005 | T | VP1-FC-012 |
+| PLT-FC-006 | T | VP1-FC-013 |
+| PLT-FC-007 | T | VP1-FC-014 |
+| PLT-FC-010 | T | VP1-FC-020 |
+| PLT-FC-011 | T | VP1-FC-021 |
+| PLT-MED-001 | T | VP1-MED-001 |
+| PLT-MED-002 | T | VP1-MED-002 |
+| PLT-MED-003 | T | VP1-MED-003, VP1-MED-004 |
+| PLT-GRP-001 | T | VP1-DOC-001 |
+| PLT-PRI-001 | T | VP1-CC-007 |
+| PLT-SEC-007 | T | VP1-SIG-006 |
+| PLT-OAM-001 | T | VP1-OAM-001 |
+| PLT-OAM-002 | T | VP1-OAM-003 |
+| PLT-OAM-005 | T | VP1-OAM-004 |
+| PLT-OAM-007 | T | VP1-OAM-002 |
+| PLT-VER-001 | I | VP1-BND-021 |
+| PLT-VER-002 | I | VP1-BND-020 |
+| PLT-VER-003 | A | VP1-ANL-003 |
+| PLT-VER-004 | T | VP1-BND-001 |
+| PLT-VER-005 | T | VP1-FC-002, VP1-SIG-003, VP1-CC-003 |
+
+### 9.1 Cases running ahead of their phase
+
+Seven cases in §3–§7 trace to no R1 requirement. They are executed in R1 anyway,
+deliberately: each verifies a property that is cheap to establish now and
+expensive to retrofit once later work depends on it.
+
+| Case | Verifies (later phase) |
+|---|---|
+| VP1-LOAD-017 | PLT-HOK-030 reason-code discipline, ICD §5.1 POST-3 |
+| VP1-LOAD-018 | ICD §5.3 POST-3, floor timer name validation |
+| VP1-LOAD-031 | PLT-PRF-007, no-side-effect property beyond the stated criterion |
+| VP1-HOOK-012 | PLT-IDM-008 (R2) namespace partitioning |
+| VP1-HOOK-024 | PLT-HOK-024 (R2) determinism |
+| VP1-FC-010 | PLT-VER-006 (R2) exhaustive transition testing |
+| VP1-MED-004 | PLT-MED-005 (R2) no media without floor |
+
+These do not gate R1 exit. A failure is recorded and triaged against its own
+phase, not treated as an R1 blocker.
+
+---
+
+## 10. Exit criteria
+
+R1 verification is complete when all of the following hold:
+
+1. Every case in §3–§7 has executed with a recorded result.
+2. Every requirement in §9 has at least one passing verification artefact.
+3. The three analyses in §8 are written, reviewed and signed.
+4. Both profile conformance suites pass against the same built artefact.
+5. All TS-BND gates pass on the commit under test.
+6. An end-to-end prearranged group call between two clients completes with floor
+   arbitration, captured and matched by the trace comparator.
+7. Open points affecting R1 (§11) are closed or explicitly deferred with a
+   recorded decision.
+
+A case may not be waived. A requirement whose case cannot pass is deferred by
+moving the requirement to a later phase in PLT-SRS, with the reason recorded —
+not by relaxing its pass criterion.
+
+---
+
+## 11. Open points
+
+| # | Question | Blocks |
+|---|---|---|
+| VP-OP-01 | Which two SIP core implementations satisfy VP1-SIG-001? Interoperability against a single core does not evidence PLT-SIG-001. | VP1-SIG-001 |
+| VP-OP-02 | Does the trace comparator need golden captures from a third-party implementation, or are specification-derived expected flows sufficient for R1? | VP1-FC-002, VP1-CC-003 |
+| VP-OP-03 | Confirm the codec set per profile (PLT-SRS OP-06) before VP1-MED-001 can have a pass criterion. | VP1-MED-001 |
+| VP-OP-04 | Is VP1-FC-010 exhaustive over the full state/event product, or over reachable pairs only? Exhaustive is preferable and needs the machine's state space bounded first. | VP1-FC-010 |
+| VP-OP-05 | Define the production indicator referenced by PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008. Three requirements depend on a term not yet specified. | VP1-LOAD-005, VP1-SIG-007 |
+
+---
+
+## 12. Revision history
+
+| Version | Date | Change |
+|---|---|---|
+| 0.1 | 2026-09-19 | Initial draft |
