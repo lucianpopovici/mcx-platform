@@ -97,6 +97,26 @@ test fails, restore it. Guards that are masked by another layer (two layers
 protecting one invariant) need a test that isolates each with the other
 disabled; `tests/test_icx.py` has worked examples.
 
+## Protocol constants
+
+Every constant set in this codebase that has been checked against its
+specification has been wrong. Five for five. `docs/PLT-CONF-AUDIT.md` records
+what was checked, what it was, and what is still unverified.
+
+**Before you add or change a protocol constant**, read it from the documents in
+`docs/3GPP/` — the `.docx` originals, not the PDFs. Automated extraction of a
+PDF table does not fail loudly; it returns a plausible invented table. That
+happened once already and is written up in PLT-CONF-AUDIT 2.
+
+**A test that pins a constant must spell the value out as a literal.** If it
+imports the constant it is checking, the code and the test move together and
+the test proves nothing. One such test was written during the v0.3 audit and
+caught only by mutation testing (PLT-CONF-AUDIT 4.10).
+
+**The declared Rel-17 baseline is not what the code implements** — the RTCP
+layer carries four Rel-19 values, one of which (subtype 14) means a different
+message in the two releases. Unresolved: CA-11.
+
 ## Documents
 
 | Doc | Use it for |
@@ -116,7 +136,9 @@ reasons are specific, not general:
   which two is VP-OP-01. Nothing has run against a third-party core.
 - **VP1-FC-002** cannot close: the TS 24.380 text was not available, so the RTCP
   encoding and the comparator are both from memory (FC-OP-03).
-- **VP1-DOC-001**'s "schema-valid" clause: TS 24.481 schema unavailable (SVC-OP-01).
+- **VP1-DOC-001**'s "schema-valid" clause: PARTIAL. Everything TS 24.481
+  specifies is validated; the OMA-defined remainder needs
+  OMA-TS-XDM_Group-V1_1_1, which is not a 3GPP deliverable (SVC-OP-01).
 - **VP1-MED-001**: enforcement exists, but the codec set is a placeholder (MED-OP-01).
 - **VP1-CC-001**: roles are named in the audit record but not independently
   deployable (SIP-OP-03).

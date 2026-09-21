@@ -371,8 +371,12 @@ def test_vp1_cc_004_auto_answer_establishes_without_callee_action(core, rt, worl
     legs = {u: world[u].requests("INVITE") for u in U[1:]}
     assert all(len(v) == 1 for v in legs.values())
     for u, (req,) in legs.items():
-        assert req.headers.get("Answer-Mode") == "Auto"
+        # Forced automatic commencement: TS 24.379 clause 11.1.1.2.1 branch a).
+        # Answer-Mode: Auto alone would leave establishment conditional on the
+        # invited client's own settings (clause 6.3.2.2.5.2), which is not
+        # "without callee action".
         assert req.headers.get("Priv-Answer-Mode") == "Auto"
+        assert not req.headers.has("Answer-Mode")
     assert world[U[0]].requests("INVITE") == []          # initiator not invited
     # the callee client answers with no user action: straight to 200, no 180
     core.on_bytes(answer(legs[U[1]][0], 200, SDP), world[U[1]])

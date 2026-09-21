@@ -179,10 +179,14 @@ def test_auto_answer_renders_answer_mode():
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="t", call_type="x", media=(MediaKind.VOICE,))
 
+    # TS 24.379 clause 11.1.1.2.1: forced and non-forced automatic
+    # commencement are mutually exclusive branches. `auto_answer` in this
+    # platform means "establishes without callee action" (VP1-CC-004), which
+    # is the forced branch, so Priv-Answer-Mode alone.
     auto = adapter.render(Signal(SignalType.INVITE, target="sip:u1@x",
                                  detail={"auto_answer": True}), ctx, req)
-    assert auto.headers.get("Answer-Mode") == ANSWER_MODE_AUTO
     assert auto.headers.get("Priv-Answer-Mode") == ANSWER_MODE_AUTO
+    assert not auto.headers.has("Answer-Mode")
 
     manual = adapter.render(Signal(SignalType.INVITE, target="sip:u1@x",
                                    detail={"auto_answer": False}), ctx, req)
@@ -322,10 +326,17 @@ def test_authorisation_and_capacity_refusals_use_different_statuses():
 
 
 def test_refusal_carries_a_warning_header():
+    """The exact shape of TS 24.379 clause 4.4.1, whose own example reads
+
+        Warning: 399 "100 User not authorised to make group calls"
+
+    399 is the RFC 3261 warn-code; the MC code sits inside the quoted text.
+    Both were previously in the wrong position (PLT-CONF-AUDIT CA-02).
+    """
     adapter = Adapter("sip:server@mcptt.example")
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     warning = adapter.reject("unknown-target", ctx).headers.get("Warning")
-    assert warning and "not known" in warning
+    assert warning == '399 mcptt.example "145 unable to determine called party"'
 
 
 def test_unmapped_reason_defaults_to_server_error():
@@ -503,11 +514,140 @@ def test_every_reserved_reason_code_has_a_status_mapping():
 
 
 def test_every_non_fault_reason_code_has_a_warning_text():
-    """Faults deliberately carry no Warning; everything else must."""
+    """Faults deliberately carry no Warning; every other refusal must.
+
+    A reason code may get its text from the specification table or from
+    LOCAL_WARNING_TEXTS, but it may not fall through both silently -- that is
+    how a refusal would arrive as a bare status with nothing in the trace to
+    say it was a decision rather than a fault.
+    """
     from core.errors import CORE_ORIGINATED, RESERVED_REASON_CODES
-    from core.sip import WARNING_TEXTS
+    from core.sip import LOCAL_WARNING_TEXTS, WARNING_TEXTS
     faults = {"hook-error", "hook-timeout", "hook-contract-violation"}
     expected = RESERVED_REASON_CODES - faults - {"resolver-unavailable"}
-    missing = sorted(expected - set(WARNING_TEXTS))
+    covered = set(WARNING_TEXTS) | set(LOCAL_WARNING_TEXTS)
+    missing = sorted(expected - covered)
     assert missing == [], f"reason codes with no warning text: {missing}"
-    assert CORE_ORIGINATED & set(WARNING_TEXTS)
+    assert CORE_ORIGINATED & covered
+
+
+def test_every_specification_warning_code_is_in_the_specification_table():
+    """PLT-CONF-AUDIT CA-02.
+
+    The eleven codes this replaced were all invented, and none of them was
+    right. Worse, several collided: `partner-not-permitted` emitted 110,
+    which TS 24.379 table 4.4.2-2 defines as "user declined the call
+    invitation". A peer would not have failed to understand it; it would have
+    understood it to mean something that did not happen.
+
+    Every pair below is quoted from table 4.4.2-2 of TS 24.379 V17.15.0.
+    """
+    from core.sip import WARNING_TEXTS
+    assert WARNING_TEXTS == {
+        "unknown-target": (145, "unable to determine called party"),
+        "not-authorised": (100, "function not allowed due to user authorisation"),
+        "call-type-not-permitted": (100, "function not allowed due to local policy"),
+        "partner-not-permitted":
+            (179, "service not authorized with the interconnected system"),
+    }
+
+
+def test_no_reason_code_is_mapped_and_excused_at_once():
+    """A reason is either given a specification code or explicitly recorded as
+    having none. Both would mean the rationale no longer describes the code."""
+    from core.sip import REFUSALS_WITHOUT_WARNING_TEXT, WARNING_TEXTS
+    assert not (set(WARNING_TEXTS) & set(REFUSALS_WITHOUT_WARNING_TEXT))
+
+
+def test_local_warning_texts_carry_no_three_digit_prefix():
+    """A local text must not be mistakable for an MC warn-code.
+
+    Table 4.4.2-1 adds the MC form with "=/", an incremental alternative, so a
+    plain RFC 3261 warn-text stays legal -- but only as long as it cannot be
+    parsed as `DIGIT DIGIT DIGIT SP text` by a peer that tries.
+    """
+    from core.sip import LOCAL_WARNING_TEXTS
+    for reason, text in LOCAL_WARNING_TEXTS.items():
+        head = text.split()[0]
+        assert not (len(head) == 3 and head.isdigit()), (reason, text)
+
+
+def test_the_icsi_is_in_its_own_accept_contact_header_field():
+    """TS 24.379 clause 6.3.2.1.x requires TWO Accept-Contact header fields.
+
+    One combined header used to be emitted, with no ICSI reference at all
+    (PLT-CONF-AUDIT CA-06). The flows in annex F show the pair verbatim.
+    """
+    adapter = Adapter("sip:server@mcptt.example")
+    ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
+    req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
+                         target="t", call_type="x", media=(MediaKind.VOICE,))
+    invite = adapter.render(Signal(SignalType.INVITE, target="sip:u1@x",
+                                   detail={}), ctx, req)
+
+    values = invite.headers.get_all("Accept-Contact")
+    assert len(values) == 2, values
+    assert values[0] == "*;+g.3gpp.mcptt;require;explicit"
+    assert values[1] == \
+        '*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt";require;explicit'
+    # Literal, not the module constant: importing it would let a wrong ICSI
+    # pass, because the renderer and the assertion would move together.
+    assert "urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt" in \
+        invite.headers.get("Contact")
+
+
+def test_resource_priority_namespaces_are_not_constants_in_core():
+    """PLT-CONF-AUDIT CA-06.
+
+    TS 24.379 clause 6.3.3.1.19 retrieves the Resource-Priority namespace from
+    the service configuration document (TS 24.484); RFC 8101 registers the
+    values. Two literals used to sit in core/sip.py labelled as RFC 4412
+    constants -- deployment configuration in the one module that is forbidden
+    to hold any.
+    """
+    import core.sip as sip
+    assert not hasattr(sip, "RP_NAMESPACE_NORMAL")
+    assert not hasattr(sip, "RP_NAMESPACE_EMERGENCY")
+
+
+def test_warning_agent_is_a_host_name_for_a_public_service_identity():
+    """PLT-CONF-AUDIT CA-02b, second attempt.
+
+    TS 24.379 clause 4.2: a participating or controlling function is reachable
+    at a public service identity, which has no userinfo part. The first fix
+    for the `mcx` placeholder split on "@" and then on ":", so every URI of
+    that shape yielded the scheme -- `Warning: 399 sip "..."`. Every test in
+    this file used a `user@host` URI, which is the one shape that masks it.
+
+    Each form below is asserted separately: they fail independently.
+    """
+    ctx = lambda uri: DialogContext(call_id="c1", local_uri=uri)  # noqa: E731
+
+    for uri, host in (
+        ("sip:ps.mcptt.example", "ps.mcptt.example"),
+        ("sip:ps.mcptt.example:5060", "ps.mcptt.example"),
+        ("sips:ps.mcptt.example:5061", "ps.mcptt.example"),
+        ("sip:server@mcptt.example", "mcptt.example"),
+        ("sip:[2001:db8::1]:5060", "[2001:db8::1]"),
+    ):
+        warning = Adapter(uri).reject("unknown-target", ctx(uri)) \
+            .headers.get("Warning")
+        assert warning == \
+            f'399 {host} "145 unable to determine called party"', (uri, warning)
+        assert " sip " not in warning and " sips " not in warning
+
+
+def test_the_inbound_guard_uses_the_same_warning_shape():
+    """Clause 4.4.1 conformance was claimed module-wide but only reached
+    Adapter.reject; the guard's rejections still carried the literal `mcx`."""
+    from core.sip import InboundGuard
+    guard = InboundGuard()
+    request = Request(method="INVITE", uri="sip:ps.mcptt.example",
+                      headers=Headers([("To", "<sip:ps.mcptt.example>")]),
+                      body="")
+    response = guard.check(request)
+    assert response is not None, "a request missing Via/From/CSeq must be refused"
+    warning = response.headers.get("Warning")
+    assert warning is not None, "the refusal must say why"
+    assert warning.startswith('399 ps.mcptt.example "'), warning
+    assert "mcx" not in warning

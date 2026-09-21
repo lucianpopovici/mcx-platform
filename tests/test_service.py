@@ -354,10 +354,16 @@ def test_vp1_doc_001_group_document_matches_configuration(env):
         assert status == 200 and json.loads(body)["groups"] == ["grp:alpha"]
         status, body, ctype = get(srv.bound_port, "/docs/groups/grp%3Aalpha")
         assert status == 200 and ctype == groups_mod.MEDIA_TYPE
-        ns = "{urn:ietf:params:xml:ns:resource-lists}"
+        # TS 24.481 clause 7.2.2: <group> is the root, <list-service> is
+        # beneath it, and both are in the OMA list-service namespace. This
+        # used to expect <list-service> as the root in the resource-lists
+        # namespace, which is what the renderer wrongly emitted (CA-04).
+        ns = "{urn:oma:xml:poc:list-service}"
         root = ET.fromstring(body)
-        assert root.get("uri") == "grp:alpha"
-        assert [e.get("uri") for e in root.iter(ns + "entry")] == U
+        assert root.tag == ns + "group"
+        service = root.find(ns + "list-service")
+        assert service is not None and service.get("uri") == "grp:alpha"
+        assert [e.get("uri") for e in service.iter(ns + "entry")] == U
         groups_mod.check_rendered(rt.groups.get("grp:alpha"), body)
         assert get(srv.bound_port, "/docs/groups/grp%3Anone")[0] == 404
         # served from the same source the resolver was provisioned from
@@ -390,3 +396,57 @@ def test_malformed_groups_file_refuses_start(env):
     Path(env["MCX_GROUPS_FILE"]).write_text("groups:\n  - {id: g, members: []}\n")
     with pytest.raises(StartupRefused, match="members"):
         build_runtime(env, Clock())
+
+
+# -- PLT-CONF-AUDIT CA-04 ------------------------------------------------------
+
+
+def test_group_document_is_an_mcptt_group_document():
+    """TS 24.481 clause 7.2.8 lists five conditions, all of which must hold
+    before a conformant group management server treats this as an MCPTT group
+    document. The renderer used to satisfy none of them: <supported-services>
+    was absent entirely.
+
+    Each assertion below is one of the five conditions, checked separately so
+    that dropping any one of them turns a test red on its own.
+    """
+    from xml.etree import ElementTree as ET
+    from service.groups import Group, render
+
+    # Namespaces and the ICSI are spelled out rather than imported. Importing
+    # them would let a wrong value pass: the renderer and the assertion would
+    # move together, which is the circular validation PLT-CONF-AUDIT 2 is
+    # about. Every literal below is quoted from TS 24.481 V17.8.0.
+    group = Group("sip:alpha@mcptt.example", "Alpha", ("sip:u1@mcptt.example",))
+    root = ET.fromstring(render(group))
+    oxe = "{urn:oma:xml:xdm:extensions}"
+    gi = "{urn:3gpp:ns:mcpttGroupInfo:1.0}"
+
+    supported = root.find(".//" + oxe + "supported-services")
+    assert supported is not None                                   # a)
+    service = supported.find(oxe + "service")
+    assert service is not None                                     # b)
+    assert service.get("enabler") == \
+        "urn:urn-7:3gpp-service.ims.icsi.mcptt"                    # c)
+    media = service.find(oxe + "group-media")
+    assert media is not None                                       # d)
+    assert media.find(gi + "mcptt-speech") is not None             # e)
+
+
+def test_group_document_media_type_is_the_oma_group_type():
+    """TS 24.481 clause 7.2.6 defers to OMA XDM Group, and the XCAP PUT in the
+    clause A.2 example carries the type on the wire. It is not
+    application/xml, which is what this declared before CA-04."""
+    from service.groups import MEDIA_TYPE
+    assert MEDIA_TYPE == "application/vnd.oma.poc.groups+xml"
+
+
+def test_group_document_root_is_group_in_the_oma_namespace():
+    """The root element and its namespace were both wrong. Pinned separately
+    from the structure test because they fail independently: a document with
+    the right children under the wrong root is still rejected."""
+    from xml.etree import ElementTree as ET
+    from service.groups import Group, render
+
+    root = ET.fromstring(render(Group("sip:a@x", "A", ("sip:u@x",))))
+    assert root.tag == "{urn:oma:xml:poc:list-service}group"

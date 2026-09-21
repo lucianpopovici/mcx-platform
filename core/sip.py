@@ -11,10 +11,13 @@ Splits into three pieces, none of which touches a socket:
 Keeping this transport-free is what lets TS-SIG run in ENV-UNIT. A socket layer
 sits above it and is the only part that needs a live SIP core.
 
-OPEN: the 3GPP Warning header codes in WARNING_TEXTS are the ones this
-implementation emits; they must be confirmed against TS 24.379 §4.4 of the
-target release before interoperability testing (VP-OP-01). The status codes
-themselves are RFC 3261 and are not in doubt.
+CONFORMANCE: the Warning header codes and texts in WARNING_TEXTS were checked
+against 3GPP TS 24.379 V17.15.0 table 4.4.2-2 (PLT-CONF-AUDIT CA-02) and every
+one of the eleven values previously here was wrong. Only codes whose
+specification description matches a platform reason code are carried now; the
+reasons with no faithful code are listed in REFUSALS_WITHOUT_WARNING_TEXT and
+deliberately emit no Warning header, because a code that means something else
+to a conformant peer is worse than silence.
 """
 
 from __future__ import annotations
@@ -48,10 +51,24 @@ from .session import Signal, SignalType
 # TS 24.379 constants
 # --------------------------------------------------------------------------
 
-# Media feature tags (TS 24.379 §6.2 / §7). One per MC service.
+# Media feature tags. `g.3gpp.mcptt` is confirmed against TS 24.379 V17.15.0
+# (clauses 6.3.2.1.x, 6.3.3.1.x and the flows in annex F). The MCData and
+# MCVideo tags are NOT confirmed: they are defined in TS 24.282 and TS 24.281,
+# neither of which is in this repository (PLT-CONF-AUDIT CA-06).
 FEATURE_TAG_PTT = "+g.3gpp.mcptt"
-FEATURE_TAG_DATA = "+g.3gpp.mcdata"
-FEATURE_TAG_VIDEO = "+g.3gpp.mcvideo"
+FEATURE_TAG_DATA = "+g.3gpp.mcdata"          # unverified
+FEATURE_TAG_VIDEO = "+g.3gpp.mcvideo"        # unverified
+
+# The IMS Communication Service Identifier for MCPTT. TS 24.379 requires it in
+# both the Contact and a dedicated Accept-Contact header field, percent-encoded
+# on the wire.
+MCPTT_ICSI = "urn:urn-7:3gpp-service.ims.icsi.mcptt"
+FEATURE_TAG_ICSI_REF = "+g.3gpp.icsi-ref"
+
+
+def _pct(value: str) -> str:
+    """Percent-encode a feature tag value as TS 24.379 shows it on the wire."""
+    return value.replace(":", "%3A")
 
 # Content types carried on MC signalling.
 CT_MC_INFO = "application/vnd.3gpp.mcptt-info+xml"
@@ -59,11 +76,20 @@ CT_RESOURCE_LISTS = "application/resource-lists+xml"
 CT_LOCATION_INFO = "application/vnd.3gpp.mcptt-location-info+xml"
 CT_SDP = "application/sdp"
 
-# RFC 4412 resource priority namespaces used for MC services.
-RP_NAMESPACE_NORMAL = "mcpttp"
-RP_NAMESPACE_EMERGENCY = "mcpttq"
+# Resource-Priority namespaces are NOT constants and are deliberately absent.
+# TS 24.379 clauses 6.3.3.1.19 and 6.3.2.1.8.4 retrieve the namespace from the
+# <resource-priority-namespace> element of <normal-resource-priority>,
+# <emergency-resource-priority> or <imminent-peril-resource-priority> in the
+# service configuration document (TS 24.484). The namespace VALUES are
+# registered by IETF RFC 8101, not RFC 4412 -- 4412 defines only the header
+# field. Two namespace literals previously sat here; they were deployment
+# configuration wearing the costume of a protocol constant, and the core is the
+# one place they could not correctly live (PLT-CONF-AUDIT CA-06).
+#
+# The session layer supplies the rendered value via `signal.detail`.
 
-# RFC 5373 answer mode.
+# RFC 5373 answer mode. Both values confirmed against TS 24.379 V17.15.0
+# clauses 6.3.2.2.5.x and 10.1.1.4.1.
 ANSWER_MODE_AUTO = "Auto"
 ANSWER_MODE_MANUAL = "Manual"
 
@@ -119,20 +145,101 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     HOOK_CONTRACT_VIOLATION: Status.SERVER_ERROR,
 }
 
-# Warning header texts. See the OPEN note in the module docstring.
+# TS 24.379 clause 4.4.1: the RFC 3261 warn-code is always 399 (miscellaneous
+# warning). The 3-digit MC code is part of the quoted warn-text, not the
+# warn-code -- codes below 300 are not legal RFC 3261 warn-codes at all.
+WARNING_CODE_MISC = 399
+
+# Warning texts, from TS 24.379 V17.15.0 table 4.4.2-2. Each entry is carried
+# only because the specification's own description of that code matches what
+# the platform reason code means. Nothing here is approximated: see
+# REFUSALS_WITHOUT_WARNING_TEXT for the refusals that have no faithful code.
+#
+# Code 100 takes a <detailed reason>, which table 4.4.2-2 defines as one of
+# "group definition", "access policy", "local policy", "user authorisation" or
+# "pre-established session not supported", or a free text string. Two reasons
+# below use two different specification-enumerated detailed reasons, which is
+# exactly what that mechanism is for.
 WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
-    UNKNOWN_TARGET: (103, "target user not known"),
-    NO_BINDING: (104, "identity has no current holder"),
-    NO_LOCATION_BINDING: (105, "location required for this identity"),
-    NOT_AUTHORISED: (100, "function not allowed due to authorisation"),
-    CALL_TYPE_NOT_PERMITTED: (101, "call type not available to this user"),
-    CAPACITY_EXHAUSTED: (102, "maximum number of sessions reached"),
-    RECORDING_UNAVAILABLE: (106, "recording unavailable"),
-    QOS_UNAVAILABLE: (107, "requested quality of service unavailable"),
-    GATEWAY_UNAVAILABLE: (108, "interworking gateway unavailable"),
-    PARTNER_UNAVAILABLE: (109, "partner system unavailable"),
-    PARTNER_NOT_PERMITTED: (110, "not permitted with this partner system"),
+    # "The participating function was unable to determine the called party
+    # from the information received in the SIP request."
+    UNKNOWN_TARGET: (145, "unable to determine called party"),
+    NOT_AUTHORISED: (100, "function not allowed due to user authorisation"),
+    CALL_TYPE_NOT_PERMITTED: (100, "function not allowed due to local policy"),
+    # "The MCPTT service is not authorized between the local and the
+    # interconnected system and is rejected in the local system."
+    PARTNER_NOT_PERMITTED: (179,
+                            "service not authorized with the interconnected system"),
 }
+
+# Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
+# was not mapped to a near neighbour. These emit the SIP status alone.
+#
+# The temptation is to reach for an adjacent code. Resist it: the eleven codes
+# this table replaced were all plausible neighbours, and one of them (110)
+# tells a conformant peer "user declined the call invitation" when what
+# actually happened was a partner policy refusal. That is a worse outcome than
+# a bare 403, because it is confidently wrong rather than merely terse.
+#
+# They still carry a Warning header, but a plain RFC 3261 one with no MC code.
+# Table 4.4.2-1 defines the MC form with "=/", an ABNF INCREMENTAL ALTERNATIVE:
+# it adds a permitted shape for warn-text, it does not replace RFC 3261's. A
+# warn-text that does not begin with three digits therefore stays legal and
+# cannot be mistaken for a code. This is what keeps PLT-PRI-008's invariant --
+# a policy refusal must be distinguishable from a fault in the trace, and both
+# are 503 for `capacity-exhausted` -- without emitting a false code to buy it.
+LOCAL_WARNING_TEXTS: Mapping[str, str] = {
+    NO_BINDING: "identity has no current holder",
+    NO_LOCATION_BINDING: "location required for this identity",
+    CAPACITY_EXHAUSTED: "maximum number of sessions reached",
+    RECORDING_UNAVAILABLE: "recording unavailable",
+    QOS_UNAVAILABLE: "requested quality of service unavailable",
+    GATEWAY_UNAVAILABLE: "interworking gateway unavailable",
+    PARTNER_UNAVAILABLE: "partner system unavailable",
+}
+
+REFUSALS_WITHOUT_WARNING_TEXT: Mapping[str, str] = {
+    # 141 is the nearest, but it is the opposite direction: it means the
+    # participating function could not associate a public user identity with
+    # an MCPTT ID. `no-binding` means a known identity that nobody holds.
+    NO_BINDING: "no code for a functional identity with no current holder",
+    NO_LOCATION_BINDING: "no location-binding code in table 4.4.2-2",
+    # 103, 122, 124 and 164 are all per-user or per-group maxima. The table
+    # has no code for server admission capacity.
+    CAPACITY_EXHAUSTED: "no code for server admission capacity",
+    RECORDING_UNAVAILABLE: "no recording code in table 4.4.2-2",
+    QOS_UNAVAILABLE: "no bearer/QoS code in table 4.4.2-2",
+    # Codes 301-350 are reserved for interworking, and table 4.4.2-2 defers
+    # their meaning to TS 29.379, which is not in this repository.
+    GATEWAY_UNAVAILABLE: "interworking codes 301-350 are defined in TS 29.379",
+    # 179 and 180 are authorisation, not reachability.
+    PARTNER_UNAVAILABLE: "179/180 mean not authorised, not unreachable",
+    RESOLVER_UNAVAILABLE: "an internal condition, not an MC protocol one",
+}
+
+
+def _host_of(uri: str) -> str:
+    """The host part of a SIP URI, for the Warning header's warn-agent.
+
+    TS 24.379 clause 4.4.1 requires the host name of the MCPTT server there.
+
+    A server is normally reachable at a public service identity (clause 4.2),
+    which has NO userinfo part: `sip:ps.mcptt.example`. Splitting on "@" and
+    then on ":" yields the scheme for those, so a first attempt at this
+    returned "sip" for every realistic deployment URI and was masked by tests
+    that all used a `user@host` form.
+    """
+    text = uri.strip().lstrip("<")
+    text = text.split(">")[0]                     # <sip:a@b>;tag=1
+    if "@" in text:
+        hostport = text.rsplit("@", 1)[1]
+    else:
+        _, _, hostport = text.partition(":")      # drop the scheme
+        hostport = hostport or text
+    hostport = hostport.split(";")[0].split(",")[0]
+    if hostport.startswith("["):                  # IPv6 reference
+        return hostport.split("]")[0] + "]"
+    return hostport.split(":")[0] or uri
 
 
 class SipError(Exception):
@@ -413,7 +520,11 @@ def _reject(status: Status, request: Request, detail: str = "") -> Response:
         if value is not None:
             headers.add(name, value)
     if detail:
-        headers.add("Warning", f'399 mcx "{detail}"')
+        # Same TS 24.379 clause 4.4.1 shape as Adapter.reject. The warn-agent
+        # was the literal "mcx" here too; the guard has no Adapter to ask, so
+        # it takes the host from the request it is refusing.
+        host = _host_of(request.headers.get("To") or request.uri or "")
+        headers.add("Warning", f'{WARNING_CODE_MISC} {host} "{detail}"')
     return Response(status=status, headers=headers)
 
 
@@ -444,6 +555,7 @@ class Adapter:
 
     def __init__(self, local_uri: str) -> None:
         self._local = local_uri
+        self._host = _host_of(local_uri)
 
     # -- rendering -------------------------------------------------------
 
@@ -466,14 +578,43 @@ class Adapter:
         media = tuple(request.media) if request else (MediaKind.VOICE,)
         tags = self._feature_tags(media)
 
-        headers.set("Contact", f"<{self._local}>;{';'.join(tags)}")
-        # `require;explicit` so the request is routed only to a client that
-        # actually supports the service (TS 24.379).
-        headers.set("Accept-Contact",
-                    f"*;{';'.join(tags)};require;explicit")
+        icsi = f'{FEATURE_TAG_ICSI_REF}="{_pct(MCPTT_ICSI)}"'
+        headers.set("Contact", f"<{self._local}>;{';'.join(tags)};{icsi}")
 
+        # TS 24.379 requires TWO Accept-Contact header fields, not one
+        # combined value: one carrying the service feature tag and one
+        # carrying the ICSI reference, each with "require" and "explicit"
+        # (IETF RFC 3841). Omitting the ICSI field is what the single
+        # combined header used to do (PLT-CONF-AUDIT CA-06).
+        headers.add("Accept-Contact", f"*;{';'.join(tags)};require;explicit")
+        headers.add("Accept-Contact", f"*;{icsi};require;explicit")
+
+        # TS 24.379 clause 11.1.1.2.1.1 step 14 makes these MUTUALLY EXCLUSIVE:
+        #
+        #   force of automatic commencement requested -> Priv-Answer-Mode: Auto
+        #   automatic commencement, not forced        -> Answer-Mode: Auto
+        #   manual commencement                       -> Answer-Mode: Manual
+        #
+        # This used to emit Answer-Mode AND Priv-Answer-Mode together for
+        # auto-answer, and Priv-Answer-Mode: Manual otherwise, which is not a
+        # value that branch produces at all (PLT-CONF-AUDIT CA-06).
+        #
+        # `auto_answer` from the session decision means the call establishes
+        # without callee action (VP1-CC-004), so it is the FORCED branch:
+        # Answer-Mode: Auto alone only takes effect if the invited client's own
+        # settings already say auto-answer (clause 6.3.2.2.5.2), which would
+        # leave establishment at the mercy of a handset setting.
+        #
+        # SIP-OP-07: the platform therefore cannot currently express the
+        # non-forced automatic branch. Adding it is a profile schema change and
+        # an ICD revision, not an audit correction.
+        #
+        # SIP-OP-08: clause 11.1.1.2.2.1 (private call over a PRE-ESTABLISHED
+        # session) spells the same value "Automatic", in Rel-17 and Rel-20
+        # alike, where clause 11.1.1.2.1.1 spells it "Auto". A receiver must
+        # accept both. This renderer emits "Auto" and does not implement the
+        # pre-established path at all.
         if signal.detail.get("auto_answer"):
-            headers.set("Answer-Mode", ANSWER_MODE_AUTO)
             headers.set("Priv-Answer-Mode", ANSWER_MODE_AUTO)
         else:
             headers.set("Answer-Mode", ANSWER_MODE_MANUAL)
@@ -489,12 +630,26 @@ class Adapter:
                        headers=headers, body=context.sdp)
 
     def reject(self, reason_code: str, context: DialogContext) -> Response:
+        """Refuse, with the Warning header shape of TS 24.379 clause 4.4.1.
+
+            Warning: 399 mcptt.example "100 function not allowed due to ..."
+
+        399 is the RFC 3261 warn-code, the host name is this server's, and the
+        MC 3-digit code lives inside the quoted warn-text. A refusal with no
+        specification-defined code carries no Warning at all.
+        """
         status = REASON_TO_STATUS.get(reason_code, Status.SERVER_ERROR)
         headers = self._common(context)
         warning = WARNING_TEXTS.get(reason_code)
         if warning is not None:
             code, text = warning
-            headers.add("Warning", f'{code} mcx "{text}"')
+            headers.add("Warning",
+                        f'{WARNING_CODE_MISC} {self._host} "{code} {text}"')
+        else:
+            local = LOCAL_WARNING_TEXTS.get(reason_code)
+            if local is not None:
+                headers.add("Warning",
+                            f'{WARNING_CODE_MISC} {self._host} "{local}"')
         return Response(status=status, headers=headers)
 
     def _feature_tags(self, media: Sequence[MediaKind]) -> Tuple[str, ...]:
