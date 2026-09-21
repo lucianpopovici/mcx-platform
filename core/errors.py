@@ -21,6 +21,7 @@ CAPACITY_EXHAUSTED = "capacity-exhausted"
 CALL_TYPE_NOT_PERMITTED = "call-type-not-permitted"
 RECORDING_UNAVAILABLE = "recording-unavailable"
 QOS_UNAVAILABLE = "qos-unavailable"
+GATEWAY_UNAVAILABLE = "gateway-unavailable"
 HOOK_TIMEOUT = "hook-timeout"
 HOOK_ERROR = "hook-error"
 HOOK_CONTRACT_VIOLATION = "hook-contract-violation"
@@ -36,6 +37,7 @@ RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
         CALL_TYPE_NOT_PERMITTED,
         RECORDING_UNAVAILABLE,
         QOS_UNAVAILABLE,
+        GATEWAY_UNAVAILABLE,
         HOOK_TIMEOUT,
         HOOK_ERROR,
         HOOK_CONTRACT_VIOLATION,
@@ -48,6 +50,7 @@ CORE_ORIGINATED: FrozenSet[str] = frozenset(
     {
         RECORDING_UNAVAILABLE,
         QOS_UNAVAILABLE,
+        GATEWAY_UNAVAILABLE,
         HOOK_TIMEOUT,
         HOOK_ERROR,
         HOOK_CONTRACT_VIOLATION,

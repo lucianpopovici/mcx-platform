@@ -44,6 +44,9 @@ class ResolutionKind(Enum):
     USER = "user"
     GROUP = "group"
     BROADCAST_AREA = "broadcast-area"
+    # The target belongs to a non-MC system. No local member set exists; the
+    # session is routed to a gateway instead of being established locally.
+    EXTERNAL = "external"
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +84,12 @@ class SessionRequest:
 
 @dataclass(frozen=True)
 class Resolution:
+    """The outcome of resolving a target.
+
+    EXTERNAL carries no members: `resolved_from` holds the foreign target and
+    the interworking hook supplies the gateway.
+    """
+
     kind: ResolutionKind
     members: Sequence[MCServiceId]
     group_id: Optional[GroupId] = None

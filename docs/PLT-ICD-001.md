@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.1 (draft)
+**Version:** 0.2 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -114,7 +114,8 @@ consult mutable state, because functional-identity bindings change at runtime.
 **POST**
 1. Returns a `Resolution` whose `kind` is consistent with `members`:
    `USER` → exactly 1; `GROUP` → `group_id` set, ≥ 1 member;
-   `BROADCAST_AREA` → ≥ 0 members.
+   `BROADCAST_AREA` → ≥ 0 members; `EXTERNAL` → **no** members, and
+   `resolved_from` carries the foreign target.
 2. `members` contains no duplicates and is stably ordered.
 3. Every member is within a domain declared by the profile (PLT-IDM-008).
 4. `resolved_from` records the reference actually used, where it differs from
@@ -362,15 +363,33 @@ data-only sessions.
 
 ```
 1  IF-IDR.resolve(target, request)              → Resolution
-2  IF-IWF.route(request, resolution)            → None | InterworkingRoute
+2  IF-IWF.route(request, resolution)            → InterworkingRoute
+      ── ONLY when resolution.kind is EXTERNAL ──
+      ── if it returns None: refuse `gateway-unavailable`, stop ──
 3  IF-PRI.evaluate(request, resolution)         → PriorityDecision
 4  IF-SES.admit(request, resolution, priority)  → Admission
    ── if not permitted: reject, stop ──
 5  IF-SES.decide(request, resolution)           → SessionDecision
 6  IF-SES.floor_policy(request, resolution)     → FloorPolicy   [voice/video only]
 7  IF-BER.select(request, priority, media)      → BearerDecision
-8  core: reserve QoS, establish session, fan out invitations
+8  core: reserve QoS, establish, then EITHER
+        invite the resolved member set (local), OR
+        invite the gateway alone (EXTERNAL) — never both
 ```
+
+**Step 2 is conditional (changed in v0.2).** In v0.1 `route` was invoked on
+every session, after `resolve`. That made interworking unreachable: an external
+target is precisely what the identity resolver cannot resolve, so the sequence
+died at step 1 with `unknown-target` and IF-IWF was never called. The hook was
+dead code, and its unit tests passed only by calling `route()` directly.
+
+A resolver now reports a foreign target as `ResolutionKind.EXTERNAL`, which:
+
+1. makes "this call leaves the MC domain" an explicit, auditable resolution
+   outcome rather than something inferred from a hook's return value;
+2. costs a local session nothing, since IF-IWF is not consulted at all;
+3. forces step 8 to branch, so a routed session can no longer be established
+   locally *and* routed out — which v0.1 permitted and left unspecified.
 
 Ordering is fixed (ICD-GEN-032). Each step may assume its predecessors
 succeeded. If any raises, the sequence stops and the session fails; no
@@ -428,6 +447,7 @@ they may not redefine these.
 | `call-type-not-permitted` | IF-SES | Call type not available to this initiator |
 | `recording-unavailable` | core | Recording required, recorder unavailable |
 | `qos-unavailable` | core | Network refused the requested QoS |
+| `gateway-unavailable` | core | Target is external, no gateway route produced |
 | `hook-timeout` | core | Hook exceeded its deadline |
 | `hook-error` | core | Hook raised |
 | `hook-contract-violation` | core | Returned value failed a POST check |
@@ -459,6 +479,8 @@ environmental condition.
 | ICD-OP-03 | Does any profile need pre-emption between scopes under an explicit bridging policy, or is the unconditional bar permanent? | R3 start |
 | ICD-OP-04 | Does IF-BER need a release/teardown call, or is path release wholly core-owned? | R3 start |
 | ICD-OP-05 | Confirm that no profile requires a floor-control transition change (§5.3 INV-2). If one does, the core state machine is wrong. | R2 exit |
+| ICD-OP-06 | Floor control across a gateway: TETRA and P25 PTT models do not map cleanly onto 24.380 grant, queue, override and revoke. Decide which are unsupported over IF-IWF rather than discovering it at interop. | R4 start |
+| ICD-OP-07 | Media anchoring for a routed session: does the platform stay in the media path or hand off to the gateway? Affects recording obligations (PLT-OAM-008) for interworked calls. | R4 start |
 
 ---
 
@@ -466,4 +488,5 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.2 | 2026-09-19 | §8.1 step 2 made conditional on `ResolutionKind.EXTERNAL`; step 8 branches between local fan-out and gateway routing; `EXTERNAL` added to §3.2 POST-1; `gateway-unavailable` added to §9; ICD-OP-06 and ICD-OP-07 opened. Fixes the defect that made IF-IWF unreachable. |
 | 0.1 | 2026-09-19 | Initial draft |

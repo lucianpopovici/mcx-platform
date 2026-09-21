@@ -26,10 +26,15 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import floor as floor_mod
 from .audit import Auditor, RecordType
-from .errors import QOS_UNAVAILABLE, RECORDING_UNAVAILABLE
+from .errors import (
+    GATEWAY_UNAVAILABLE,
+    QOS_UNAVAILABLE,
+    RECORDING_UNAVAILABLE,
+)
 from .hooks import (
     BearerDecision,
     MediaKind,
+    ResolutionKind,
     PriorityDecision,
     Resolution,
     SessionDecision,
@@ -85,6 +90,9 @@ class Session:
     floor: Optional[floor_mod.FloorControl] = None
     controlling: bool = True
     members: Tuple[str, ...] = ()
+    # Set when the session was routed to a non-MC system. A session has
+    # either members or a gateway, never both.
+    gateway: Optional[str] = None
 
 
 class Platform:
@@ -146,11 +154,24 @@ class SessionManager:
                                       request.target, request,
                                       post=self._check_resolution)
 
-            # 2 — IF-IWF
-            route = invoker.call("IF-IWF", "route",
-                                 self._hooks.interworking_gateway.route,
-                                 request, resolution)
-            if route is not None:
+            # 2 — IF-IWF, only when resolution says the target is foreign.
+            #
+            # Consulted conditionally rather than on every session: a local
+            # session pays nothing, and "this call leaves the MC domain" is an
+            # explicit resolution outcome rather than something inferred from a
+            # hook's return value.
+            route = None
+            if resolution.kind is ResolutionKind.EXTERNAL:
+                route = invoker.call("IF-IWF", "route",
+                                     self._hooks.interworking_gateway.route,
+                                     request, resolution)
+                if route is None:
+                    # The resolver called the target foreign and the gateway
+                    # hook produced no route. Refusing is the only safe answer:
+                    # falling back to local establishment would deliver the
+                    # call to the wrong party.
+                    return self._refuse(cid, request, GATEWAY_UNAVAILABLE,
+                                        "no gateway for an external target")
                 signals.append(Signal(SignalType.ROUTE_EXTERNAL,
                                       target=route.gateway,
                                       detail={"system": route.system}))
@@ -225,14 +246,26 @@ class SessionManager:
         if decision.recording_required:
             signals.append(Signal(SignalType.START_RECORDING))
 
-        # Fan out to exactly the resolved member set, no more and no fewer
-        # (PLT-CC-004). The initiator is not invited to its own session.
-        for member in resolution.members:
-            if member == request.initiator:
-                continue
-            signals.append(Signal(SignalType.INVITE, target=member, detail={
+        if route is not None:
+            # A routed session establishes toward the gateway ONLY. It is never
+            # also fanned out locally: the resolution carries no members, and
+            # doing both would place the same call twice.
+            session.gateway = route.gateway
+            signals.append(Signal(SignalType.INVITE, target=route.gateway, detail={
                 "auto_answer": decision.auto_answer,
-                "acknowledgement_required": decision.acknowledgement_required}))
+                "acknowledgement_required": decision.acknowledgement_required,
+                "external_target": resolution.resolved_from or request.target,
+                "system": route.system}))
+        else:
+            # Fan out to exactly the resolved member set, no more and no fewer
+            # (PLT-CC-004). The initiator is not invited to its own session.
+            for member in resolution.members:
+                if member == request.initiator:
+                    continue
+                signals.append(Signal(SignalType.INVITE, target=member, detail={
+                    "auto_answer": decision.auto_answer,
+                    "acknowledgement_required":
+                        decision.acknowledgement_required}))
 
         session.state = SessionState.ESTABLISHED
         self._sessions[cid] = session
@@ -249,6 +282,36 @@ class SessionManager:
                            recording=decision.recording_required)
         return session, tuple(signals), None
 
+    # -- inbound from a non-MC system -------------------------------------
+
+    def receive_inbound(self, foreign: Mapping[str, str]) -> Tuple[
+            Optional[Session], Tuple[Signal, ...], Optional[Refusal]]:
+        """Accept a session request relayed by a gateway (PLT-ICD-001 §7.2).
+
+        The mapped request re-enters the ordinary sequence at IF-IDR and
+        receives NO privilege from having arrived through a gateway: it is
+        resolved, prioritised and admitted exactly like a local request.
+        Priority the foreign system asserted is advisory; IF-PRI decides.
+        """
+        cid = str(foreign.get("request_id") or "")
+        invoker = Invoker(self._auditor, cid)
+        try:
+            request = invoker.call("IF-IWF", "map_inbound",
+                                   self._hooks.interworking_gateway.map_inbound,
+                                   foreign)
+        except HookFailure as failure:
+            placeholder = SessionRequest(
+                request_id=cid, initiator=str(foreign.get("initiator") or ""),
+                target=str(foreign.get("target") or ""),
+                call_type=str(foreign.get("call_type") or ""), media=())
+            return self._fail(cid, placeholder, failure)
+
+        self._auditor.emit(RecordType.SESSION_ADMITTED, cid,
+                           inbound_from=str(foreign.get("system") or ""),
+                           mapped_call_type=request.call_type,
+                           asserted_priority=str(foreign.get("priority") or ""))
+        return self.establish(request)
+
     # -- release ---------------------------------------------------------
 
     def release(self, correlation_id: str,
@@ -260,7 +323,10 @@ class SessionManager:
             session.floor.handle(floor_mod.Event(
                 floor_mod.EventType.SESSION_RELEASED))
         session.state = SessionState.RELEASED
-        signals = [Signal(SignalType.BYE, target=m) for m in session.members]
+        if session.gateway is not None:
+            signals = [Signal(SignalType.BYE, target=session.gateway)]
+        else:
+            signals = [Signal(SignalType.BYE, target=m) for m in session.members]
         signals.append(Signal(SignalType.RELEASE_QOS))
         self._auditor.emit(RecordType.SESSION_RELEASED, correlation_id,
                            cause=cause)
@@ -314,7 +380,6 @@ class SessionManager:
     def _check_resolution(self, resolution: Resolution) -> None:
         """PLT-ICD-001 §3.2 POST-1: kind and member count must agree."""
         from .errors import HookContractViolation
-        from .hooks import ResolutionKind
         if resolution.kind is ResolutionKind.USER and len(resolution.members) != 1:
             raise HookContractViolation(
                 f"USER resolution returned {len(resolution.members)} members")
@@ -323,6 +388,15 @@ class SessionManager:
                 raise HookContractViolation("GROUP resolution has no group_id")
             if not resolution.members:
                 raise HookContractViolation("GROUP resolution has no members")
+        if resolution.kind is ResolutionKind.EXTERNAL:
+            if resolution.members:
+                raise HookContractViolation(
+                    "EXTERNAL resolution must carry no members, found "
+                    f"{len(resolution.members)}")
+            if not resolution.resolved_from:
+                raise HookContractViolation(
+                    "EXTERNAL resolution must record the foreign target in "
+                    "resolved_from")
         if len(set(resolution.members)) != len(resolution.members):
             raise HookContractViolation("resolution contains duplicate members")
 

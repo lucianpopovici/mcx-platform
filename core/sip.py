@@ -27,6 +27,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .errors import (
     CALL_TYPE_NOT_PERMITTED,
     CAPACITY_EXHAUSTED,
+    GATEWAY_UNAVAILABLE,
     HOOK_CONTRACT_VIOLATION,
     HOOK_ERROR,
     HOOK_TIMEOUT,
@@ -102,6 +103,9 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     RECORDING_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     QOS_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     RESOLVER_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
+    # The gateway to a non-MC system could not be reached or produced no
+    # route. A service-level condition, not a fault in the platform.
+    GATEWAY_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     HOOK_TIMEOUT: Status.SERVER_ERROR,
     HOOK_ERROR: Status.SERVER_ERROR,
     HOOK_CONTRACT_VIOLATION: Status.SERVER_ERROR,
@@ -117,6 +121,7 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     CAPACITY_EXHAUSTED: (102, "maximum number of sessions reached"),
     RECORDING_UNAVAILABLE: (106, "recording unavailable"),
     QOS_UNAVAILABLE: (107, "requested quality of service unavailable"),
+    GATEWAY_UNAVAILABLE: (108, "interworking gateway unavailable"),
 }
 
 

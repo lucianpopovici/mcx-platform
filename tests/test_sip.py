@@ -487,3 +487,27 @@ def test_qos_and_recording_signals_are_not_sip(wired):
         rendered = adapter.render(signal, ctx, request)
         if signal.type in (SignalType.RESERVE_QOS, SignalType.START_RECORDING):
             assert rendered is None
+
+
+def test_every_reserved_reason_code_has_a_status_mapping():
+    """Guard against a silent default.
+
+    An unmapped reason code falls through to 500, which would report a policy
+    refusal as an internal fault. Adding a reason code without a status is the
+    kind of omission only a test like this catches.
+    """
+    from core.errors import RESERVED_REASON_CODES
+    from core.sip import REASON_TO_STATUS
+    unmapped = sorted(RESERVED_REASON_CODES - set(REASON_TO_STATUS))
+    assert unmapped == [], f"reason codes with no SIP status: {unmapped}"
+
+
+def test_every_non_fault_reason_code_has_a_warning_text():
+    """Faults deliberately carry no Warning; everything else must."""
+    from core.errors import CORE_ORIGINATED, RESERVED_REASON_CODES
+    from core.sip import WARNING_TEXTS
+    faults = {"hook-error", "hook-timeout", "hook-contract-violation"}
+    expected = RESERVED_REASON_CODES - faults - {"resolver-unavailable"}
+    missing = sorted(expected - set(WARNING_TEXTS))
+    assert missing == [], f"reason codes with no warning text: {missing}"
+    assert CORE_ORIGINATED & set(WARNING_TEXTS)

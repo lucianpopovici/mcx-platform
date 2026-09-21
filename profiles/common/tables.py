@@ -315,6 +315,18 @@ class DirectoryResolver:
                 ordered.append(m)
         self._groups[group_id] = tuple(ordered)
 
+    def _is_external(self, target: TargetRef) -> bool:
+        """True when the target matches a declared interworking route prefix.
+
+        Read from the profile's own interworking block, so a profile with no
+        interworking never produces an EXTERNAL resolution.
+        """
+        interworking = self._profile.interworking
+        if interworking is None:
+            return False
+        return any(r.target_prefix and target.startswith(r.target_prefix)
+                   for r in interworking.routes)
+
     def _require_declared_domain(self, service_id: MCServiceId) -> None:
         # PLT-IDM-008: never resolve outside the profile's declared domains.
         domain = service_id.rpartition("@")[2]
@@ -328,6 +340,12 @@ class DirectoryResolver:
     def resolve(self, target: TargetRef, request: SessionRequest) -> Resolution:
         if not target:
             raise ResolutionFailure(UNKNOWN_TARGET, "empty target")
+        # A target matching a declared interworking prefix belongs to a non-MC
+        # system. Saying so explicitly is what lets the core route it instead
+        # of failing it as unknown.
+        if self._is_external(target):
+            return Resolution(kind=ResolutionKind.EXTERNAL, members=(),
+                              group_id=None, resolved_from=target)
         if target in self._groups:
             members = self._groups[target]
             if not members:

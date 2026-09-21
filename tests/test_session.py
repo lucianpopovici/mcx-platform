@@ -225,18 +225,27 @@ def test_capacity_supplied_to_admission_hook(mcx, sink):
 
 
 def test_invocation_order_matches_icd_section_8_1(manager, sink):
+    """A local session never consults the interworking hook."""
     manager.establish(req())
     calls = [(r.detail["interface"], r.detail["method"])
              for r in sink.of_type(RecordType.HOOK_INVOCATION)]
     assert calls == [
         ("IF-IDR", "resolve"),
-        ("IF-IWF", "route"),
         ("IF-PRI", "evaluate"),
         ("IF-SES", "admit"),
         ("IF-SES", "decide"),
         ("IF-SES", "floor_policy"),
         ("IF-BER", "select"),
     ]
+
+
+def test_external_target_inserts_the_interworking_call(manager, sink):
+    """An EXTERNAL resolution adds IF-IWF.route immediately after IF-IDR."""
+    manager.establish(req(call_type="private", target="tetra:1234", rid="ext"))
+    calls = [(r.detail["interface"], r.detail["method"])
+             for r in sink.for_session("ext")
+             if r.type is RecordType.HOOK_INVOCATION]
+    assert calls[:2] == [("IF-IDR", "resolve"), ("IF-IWF", "route")]
 
 
 def test_sequence_stops_at_first_failure(manager, sink):
@@ -320,7 +329,7 @@ def test_vp1_hook_002_contract_violation_is_distinguished(mcx, sink):
 def test_vp1_hook_003_every_invocation_audited(manager, sink):
     manager.establish(req())
     records = sink.of_type(RecordType.HOOK_INVOCATION)
-    assert len(records) == 7
+    assert len(records) == 6
     for r in records:
         assert r.detail["interface"].startswith("IF-")
         assert "elapsed_ms" in r.detail
