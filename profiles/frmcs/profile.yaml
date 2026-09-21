@@ -1,0 +1,246 @@
+# FRMCS profile — STUB, NOT VALIDATED AGAINST UIC FRS/SRS
+#
+# Shape only: it exists to prove the hook boundary holds, and to give the
+# conformance harness a second suite. Every value below is a placeholder.
+# Before this goes anywhere near a real deployment it must be reconciled
+# with the UIC FRMCS FRS/SRS and 3GPP TS 22.289, and the priority and QoS
+# tables signed off under the CENELEC assurance process.
+#
+# What this file is meant to demonstrate: adding FRMCS touches ZERO files
+# under core/. If implementing it requires a core change, the seam is in
+# the wrong place.
+
+$schema: "https://mcx-platform.invalid/schema/profile/v1"
+
+profile:
+  name: frmcs
+  version: 0.0.1-stub
+  description: Railway FRMCS profile (placeholder values)
+  hooks:
+    identity_resolver: mcx_platform.profiles.frmcs.identity:FunctionalResolver
+    priority_policy: mcx_platform.profiles.frmcs.priority:TablePriorityPolicy
+    session_policy: mcx_platform.profiles.frmcs.session:FRMCSSessionPolicy
+    bearer_selector: mcx_platform.profiles.frmcs.bearer:MultiBearerSelector
+    interworking_gateway: mcx_platform.profiles.frmcs.iwf:GSMRGateway
+
+urgencies:
+  - {id: normal, label: Normal}
+  - {id: operational, label: Operational}
+  - {id: railway-emergency, label: Railway emergency}
+
+preemption_scopes:
+  - {id: railway, label: Railway operations}
+
+applications:
+  - {id: voice-operational, label: Operational voice, media: [voice], safety_relevant: false}
+  - {id: rec, label: Railway emergency communication, media: [voice], safety_relevant: true}
+  - {id: shunting, label: Shunting, media: [voice], safety_relevant: true}
+  - {id: etcs, label: ETCS over IPcon, media: [data], safety_relevant: true}
+  - {id: ato, label: ATO over IPcon, media: [data], safety_relevant: true}
+
+call_types:
+  - id: rec-broadcast
+    label: Railway emergency call
+    media: [voice]
+    session_model: broadcast
+    urgency: railway-emergency
+    application: rec
+    auto_answer: true
+    acknowledgement_required: true
+    recording_required: true
+    initiator_roles: [train-driver, track-controller]
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: false
+      override_allowed: true
+      max_queue_depth: 0
+      timers_ms: {T201: 100, T203: 1000, T205: 100, T206: 100}
+
+  - id: shunting-group
+    label: Shunting group call
+    media: [voice]
+    session_model: on-demand
+    urgency: operational
+    application: shunting
+    auto_answer: true
+    acknowledgement_required: false
+    recording_required: true
+    max_participants: 30
+    initiator_roles: [shunting-team-leader]
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: true
+      max_queue_depth: 4
+      timers_ms: {T201: 100, T203: 3000, T205: 100, T206: 100}
+
+  - id: driver-controller
+    label: Driver to controller call
+    media: [voice]
+    session_model: on-demand
+    urgency: operational
+    application: voice-operational
+    auto_answer: false
+    acknowledgement_required: false
+    recording_required: true
+    max_participants: 2
+    initiator_roles: [train-driver, track-controller]
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: false
+      max_queue_depth: 2
+      timers_ms: {T201: 100, T203: 4000, T205: 100, T206: 100}
+
+  - id: etcs-ipcon
+    label: ETCS data session
+    media: [data]
+    session_model: pre-established
+    urgency: operational
+    application: etcs
+    auto_answer: true
+    acknowledgement_required: false
+    recording_required: true
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: false
+      queueing_enabled: false
+      override_allowed: false
+      max_queue_depth: 0
+      timers_ms: {}
+
+identity:
+  domains: ["frmcs.example"]
+  functional:
+    - id: train-driver
+      label: Driver of a train
+      binding: dynamic
+      location_dependent: false
+      multiplicity: single
+      resolves_to: user
+    - id: track-controller
+      label: Controller for a track section
+      binding: dynamic
+      location_dependent: true
+      location_key: track_section
+      multiplicity: single
+      resolves_to: user
+    - id: shunting-team-leader
+      label: Shunting team leader
+      binding: dynamic
+      location_dependent: true
+      location_key: yard_id
+      multiplicity: single
+      resolves_to: user
+    - id: rec-area
+      label: Emergency broadcast area
+      binding: dynamic
+      location_dependent: true
+      location_key: track_section
+      multiplicity: multi
+      resolves_to: group
+
+priority:
+  default_scope: railway
+  rules:
+    - match: {call_type: "*", application: rec, urgency: "*"}
+      decision:
+        level: 95
+        scope: railway
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 255
+        label: railway-emergency
+    - match: {call_type: "*", application: etcs, urgency: "*"}
+      decision:
+        level: 85
+        scope: railway
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 240
+        label: etcs-data
+    - match: {call_type: "*", application: ato, urgency: "*"}
+      decision:
+        level: 80
+        scope: railway
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 230
+        label: ato-data
+    - match: {call_type: "*", application: shunting, urgency: "*"}
+      decision:
+        level: 60
+        scope: railway
+        preemption_capability: false
+        preemption_vulnerability: true
+        floor_priority: 180
+        label: shunting
+    - match: {call_type: "*", application: "*", urgency: "*"}
+      decision:
+        level: 30
+        scope: railway
+        preemption_capability: false
+        preemption_vulnerability: true
+        floor_priority: 100
+        label: operational
+
+bearer:
+  rules:
+    - match: {call_type: rec-broadcast, media: voice}
+      decision:
+        qos_identifier: 65
+        arp_level: 1
+        arp_preemption_capability: true
+        arp_preemption_vulnerability: false
+        redundancy: multihomed
+        paths:
+          - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
+          - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
+    - match: {call_type: etcs-ipcon, media: data}
+      decision:
+        qos_identifier: 67
+        arp_level: 2
+        arp_preemption_capability: true
+        arp_preemption_vulnerability: false
+        redundancy: multihomed
+        paths:
+          - {id: bearer-a, transport: sctp, primary: true, weight: 2, attributes: {multihoming: "true"}}
+          - {id: bearer-b, transport: sctp, primary: false, weight: 1, attributes: {multihoming: "true"}}
+    - match: {call_type: "*", media: voice}
+      decision:
+        qos_identifier: 65
+        arp_level: 6
+        arp_preemption_capability: false
+        arp_preemption_vulnerability: true
+        redundancy: multipath
+        paths:
+          - {id: bearer-a, transport: udp, primary: true, weight: 1, attributes: {}}
+    - match: {call_type: "*", media: data}
+      decision:
+        qos_identifier: 70
+        arp_level: 9
+        arp_preemption_capability: false
+        arp_preemption_vulnerability: true
+        redundancy: single
+        paths:
+          - {id: bearer-a, transport: tcp, primary: true, weight: 1, attributes: {}}
+
+interworking:
+  system: gsm-r
+  gateway: "sip:gsmr-gw@frmcs.example"
+  routes:
+    - match: {target_prefix: "gsmr:"}
+      gateway: "sip:gsmr-gw@frmcs.example"
+      attributes: {}
+
+admission:
+  max_concurrent_sessions: 5000
+  reserved_for_urgency:
+    railway-emergency: 500
+    operational: 1000
+  reject_reason_codes:
+    - capacity-exhausted
+    - not-authorised
+    - unknown-functional-identity
+    - no-location-binding
+    - call-type-not-permitted

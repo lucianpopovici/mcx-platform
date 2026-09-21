@@ -1,0 +1,196 @@
+# MCX profile — generic public safety (3GPP Rel-17 baseline)
+# Reference deployment. Implement and test this one first.
+
+$schema: "https://mcx-platform.invalid/schema/profile/v1"
+
+profile:
+  name: mcx
+  version: 0.1.0
+  description: Generic public-safety MCPTT/MCData deployment
+  hooks:
+    identity_resolver: mcx_platform.profiles.mcx.identity:DirectoryResolver
+    priority_policy: mcx_platform.profiles.mcx.priority:TablePriorityPolicy
+    session_policy: mcx_platform.profiles.mcx.session:MCXSessionPolicy
+    bearer_selector: mcx_platform.profiles.mcx.bearer:SinglePathSelector
+    interworking_gateway: mcx_platform.profiles.mcx.iwf:P25TetraGateway
+
+urgencies:
+  - {id: normal, label: Normal}
+  - {id: imminent-peril, label: Imminent peril}
+  - {id: emergency, label: Emergency}
+
+preemption_scopes:
+  - {id: public-safety, label: Public safety}
+
+applications: []
+
+call_types:
+  - id: private
+    label: Private call
+    media: [voice]
+    session_model: on-demand
+    urgency: normal
+    auto_answer: false
+    acknowledgement_required: false
+    recording_required: true
+    max_participants: 2
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: false
+      max_queue_depth: 4
+      timers_ms: {T201: 100, T203: 4000, T205: 100, T206: 100}
+
+  - id: prearranged-group
+    label: Prearranged group call
+    media: [voice]
+    session_model: on-demand
+    urgency: normal
+    auto_answer: false
+    acknowledgement_required: false
+    recording_required: true
+    max_participants: 200
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: true
+      max_queue_depth: 8
+      timers_ms: {T201: 100, T203: 4000, T205: 100, T206: 100}
+
+  - id: emergency-group
+    label: Emergency group call
+    media: [voice]
+    session_model: on-demand
+    urgency: emergency
+    auto_answer: true
+    acknowledgement_required: true
+    recording_required: true
+    max_participants: 200
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: false
+      override_allowed: true
+      max_queue_depth: 0
+      timers_ms: {T201: 100, T203: 2000, T205: 100, T206: 100}
+
+  - id: imminent-peril-group
+    label: Imminent peril group call
+    media: [voice]
+    session_model: on-demand
+    urgency: imminent-peril
+    auto_answer: true
+    acknowledgement_required: true
+    recording_required: true
+    max_participants: 200
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: true
+      queueing_enabled: true
+      override_allowed: true
+      max_queue_depth: 4
+      timers_ms: {T201: 100, T203: 3000, T205: 100, T206: 100}
+
+  - id: sds
+    label: Short data service
+    media: [data]
+    session_model: on-demand
+    urgency: normal
+    auto_answer: true
+    acknowledgement_required: false
+    recording_required: true
+    initiator_roles: []
+    floor:
+      initial_grant_to_initiator: false
+      queueing_enabled: false
+      override_allowed: false
+      max_queue_depth: 0
+      timers_ms: {}
+
+identity:
+  domains: ["mcptt.example"]
+  functional: []          # generic MCX: directory lookup only
+
+priority:
+  default_scope: public-safety
+  rules:
+    - match: {call_type: "*", application: "*", urgency: emergency}
+      decision:
+        level: 90
+        scope: public-safety
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 250
+        label: emergency
+    - match: {call_type: "*", application: "*", urgency: imminent-peril}
+      decision:
+        level: 70
+        scope: public-safety
+        preemption_capability: true
+        preemption_vulnerability: false
+        floor_priority: 200
+        label: imminent-peril
+    - match: {call_type: private, application: "*", urgency: "*"}
+      decision:
+        level: 30
+        scope: public-safety
+        preemption_capability: false
+        preemption_vulnerability: true
+        floor_priority: 100
+        label: normal-private
+    - match: {call_type: "*", application: "*", urgency: "*"}
+      decision:
+        level: 20
+        scope: public-safety
+        preemption_capability: false
+        preemption_vulnerability: true
+        floor_priority: 80
+        label: normal
+
+bearer:
+  rules:
+    - match: {call_type: emergency-group, media: voice}
+      decision:
+        qos_identifier: 65        # MC push-to-talk voice
+        arp_level: 1
+        arp_preemption_capability: true
+        arp_preemption_vulnerability: false
+        redundancy: single
+        paths: [{id: default, transport: udp, primary: true, weight: 1, attributes: {}}]
+    - match: {call_type: "*", media: voice}
+      decision:
+        qos_identifier: 65
+        arp_level: 5
+        arp_preemption_capability: false
+        arp_preemption_vulnerability: true
+        redundancy: single
+        paths: [{id: default, transport: udp, primary: true, weight: 1, attributes: {}}]
+    - match: {call_type: "*", media: data}
+      decision:
+        qos_identifier: 70
+        arp_level: 8
+        arp_preemption_capability: false
+        arp_preemption_vulnerability: true
+        redundancy: single
+        paths: [{id: default, transport: tcp, primary: true, weight: 1, attributes: {}}]
+
+interworking:
+  system: tetra
+  gateway: "sip:iwf@mcptt.example"
+  routes:
+    - match: {target_prefix: "tetra:"}
+      gateway: "sip:iwf@mcptt.example"
+      attributes: {}
+
+admission:
+  max_concurrent_sessions: 2000
+  reserved_for_urgency:
+    emergency: 200
+    imminent-peril: 100
+  reject_reason_codes:
+    - capacity-exhausted
+    - not-authorised
+    - unknown-target
+    - call-type-not-permitted

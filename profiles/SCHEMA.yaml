@@ -1,0 +1,156 @@
+# Profile schema — v1
+#
+# A profile is a directory of files validated against this schema at startup.
+# Unknown keys are ERRORS, not warnings: a typo in a priority table is a
+# safety-relevant defect. Nothing here is hot-reloadable; a profile change is
+# a redeployment.
+#
+# Loader contract:
+#   1. read profile dir, reject unknown keys, reject unresolved references
+#   2. freeze into an immutable object
+#   3. log name + version + sha256 of the canonicalised content
+#   4. expose that triple on /healthz and stamp it on every audit record
+#
+# Exactly one profile loads per deployment. Loading more than one is refused
+# unless MCX_TEST_MODE=1, which exists for the conformance harness and for
+# nothing else.
+
+$schema: "https://mcx-platform.invalid/schema/profile/v1"
+
+profile:
+  name: string            # "mcx", "frmcs" — appears in logs and audit records
+  version: string         # semver, bumped on any content change
+  description: string
+  hooks:                  # import paths; every one is mandatory, no defaults
+    identity_resolver: string
+    priority_policy: string
+    session_policy: string
+    bearer_selector: string
+    interworking_gateway: string
+
+# --------------------------------------------------------------------------
+# Vocabulary. The core treats every id below as an opaque string; these
+# declarations are what make them valid references elsewhere in the profile.
+# --------------------------------------------------------------------------
+
+urgencies:                # ordered, lowest first
+  - id: string
+    label: string
+
+preemption_scopes:        # arbitration never crosses a scope boundary
+  - id: string
+    label: string
+
+applications:             # FRMCS application categories; may be empty for MCX
+  - id: string
+    label: string
+    media: [voice|video|data]
+    safety_relevant: bool
+
+# --------------------------------------------------------------------------
+# Call types. The core enumerates nothing — this list IS the set of call
+# types the deployment supports.
+# --------------------------------------------------------------------------
+
+call_types:
+  - id: string
+    label: string
+    media: [voice|video|data]
+    session_model: on-demand|pre-established|broadcast
+    urgency: string               # -> urgencies[].id
+    application: string?          # -> applications[].id
+    auto_answer: bool
+    acknowledgement_required: bool
+    recording_required: bool
+    max_participants: int?
+    initiator_roles: [string]     # empty = any authorised user
+    floor:
+      initial_grant_to_initiator: bool
+      queueing_enabled: bool
+      override_allowed: bool
+      max_queue_depth: int
+      timers_ms:                  # 24.380 overrides; engine owns the FSM
+        <timer_name>: int
+
+# --------------------------------------------------------------------------
+# Identity. `functional` drives FRMCS functional addressing; an empty list
+# gives plain directory-lookup MCX behaviour.
+# --------------------------------------------------------------------------
+
+identity:
+  domains: [string]               # SIP domains this deployment serves
+  functional:
+    - id: string                  # "train-driver", "track-controller"
+      label: string
+      binding: static|dynamic
+      location_dependent: bool
+      location_key: string?       # attribute name in LocationContext
+      multiplicity: single|multi  # may several users hold it at once
+      resolves_to: user|group
+
+# --------------------------------------------------------------------------
+# Priority. Declarative: (call_type, application, urgency) -> decision.
+# First match wins; the loader rejects a table with no match for a declared
+# call type, and rejects any scope not declared above.
+# --------------------------------------------------------------------------
+
+priority:
+  default_scope: string           # -> preemption_scopes[].id
+  rules:
+    - match:
+        call_type: string|"*"
+        application: string|"*"
+        urgency: string|"*"
+      decision:
+        level: int                # higher wins
+        scope: string             # -> preemption_scopes[].id
+        preemption_capability: bool
+        preemption_vulnerability: bool
+        floor_priority: int
+        label: string
+
+# --------------------------------------------------------------------------
+# Bearer. QoS mapping plus, for FRMCS, multi-path transport.
+# --------------------------------------------------------------------------
+
+bearer:
+  rules:
+    - match:
+        call_type: string|"*"
+        media: voice|video|data|"*"
+      decision:
+        qos_identifier: int       # 5QI / QCI
+        arp_level: int
+        arp_preemption_capability: bool
+        arp_preemption_vulnerability: bool
+        redundancy: single|multipath|multihomed
+        paths:
+          - id: string
+            transport: udp|tcp|sctp
+            primary: bool
+            weight: int
+            attributes: {string: string}
+
+# --------------------------------------------------------------------------
+# Interworking. Omit the whole block for a deployment with no legacy system.
+# --------------------------------------------------------------------------
+
+interworking:
+  system: string?                 # "p25", "tetra", "gsm-r"
+  gateway: string?
+  routes:
+    - match:
+        target_prefix: string
+      gateway: string
+      attributes: {string: string}
+
+# --------------------------------------------------------------------------
+# Admission. Capacity is reserved per deployment, not shared by priority
+# alone — priority protects against contention, not against overload.
+# --------------------------------------------------------------------------
+
+admission:
+  max_concurrent_sessions: int
+  reserved_for_urgency:           # urgency id -> reserved session count
+    <urgency_id>: int
+  reject_reason_codes: [string]   # closed set; audit records reference these
