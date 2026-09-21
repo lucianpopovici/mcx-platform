@@ -95,7 +95,7 @@ class SipCore:
             if media_cfg is None:
                 raise ValueError("SIP requires a media plane (MCX_MEDIA_*)")
             media = UdpMediaPlane(media_cfg.address, media_cfg.ports, clock,
-                                  self.lock)
+                                  runtime.config.release, self.lock)
         else:
             media.lock = self.lock
         self.media = media

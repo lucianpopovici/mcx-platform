@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Mapping, Optional, Tuple
 
 from core.errors import StartupRefused
+from core.release import Release, parse as parse_release
 
 DEFAULT_PROFILES_ROOT = Path(__file__).resolve().parents[1] / "profiles"
 IDMS_STUB = "stub"
@@ -123,6 +124,7 @@ class MediaConfig:
 @dataclass(frozen=True)
 class Config:
     profile_names: List[str]
+    release: Release
     profiles_root: Path
     data_dir: Path
     idms: str
@@ -136,6 +138,16 @@ class Config:
     def from_env(env: Mapping[str, str]) -> "Config":
         raw_profiles = env.get("MCX_PROFILE", "")
         names = [n.strip() for n in raw_profiles.split(",") if n.strip()]
+
+        raw_release = (env.get("MCX_RELEASE") or "").strip()
+        if not raw_release:
+            raise StartupRefused(
+                "MCX_RELEASE is not set: state the 3GPP release this "
+                "deployment speaks (PLT-REL-002); there is no default. A "
+                "guessed release is silent -- subtype 14 is a valid floor "
+                "control message in Rel-17 and in Rel-18 and means a "
+                "different one in each")
+        release = parse_release(raw_release)
 
         data_dir = (env.get("MCX_DATA_DIR") or "").strip()
         if not data_dir:
@@ -164,6 +176,7 @@ class Config:
         sip = SipConfig.from_env(env)
         return Config(
             profile_names=names,
+            release=release,
             profiles_root=Path(env.get("MCX_PROFILES_ROOT")
                                or DEFAULT_PROFILES_ROOT),
             data_dir=Path(data_dir),

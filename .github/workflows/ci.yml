@@ -37,13 +37,30 @@ jobs:
       fail-fast: false
       matrix:
         profile: [mcx, frmcs, utility]
+        release: [17, 19]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - run: pip install pyyaml pytest cryptography
-      - name: Conformance suite for profile ${{ matrix.profile }}
+      # PLT-REL-007: profile and release are independent axes, so they are
+      # tested as a matrix, not as a list. An untested combination is a
+      # deployment nobody has ever run.
+      - name: Conformance — ${{ matrix.profile }} at Rel-${{ matrix.release }}
         env:
           MCX_PROFILE: ${{ matrix.profile }}
+          MCX_RELEASE: ${{ matrix.release }}
         run: python3 -m pytest tests/test_conformance.py -q
+
+  release-gate:
+    runs-on: ubuntu-latest
+    needs: boundary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml pytest cryptography
+      - name: Release gating across all eight published releases
+        run: python3 -m pytest tests/test_release.py -q

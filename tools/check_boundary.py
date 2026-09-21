@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
@@ -543,6 +545,89 @@ def check_per_profile_suite(root: Path) -> List[str]:
     return violations
 
 
+def _code_lines(path: Path) -> List[Tuple[int, str]]:
+    """Source lines with comments and string literals blanked out.
+
+    Written after this gate's first version flagged its own docstring, which
+    quotes `release >= 19` as the thing not to write. Stripping only comments
+    is not enough: a docstring explaining a rule is not a breach of it. The
+    line numbers are preserved so a real violation still points at its line.
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    lines = source.splitlines()
+    blanked = list(lines)
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return [(i, l.split("#", 1)[0]) for i, l in enumerate(lines, 1)]
+    for tok in tokens:
+        if tok.type not in (tokenize.STRING, tokenize.COMMENT):
+            continue
+        (r1, c1), (r2, c2) = tok.start, tok.end
+        for row in range(r1, r2 + 1):
+            line = blanked[row - 1]
+            start = c1 if row == r1 else 0
+            end = c2 if row == r2 else len(line)
+            blanked[row - 1] = line[:start] + " " * (end - start) + line[end:]
+    return list(enumerate(blanked, 1))
+
+
+def check_release_knowledge_is_in_one_module(root: Path) -> List[str]:
+    """VP1-BND-022 / PLT-REL-008 — release numbers live in core/release.py.
+
+    The same argument as the profile boundary, one axis over. A release
+    comparison written inline (`if release >= 19`) is a constant nobody will
+    find when Rel-21 lands, and the tables in core/release.py were extracted
+    from the specifications while an inline literal was not.
+
+    Digits in comments and docstrings are fine -- citing a release is how the
+    code explains itself. What is forbidden is COMPARING to one.
+    """
+    violations: List[str] = []
+    comparison = re.compile(
+        r"(?:release|rel)\s*(?:>=|<=|==|!=|>|<)\s*(?:1[3-9]|20)\b"
+        r"|(?:1[3-9]|20)\s*(?:>=|<=|==|!=|>|<)\s*(?:release|rel)\b",
+        re.IGNORECASE)
+    allowed = {Path("core/release.py"), Path("tests/test_release.py")}
+    for path in sorted(root.rglob("*.py")):
+        rel_path = path.relative_to(root)
+        if rel_path in allowed or "__pycache__" in rel_path.parts:
+            continue
+        if rel_path.parts and rel_path.parts[0] not in (CORE, "service", "tools"):
+            continue
+        for n, code in _code_lines(path):
+            if comparison.search(code):
+                violations.append(
+                    f"{rel_path}:{n}: release compared to a literal outside "
+                    f"core/release.py: {code.strip()[:70]}")
+    return violations
+
+
+def check_release_is_a_deployment_parameter(root: Path) -> List[str]:
+    """VP1-BND-023 / PLT-REL-002 — MCX_RELEASE is stated, never defaulted."""
+    violations: List[str] = []
+    cfg = root / "service" / "config.py"
+    if not cfg.is_file():
+        return ["service/config.py is missing"]
+    source = cfg.read_text(encoding="utf-8")
+    if "MCX_RELEASE" not in source:
+        violations.append("service/config.py: the release is not read from "
+                          "the environment")
+    for bad in ('env.get("MCX_RELEASE", ', "env.get('MCX_RELEASE', "):
+        if bad in source:
+            violations.append(
+                "service/config.py: MCX_RELEASE has a fallback value; a "
+                "guessed release is silent on the wire")
+    suite = root / TESTS / "test_release.py"
+    if not suite.is_file():
+        violations.append("no per-release conformance suite "
+                          "(tests/test_release.py)")
+    return violations
+
+
 # --------------------------------------------------------------------------
 # Registry
 # --------------------------------------------------------------------------
@@ -571,6 +656,10 @@ CHECKS: Tuple[Tuple[str, str, Callable[[Path], List[str]]], ...] = (
     ("VP1-BND-016", "time discipline", check_time_discipline),
     ("VP1-BND-020", "CI runs both suites per change", check_ci_runs_both_suites),
     ("VP1-BND-021", "per-profile conformance suite exists", check_per_profile_suite),
+    ("VP1-BND-022", "release knowledge is in one module",
+     check_release_knowledge_is_in_one_module),
+    ("VP1-BND-023", "release is a stated deployment parameter",
+     check_release_is_a_deployment_parameter),
 )
 
 BY_CASE: Dict[str, Callable[[Path], List[str]]] = {c: fn for c, _, fn in CHECKS}

@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.4
+**Version:** 0.5
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -125,30 +125,64 @@ are separate namespaces; `CAUSE_*` remains as aliases of the Deny set.
 
 ---
 
-## 3A. The release baseline does not match the code
+## 3A. CA-11 — the release baseline, and its resolution
 
-Found while re-verifying 3.3, and it is not a constant defect — it is a
-statement about the whole codebase.
+Found while re-verifying 3.3. Not a constant defect: a statement about the
+whole codebase.
 
-`CLAUDE.md` declares a **Rel-17 baseline**. The RTCP layer is not Rel-17:
+`CLAUDE.md` declared a **Rel-17 baseline**. The RTCP layer was not Rel-17:
 
-| Constant | First appears in | Rel-17 says |
+| Constant | First defined in | What Rel-17 says |
 |---|---|---|
-| `REVOKE_BY_ANOTHER_CLIENT = 7` | Rel-19 | cause #7 is not defined for Floor Revoke |
 | `REVOKE_REQUEST = 7` (subtype) | Rel-19 | subtype 00111 is not assigned |
-| `QUEUED_FLOOR_REQUESTS = 14` | Rel-19 renamed it | subtype 01110 is **Floor Queued Cancel** |
-| `FLOOR_REVOKE_REQUEST_USER_ID = 25` | Rel-19 (already commented as such) | not assigned |
+| `FLOOR_REVOKE_REQUEST_USER_ID = 25` | Rel-19 | field 25 is not assigned |
+| `REVOKE_BY_ANOTHER_CLIENT = 7` | Rel-19 | Floor Revoke has no cause #7 |
+| `QUEUED_FLOOR_REQUESTS = 14` | **renamed in Rel-18** | subtype 01110 is **Floor Queued Cancel** |
 
-None of these values is *wrong*; all four are correct for Rel-19 and Rel-20.
-The problem is that the project says one thing and the code does another, and
-the difference is exactly the set of messages a Rel-17 peer would not
-understand. Subtype 14 is the sharp one: it is assigned in both releases, to
-**different messages**, so a Rel-17 peer will parse it and act on the wrong
-one rather than rejecting it.
+None of the four values is wrong; all are correct for the release that
+introduced them. The problem was that the project said one thing and the code
+did another.
 
-**This is a decision for the project, not a correction for this audit.** Either
-`CLAUDE.md` and `PLT-SRS` adopt Rel-19 as the baseline, or the four values come
-out. Recorded as **CA-11**.
+**Correction to v0.3:** that revision said subtype 14 changed meaning between
+Rel-17 and Rel-19. It changed at **Rel-18**. The tables were later extracted
+mechanically from all eight published versions of TS 24.380 (Rel-13 `de0`
+through Rel-20 `k00`), which is what produced the exact boundary; the v0.3
+figure was read off two releases and interpolated. Interpolation is a guess
+with a citation attached.
+
+### The resolution: the release is now a deployment parameter
+
+Neither of the two options v0.3 offered — move the baseline to Rel-19, or
+delete the four values — was right, because both answer "which release is this
+platform?" when the real question is "which release is *this deployment*?" A
+platform serving a Rel-17 fleet and a platform serving a Rel-19 fleet are the
+same codebase, and the profile mechanism already exists to say so.
+
+`MCX_RELEASE` now selects the release at process start, exactly as
+`MCX_PROFILE` selects the profile, and on an independent axis: any profile at
+any supported release (PLT-REL-001..008, `core/release.py`).
+
+**Why this is not a feature flag.** The dangerous case is not a missing value,
+which any decoder would reject. It is subtype 14: assigned in both Rel-17 and
+Rel-18, to different messages, with nothing in the packet to distinguish them.
+"Be liberal in what you accept" cannot help, because both readings are valid —
+only the release decides. So the release governs *decoding* as well as
+encoding, and `Codec.name_of` reports the release-correct meaning, which
+`MsgType` structurally cannot: it holds one name per value, and subtype 14
+needs two.
+
+**Provenance.** Every table in `core/release.py` — subtype, field ID and revoke
+cause, per release — was extracted mechanically from the eight `.docx`
+originals rather than annotated by hand. The pre-existing release comments on
+`FieldId` all turned out to be correct, which the extraction confirmed rather
+than assumed.
+
+**Status:** closed. Eight releases tabulated, six mutants checked and dead, two
+new boundary gates (VP1-BND-022, VP1-BND-023), and the conformance suite now
+runs as a profile × release matrix.
+
+**What is NOT covered:** only the TS 24.380 floor control layer. TS 24.379 has
+not been examined for release dependence — PLT-REL-009 and **REL-OP-01**.
 
 ---
 
@@ -474,13 +508,14 @@ exists to correct, appearing in the document itself.
 
 ## 5. NOT verified — the work that remains
 
-CA-01, CA-02, CA-04, CA-05 and CA-06 are closed. What is left, ordered by
-consequence:
+CA-01, CA-02, CA-04, CA-05, CA-06 and CA-11 are closed. What is left,
+ordered by consequence:
 
 | # | What | Where to look | Status |
 |---|---|---|---|
 | CA-03 | Field value lengths in `_FIXED` / `_VARIABLE`, `core/rtcp.py` | TS 24.380 clause 8.2.3 onward | **Open, and now closable here.** The ASCII-art diagrams garble, but the prose beneath each one states the length in words -- "has the value '2'", "is a 16 bit binary value". That is a better source than the diagram anyway. A wrong length desynchronises the whole field parse, not just one field. |
-| CA-11 | Release baseline: four Rel-19 constants in a codebase declaring Rel-17 | 3A above | **Open, needs a project decision.** Subtype 14 means different messages in the two releases. |
+| CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
+| CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all releases | **Open.** The floor control layer is release-parameterised; the SIP layer has not been examined at all. REL-OP-01, PLT-REL-009. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
 | CA-07 | MCData and MCVideo feature tags | TS 24.282, TS 24.281 | **Open, blocked.** Neither specification is in this repository. Marked `# unverified` in `core/sip.py`. |
 | CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
@@ -522,10 +557,6 @@ not a certainty of defect, but nowhere near a presumption of correctness.
 
 ## 7. Recommendation
 
-**CA-11 should be settled first.** It is a decision, not an investigation, and
-it fixes what "conformant" means for everything else here: the platform cannot
-be measured against Rel-17 while its RTCP layer implements Rel-19.
-
 **CA-03 is the last item closable from the documents already in this
 repository**, and it has a route that needs no human with a PDF — the field
 lengths are stated in prose beneath each diagram, which is a better source than
@@ -547,5 +578,6 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 0.5 | 2026-09-21 | CA-11 closed by making the 3GPP release a deployment parameter (`MCX_RELEASE`), on an axis independent of the profile. Per-release tables for subtypes, field IDs and revoke causes extracted mechanically from all eight published versions of TS 24.380. Corrects v0.3: subtype 14 changed meaning at Rel-18, not Rel-19. New CA-12: the TS 24.379 layer is not release-parameterised. |
 | 0.4 | 2026-09-21 | CA-05 closed against TS 24.380 table 11.1.3-1: all three timer defaults correct — the first clean set in six. The clause reference published in 0.3 was itself written from recollection and was wrong; corrected. |
 | 0.3 | 2026-09-21 | TS 24.379 and TS 24.481 read from source. CA-01 re-verified and written up as 3.3; release baseline mismatch recorded as CA-11. CA-02, CA-04 and CA-06 closed: 0 of 11 warning codes correct, the Warning header itself malformed, the ICSI absent from every INVITE, `Priv-Answer-Mode` on every call, two configuration values hard-coded in `core/`, and the group document invalid in four ways. All corrected and pinned. One surviving mutant in a test written for this audit, recorded in 4.10. |

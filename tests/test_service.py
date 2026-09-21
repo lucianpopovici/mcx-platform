@@ -53,7 +53,7 @@ class Clock:
 def env(tmp_path):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
-    return {"MCX_PROFILE": "mcx", "MCX_IDMS": "stub",
+    return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
             "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
             "MCX_HTTP_PORT": "0"}
 
@@ -121,6 +121,9 @@ def stop(proc):
     {"MCX_PROFILE": "nosuchprofile"},          # unknown
     {"MCX_PROFILE": "mcx,frmcs"},              # two
     {"MCX_IDMS": ""},                          # no identity provider named
+    {"MCX_RELEASE": ""},                       # PLT-REL-002: no release named
+    {"MCX_RELEASE": "21"},                     # unpublished release
+    {"MCX_RELEASE": "seventeen"},              # not a release at all
 ])
 def test_process_refuses_and_exits_nonzero(env, change):
     proc = spawn({**env, **change}, free_port())
@@ -255,8 +258,13 @@ def test_vp1_oam_003_admission_refusal_establishment_release_audited(env):
         bad = rt.store.audit_records("bad")
         failed = [r for r in bad if r["type"] in ("session-refused", "session-failed")]
         assert failed and failed[0]["detail"]["reason_code"] == refused.reason_code
-        ident = rt.loaded.profile.identifier()
+        # PLT-OAM-001 + PLT-REL-005: the record names the profile AND the
+        # release. Either alone leaves an unanswerable question months later
+        # -- the same profile at two releases does not put the same bytes on
+        # the wire.
+        ident = f"{rt.loaded.profile.identifier()}+Rel-19"
         assert all(r["profile"] == ident for r in rt.store.audit_records())
+        assert rt.loaded.profile.identifier() in ident and "Rel-19" in ident
     finally:
         rt.close()
 

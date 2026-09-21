@@ -25,6 +25,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 import trace_compare  # noqa: E402
 from core import floor as fl  # noqa: E402
 from core import rtcp  # noqa: E402
+from core.release import Release  # noqa: E402
+
+# Tests speak the newest release the platform implements unless they
+# are specifically about release gating (tests/test_release.py).
+FLOOR_CODEC = rtcp.Codec(Release.REL_19)
 from core.rtcp import MsgType, RtcpError  # noqa: E402
 from core.sip import build_sdp, parse_sdp, negotiate, SipError  # noqa: E402
 from core.validation import build  # noqa: E402
@@ -44,7 +49,7 @@ def test_known_answer_idle_message_bytes():
     encoder, so it agreed with a wrong encoder. See FC-OP-03.
     """
     expected = bytes.fromhex("85cc0003" "4d435801" "4d435054" "08020001")
-    got = rtcp.encode(rtcp.message(MsgType.IDLE, 0x4D435801, rtcp.f_sequence(1)))
+    got = FLOOR_CODEC.encode(rtcp.message(MsgType.IDLE, 0x4D435801, rtcp.f_sequence(1)))
     assert got == expected
 
 
@@ -56,7 +61,7 @@ def test_known_answer_taken_message_with_padded_string():
     words = (12 + len(body)) // 4 - 1
     expected = (bytes([0x82, 0xCC]) + struct.pack(">H", words)
                 + struct.pack(">I", 7) + b"MCPT" + body)
-    got = rtcp.encode(rtcp.message(MsgType.TAKEN, 7, rtcp.f_granted_party(uri),
+    got = FLOOR_CODEC.encode(rtcp.message(MsgType.TAKEN, 7, rtcp.f_granted_party(uri),
                                    rtcp.f_permission(True), rtcp.f_sequence(9)))
     assert got == expected
 
@@ -64,11 +69,11 @@ def test_known_answer_taken_message_with_padded_string():
 @pytest.mark.parametrize("mtype", list(MsgType))
 def test_every_message_type_round_trips(mtype):
     m = rtcp.message(mtype, 42, rtcp.f_priority(200), rtcp.f_sequence(3))
-    assert rtcp.decode(rtcp.encode(m)) == m
+    assert FLOOR_CODEC.decode(FLOOR_CODEC.encode(m)) == m
 
 
 def test_field_accessors_round_trip():
-    m = rtcp.decode(rtcp.encode(rtcp.message(
+    m = FLOOR_CODEC.decode(FLOOR_CODEC.encode(rtcp.message(
         MsgType.DENY, 1, rtcp.f_reject(6, "queue-full"), rtcp.f_queue_info(2, 90),
         rtcp.f_duration(30), rtcp.f_granted_party("sip:x@y"),
         rtcp.f_permission(False), rtcp.f_sequence(65535))))
@@ -77,7 +82,7 @@ def test_field_accessors_round_trip():
     assert m.permission_to_request is False and m.sequence == 65535
 
 
-GOOD = rtcp.encode(rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1)))
+GOOD = FLOOR_CODEC.encode(rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1)))
 
 
 @pytest.mark.parametrize("mutate", [
@@ -94,7 +99,7 @@ GOOD = rtcp.encode(rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1)))
 ])
 def test_decode_is_strict(mutate):
     with pytest.raises(RtcpError):
-        rtcp.decode(mutate(GOOD))
+        FLOOR_CODEC.decode(mutate(GOOD))
 
 
 def test_subtype_values_match_the_specification_table():
@@ -115,7 +120,7 @@ def test_subtype_values_match_the_specification_table():
 def test_acknowledgement_bit_is_separate_from_the_message_type():
     """Five-bit subtype: bit 4 is acknowledgement-required, type is the low four."""
     acked = bytes([0x80 | rtcp.ACK_REQUIRED | int(MsgType.IDLE)]) + GOOD[1:]
-    assert rtcp.decode(acked).type is MsgType.IDLE
+    assert FLOOR_CODEC.decode(acked).type is MsgType.IDLE
     assert MsgType.GRANTED in rtcp.ACK_CAPABLE
     assert MsgType.REQUEST not in rtcp.ACK_CAPABLE
 
@@ -135,11 +140,11 @@ def test_deny_and_revoke_cause_namespaces_are_distinct():
 def test_decode_rejects_duplicate_field_and_nonzero_padding():
     dup = GOOD[:2] + bytes([0, 5]) + GOOD[4:] + bytes([8, 2, 0, 2])
     with pytest.raises(RtcpError):
-        rtcp.decode(dup)
-    uri = rtcp.encode(rtcp.message(MsgType.TAKEN, 1, rtcp.f_granted_party("abc")))
+        FLOOR_CODEC.decode(dup)
+    uri = FLOOR_CODEC.encode(rtcp.message(MsgType.TAKEN, 1, rtcp.f_granted_party("abc")))
     bad = uri[:-1] + b"\x07"                            # last pad octet non-zero
     with pytest.raises(RtcpError, match="padding"):
-        rtcp.decode(bad)
+        FLOOR_CODEC.decode(bad)
 
 
 # ============================================================ SDP
@@ -236,7 +241,7 @@ class IO:
         self.closed = True
 
     def msgs(self):
-        return [rtcp.decode(d) for _, d in self.floor]
+        return [FLOOR_CODEC.decode(d) for _, d in self.floor]
 
     def types(self):
         return [m.type for m in self.msgs()]
@@ -272,7 +277,7 @@ def make(users=(A, B, C), start=True, pol=None, priority=None):
         return ios[uri]
 
     prio = priority if priority is not None else PRIO
-    ms = MediaSession("cid", floor, PT, clock, factory, lambda u: prio[u])
+    ms = MediaSession("cid", floor, PT, clock, factory, lambda u: prio[u], FLOOR_CODEC)
     for u in users:
         ms.add(u)
         rtp_addr, floor_addr = remote(u)
@@ -286,7 +291,7 @@ def make(users=(A, B, C), start=True, pol=None, priority=None):
 
 def to_floor(ms, uri, mtype, *fields):
     ms.on_floor(uri, remote(uri)[1],
-                rtcp.encode(rtcp.message(mtype, 99, *fields)))
+                FLOOR_CODEC.encode(rtcp.message(mtype, 99, *fields)))
 
 
 def send_rtp(ms, uri, **kw):
@@ -344,7 +349,7 @@ def test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire():
     # type was received and parsed
     assert sent == {MsgType.GRANTED, MsgType.TAKEN, MsgType.DENY, MsgType.IDLE,
                     MsgType.REVOKE, MsgType.QUEUE_POSITION_INFO}
-    received = {rtcp.decode(e.data).type for e in ms.trace if e.direction == "in"}
+    received = {FLOOR_CODEC.decode(e.data).type for e in ms.trace if e.direction == "in"}
     assert received == {MsgType.REQUEST, MsgType.RELEASE,
                         MsgType.QUEUE_POSITION_REQUEST}
 
@@ -377,8 +382,8 @@ def test_malformed_and_spoofed_floor_messages_change_nothing():
     ms, ios, _, floor = make()
     clear(ios)
     ms.on_floor(B, remote(B)[1], b"\x80\xcc\x00")                # malformed
-    ms.on_floor(B, ("6.6.6.6", 1), rtcp.encode(rtcp.message(MsgType.REQUEST, 1)))
-    ms.on_floor(B, remote(B)[1], rtcp.encode(rtcp.message(MsgType.RELEASE, 1)))
+    ms.on_floor(B, ("6.6.6.6", 1), FLOOR_CODEC.encode(rtcp.message(MsgType.REQUEST, 1)))
+    ms.on_floor(B, remote(B)[1], FLOOR_CODEC.encode(rtcp.message(MsgType.RELEASE, 1)))
     assert ms.counters["floor_malformed"] == 1
     assert ms.counters["floor_dropped_source"] == 1
     assert floor.holder == A and floor.queue == () and all(not io.floor for io in ios.values())
@@ -491,7 +496,7 @@ def test_priority_hook_failure_denies_without_touching_the_machine():
     floor = fl.FloorControl(policy(), clock=clock)
     ios = {}
     ms = MediaSession("c", floor, PT, clock,
-                      lambda u: ios.setdefault(u, IO(len(ios))), boom)
+                      lambda u: ios.setdefault(u, IO(len(ios))), boom, FLOOR_CODEC)
     for u in (A, B):
         ms.add(u)
         ms.set_remote(u, *remote(u))
@@ -624,10 +629,10 @@ def test_comparator_catches_deviations(corrupt, code):
 
 def test_comparator_flags_direction_missing_fields_and_flow_errors():
     def out(uri, m):
-        return ("out", uri, rtcp.encode(m))
+        return ("out", uri, FLOOR_CODEC.encode(m))
     taken_bad = out(B, rtcp.message(MsgType.TAKEN, 1, rtcp.f_sequence(1)))
     assert {d.code for d in trace_compare.compare([taken_bad])} == {"missing-field"}
-    wrong_dir = ("in", A, rtcp.encode(rtcp.message(MsgType.GRANTED, 1)))
+    wrong_dir = ("in", A, FLOOR_CODEC.encode(rtcp.message(MsgType.GRANTED, 1)))
     assert "direction" in {d.code for d in trace_compare.compare([wrong_dir])}
     two = [out(A, rtcp.message(MsgType.GRANTED, 1, rtcp.f_priority(1),
                                rtcp.f_duration(1), rtcp.f_sequence(1))),

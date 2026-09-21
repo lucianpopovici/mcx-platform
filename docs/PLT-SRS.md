@@ -152,6 +152,39 @@ profile-aware core behaviour is a defect in this document.
 
 ---
 
+## 4A. 3GPP release selection (PLT-REL)
+
+The profile says what a deployment does. The release says which version of the
+protocol it says it in. They are independent: any profile may run at any
+supported release, so they are two parameters and a test matrix, not one
+parameter with more values.
+
+The reason this is a parameter rather than a build-time constant is that a
+constant can be present in two releases and mean different things in each. TS
+24.380 subtype 14 is *Floor Queued Cancel* in Rel-17 and *Queued Floor
+Requests* from Rel-18. A deployment that assumes the wrong one does not fail
+loudly — it decodes the packet and acts on the wrong message.
+
+| ID | Phase | Requirement | V |
+|---|---|---|---|
+| PLT-REL-001 | R1 | The platform shall select exactly one 3GPP release at process start, from deployment configuration, and shall hold it unchanged for the life of the process. | T |
+| PLT-REL-002 | R1 | The platform shall refuse to start when no release is configured or when the configured release is not supported. It shall provide no default release and shall not infer one from the profile, the image or any other configuration value. | T |
+| PLT-REL-003 | R1 | The release shall be independent of the profile: every supported profile shall be deployable at every supported release. | T |
+| PLT-REL-004 | R1 | The platform shall not encode a message, field or cause code that the configured release does not define, and shall refuse rather than substitute a defined alternative. | T |
+| PLT-REL-005 | R1 | Every audit record shall carry the configured release alongside the profile identity triple. | T |
+| PLT-REL-006 | R1 | A received message that is well formed but uses a construct the configured release does not define shall be reported distinguishably from a malformed message. | T |
+| PLT-REL-007 | R1 | The conformance suite shall run for every supported combination of profile and release on every change, with no combination skippable. | I |
+| PLT-REL-008 | R1 | Release numbers shall appear in exactly one module. No other module shall compare a release to a literal. Enforced as a CI gate. | I |
+| PLT-REL-009 | R2 | The platform shall apply release selection to the TS 24.379 signalling layer as it does to TS 24.380 floor control. | T |
+| PLT-REL-010 | R3 | Each interconnection partner shall carry its own release, independent of the local one. | T |
+
+**PLT-REL-009 and PLT-REL-010 are deliberately not R1.** R1 covers the floor
+control layer only, which is where the release dependence has been established
+from the specifications (PLT-CONF-AUDIT §3A). Claiming the SIP layer before it
+has been examined would be the guess this section exists to prevent.
+
+---
+
 ## 5. Profile framework (PLT-PRF)
 
 ### 5.1 Profile content and validation

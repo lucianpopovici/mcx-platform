@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, List, Optional, Protocol, Tuple
 
 from core import floor as fl
+from core.release import Release
 from core import rtcp
 from core.rtcp import MsgType
 
@@ -88,7 +89,9 @@ class MediaSession:
     def __init__(self, cid: str, floor: fl.FloorControl, payload_type: int,
                  clock: Callable[[], int],
                  io_factory: Callable[[str], EndpointIO],
-                 priority_of: Callable[[str], int]) -> None:
+                 priority_of: Callable[[str], int],
+                 codec: rtcp.Codec) -> None:
+        self.codec = codec              # PLT-REL-004: the deployment's release
         self.cid = cid
         self.floor = floor
         self.payload_type = payload_type
@@ -102,6 +105,7 @@ class MediaSession:
             "rtp_dropped_codec": 0, "rtp_dropped_source": 0,
             "rtp_dropped_malformed": 0, "floor_in": 0, "floor_out": 0,
             "floor_malformed": 0, "floor_unexpected": 0,
+            "floor_wrong_release": 0,
             "floor_dropped_source": 0}
         self.closed = False
 
@@ -164,7 +168,15 @@ class MediaSession:
         self._trace("in", uri, data)
         self.counters["floor_in"] += 1
         try:
-            msg = rtcp.decode(data)
+            msg = self.codec.decode(data)
+        except rtcp.ReleaseRefused as exc:
+            # Well-formed, but it uses something this release does not define.
+            # Counted apart from malformed: "my peer is newer than me" is an
+            # operational fact, not a broken sender (PLT-REL-006).
+            self.counters["floor_wrong_release"] += 1
+            log.warning("floor message from %s outside %s: %s",
+                        uri, self.codec.release, exc)
+            return
         except rtcp.RtcpError as exc:
             self.counters["floor_malformed"] += 1
             log.warning("malformed floor message from %s: %s", uri, exc)
@@ -293,7 +305,7 @@ class MediaSession:
         ep.seq += 1
         msg = rtcp.FloorMessage(msg.type, msg.ssrc,
                                 {**msg.fields, **dict([rtcp.f_sequence(ep.seq)])})
-        data = rtcp.encode(msg)
+        data = self.codec.encode(msg)
         ep.io.send_floor(ep.remote_floor, data)
         self.counters["floor_out"] += 1
         self._trace("out", uri, data)
@@ -361,8 +373,12 @@ class UdpMediaPlane:
     """Owns the relay sockets and the sessions they serve."""
 
     def __init__(self, address: str, port_range: Optional[Tuple[int, int]],
-                 clock: Callable[[], int],
+                 clock: Callable[[], int], release: Release,
                  lock: Optional[threading.RLock] = None) -> None:
+        # One codec for the process: every session the plane opens speaks the
+        # release the deployment was started with, and no session can be given
+        # a different one (PLT-REL-004).
+        self.codec = rtcp.Codec(release)
         self.address = address               # advertised in SDP, and bound
         self._range = port_range             # None: OS-assigned (tests)
         self._now = clock
@@ -392,7 +408,7 @@ class UdpMediaPlane:
              priority_of: Callable[[str], int]) -> MediaSession:
         session = MediaSession(
             cid, floor, payload_type, self._now,
-            lambda uri: UdpEndpointIO(self, cid, uri), priority_of)
+            lambda uri: UdpEndpointIO(self, cid, uri), priority_of, self.codec)
         self._sessions[cid] = session
         return session
 

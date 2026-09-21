@@ -23,7 +23,7 @@ core cannot enumerate, compare against literals, or order. Everything
 deployment-specific lives in a profile: a YAML package plus six hook
 implementations.
 
-This is enforced. `python3 tools/check_boundary.py --root .` runs 18 static gates
+This is enforced. `python3 tools/check_boundary.py --root .` runs 20 static gates
 and will fail the build for `if profile.name == "frmcs"`, for an import from
 `core/` into `profiles/`, or for the word "railway" in a `core/` docstring.
 
@@ -37,11 +37,13 @@ change set.
 
 ```bash
 python3 -m pytest tests/ -q                   # must stay green (430+ tests)
-python3 tools/check_boundary.py --root .      # must stay 18/18
+python3 tools/check_boundary.py --root .      # must stay 20/20
 MCX_PROFILE=mcx MCX_IDMS=stub MCX_DATA_DIR=/tmp/mcx python3 -m service   # run it
-MCX_PROFILE=mcx     python3 -m pytest tests/test_conformance.py -q
-MCX_PROFILE=frmcs   python3 -m pytest tests/test_conformance.py -q
-MCX_PROFILE=utility python3 -m pytest tests/test_conformance.py -q
+# profile x release: both axes, every combination
+for p in mcx frmcs utility; do for r in 17 19; do
+  MCX_PROFILE=$p MCX_RELEASE=$r python3 -m pytest tests/test_conformance.py -q
+done; done
+python3 -m pytest tests/test_release.py -q    # release gating, all 8 releases
 ```
 
 ## Architecture in one pass
@@ -113,9 +115,20 @@ imports the constant it is checking, the code and the test move together and
 the test proves nothing. One such test was written during the v0.3 audit and
 caught only by mutation testing (PLT-CONF-AUDIT 4.10).
 
-**The declared Rel-17 baseline is not what the code implements** — the RTCP
-layer carries four Rel-19 values, one of which (subtype 14) means a different
-message in the two releases. Unresolved: CA-11.
+**There is no single release baseline any more, and that is deliberate.** The
+3GPP release is a deployment parameter (`MCX_RELEASE`), independent of the
+profile: any profile runs at any supported release. Release numbers live in
+`core/release.py` and nowhere else — `VP1-BND-022` fails a build that compares
+a release to a literal anywhere else.
+
+Its tables were extracted mechanically from all eight published versions of
+TS 24.380 in `docs/3GPP/`. If you add a protocol constant, add its release
+alongside it, read from the documents.
+
+**This covers TS 24.380 floor control only.** The TS 24.379 signalling layer
+has not been examined for release dependence (REL-OP-01, CA-12), so
+`MCX_RELEASE=17` means Rel-17 on the media plane and unexamined on the
+signalling plane. Say so to anyone relying on it for interoperability.
 
 ## Documents
 

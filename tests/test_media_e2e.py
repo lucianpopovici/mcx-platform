@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import trace_compare  # noqa: E402
 from core import rtcp  # noqa: E402
+from core.release import Release  # noqa: E402
 from core.rtcp import MsgType  # noqa: E402
 from core.session import Platform  # noqa: E402
 from core.sip import build_sdp, parse_sdp  # noqa: E402
@@ -29,7 +30,10 @@ from tests.test_sip_transport import (  # noqa: E402
     Clock, Flow, U, answer, invite, msg, pki, register, sip_env, LOCAL)
 
 PT = 97
-CODEC = [(PT, "AMR-WB/16000")]
+CODEC = [(PT, "AMR-WB/16000")]          # the AUDIO codec
+# Floor control speaks a 3GPP release; tests use the newest the platform
+# implements unless they are about release gating (tests/test_release.py).
+FLOOR_CODEC = rtcp.Codec(Release.REL_19)
 
 
 class UE:
@@ -64,7 +68,7 @@ class UE:
         return pkt
 
     def send_floor(self, mtype, *fields):
-        self.floor.sendto(rtcp.encode(rtcp.message(mtype, 1, *fields)),
+        self.floor.sendto(FLOOR_CODEC.encode(rtcp.message(mtype, 1, *fields)),
                           self.relay_floor)
 
     def voice(self, timeout=1.0):
@@ -77,7 +81,7 @@ class UE:
     def floor_msg(self, timeout=1.0):
         self.floor.settimeout(timeout)
         try:
-            return rtcp.decode(self.floor.recvfrom(2048)[0])
+            return FLOOR_CODEC.decode(self.floor.recvfrom(2048)[0])
         except socket.timeout:
             return None
 

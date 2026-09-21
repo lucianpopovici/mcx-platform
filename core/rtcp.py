@@ -29,11 +29,24 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 from enum import IntEnum
+
+from . import release as rel
+from .release import Release
 from typing import Dict, Optional, Tuple
 
 RTCP_VERSION = 2
 PT_APP = 204
 NAME = b"MCPT"
+
+
+class ReleaseRefused(ValueError):
+    """A message uses something the deployment's 3GPP release does not define.
+
+    Deliberately distinct from RtcpError: the bytes are well formed, and the
+    only thing wrong is that this deployment does not speak that release. An
+    operator reading a log must be able to tell "my peer is newer than me"
+    from "my peer is broken".
+    """
 
 
 class RtcpError(ValueError):
@@ -258,12 +271,40 @@ def _pad(n: int) -> int:
     return (-n) % 4
 
 
-def encode(msg: FloorMessage) -> bytes:
+def encode(msg: FloorMessage, release: Release) -> bytes:
+    """Serialise, refusing anything the deployment's release does not define.
+
+    The release is required, not defaulted. A default would be a guess about
+    which peers this deployment talks to, and getting it wrong is silent:
+    subtype 14 is a valid message in both Rel-17 and Rel-18 and means a
+    different thing in each.
+    """
+    if not rel.supports_subtype(release, int(msg.type)):
+        introduced = rel.SUBTYPE_INTRODUCED.get(int(msg.type))
+        raise ReleaseRefused(
+            f"subtype {int(msg.type)} ({msg.type.name}) is not defined in "
+            f"{release}" + (f"; introduced in {introduced}" if introduced else ""))
     body = b""
     for fid in sorted(msg.fields):
         value = msg.fields[fid]
+        if not rel.supports_field(release, fid):
+            introduced = rel.FIELD_INTRODUCED.get(fid)
+            raise ReleaseRefused(
+                f"field id {fid} is not defined in {release}"
+                + (f"; introduced in {introduced}" if introduced else ""))
         if len(value) > 255:
             raise RtcpError(f"field {fid} is {len(value)} octets; maximum 255")
+        # The Reject Cause field carries two DIFFERENT namespaces depending on
+        # the message carrying it (clause 8.2.6.2 vs 8.2.10.2), so the cause
+        # can only be release-checked here, where the message type is known.
+        if fid == int(FieldId.REJECT_CAUSE) and msg.type is MsgType.REVOKE \
+                and len(value) >= 2:
+            cause = struct.unpack(">H", value[:2])[0]
+            if not rel.supports_revoke_cause(release, cause):
+                introduced = rel.REVOKE_CAUSE_INTRODUCED.get(cause)
+                raise ReleaseRefused(
+                    f"floor revoke cause #{cause} is not defined in {release}"
+                    + (f"; introduced in {introduced}" if introduced else ""))
         body += bytes([int(fid), len(value)]) + value + b"\x00" * _pad(2 + len(value))
     total = 12 + len(body)
     assert total % 4 == 0
@@ -272,8 +313,13 @@ def encode(msg: FloorMessage) -> bytes:
     return head + struct.pack(">I", msg.ssrc) + NAME + body
 
 
-def decode(data: bytes) -> FloorMessage:
-    """Strict: any deviation from the layout above raises RtcpError."""
+def decode(data: bytes, release: Release) -> FloorMessage:
+    """Strict: any deviation from the layout above raises RtcpError.
+
+    Also strict about the release: a subtype or field the configured release
+    does not define is refused rather than interpreted, because interpreting
+    it would mean reading it under a release this deployment does not speak.
+    """
     if len(data) < 12:
         raise RtcpError(f"{len(data)} octets is shorter than an APP header")
     if len(data) % 4:
@@ -293,6 +339,11 @@ def decode(data: bytes) -> FloorMessage:
         mtype = MsgType(b0 & TYPE_MASK)
     except ValueError:
         raise RtcpError(f"unknown message type {b0 & TYPE_MASK}") from None
+    if not rel.supports_subtype(release, int(mtype)):
+        introduced = rel.SUBTYPE_INTRODUCED.get(int(mtype))
+        raise ReleaseRefused(
+            f"received subtype {int(mtype)}, which {release} does not define"
+            + (f" (introduced in {introduced})" if introduced else ""))
     ssrc = struct.unpack(">I", data[4:8])[0]
 
     fields: Dict[int, bytes] = {}
@@ -308,6 +359,11 @@ def decode(data: bytes) -> FloorMessage:
             known = FieldId(fid)
         except ValueError:
             raise RtcpError(f"unknown field id {fid}") from None
+        if not rel.supports_field(release, fid):
+            introduced = rel.FIELD_INTRODUCED.get(fid)
+            raise ReleaseRefused(
+                f"received field {known.name}, which {release} does not define"
+                + (f" (introduced in {introduced})" if introduced else ""))
         if known in _FIXED and length != _FIXED[known]:
             raise RtcpError(f"field {known.name} has length {length}, "
                             f"expected {_FIXED[known]}")
@@ -331,3 +387,28 @@ def decode(data: bytes) -> FloorMessage:
 
 def message(mtype: MsgType, ssrc: int, *fields: Tuple[int, bytes]) -> FloorMessage:
     return FloorMessage(mtype, ssrc, {int(k): v for k, v in fields})
+
+
+class Codec:
+    """An encoder/decoder bound to one 3GPP release.
+
+    The deployment builds exactly one of these at start and everything on the
+    media path uses it, so there is no call site that could reach the wire
+    without having stated a release.
+    """
+
+    __slots__ = ("release",)
+
+    def __init__(self, release: Release) -> None:
+        self.release = release
+
+    def encode(self, msg: FloorMessage) -> bytes:
+        return encode(msg, self.release)
+
+    def decode(self, data: bytes) -> FloorMessage:
+        return decode(data, self.release)
+
+    def name_of(self, msg: FloorMessage) -> Optional[str]:
+        """What this message means AT THIS RELEASE -- see release.subtype_name.
+        `MsgType` carries one name per value and subtype 14 needs two."""
+        return rel.subtype_name(self.release, int(msg.type))

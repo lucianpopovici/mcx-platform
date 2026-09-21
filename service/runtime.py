@@ -47,6 +47,7 @@ class Health:
         self._ready = False
         self._profile: Optional[str] = None
         self._name = self._version = self._hash = None
+        self._release: Optional[str] = None
         self._lock = threading.Lock()
         self._extra: Callable[[], dict] = lambda: {}
 
@@ -58,6 +59,12 @@ class Health:
         with self._lock:
             self._name, self._version = p.name, p.version
             self._hash, self._profile = p.content_hash, p.identifier()
+
+    def set_release(self, release) -> None:
+        """PLT-REL-001. An operator looking at a running instance must be able
+        to see which release it speaks without reading its configuration."""
+        with self._lock:
+            self._release = str(release)
 
     def set_ready(self, ready: bool) -> None:
         with self._lock:
@@ -75,6 +82,7 @@ class Health:
                     "profile": {"name": self._name, "version": self._version,
                                 "hash": self._hash,
                                 "identifier": self._profile},
+                    "release": self._release,
                     **self._extra()}
 
 
@@ -160,8 +168,14 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
 
     health = Health()
     health.set_profile(loaded)
-    identifier = loaded.profile.identifier()
-    log.info("profile loaded: %s", identifier)
+    health.set_release(config.release)
+    # PLT-REL-005: the release joins the profile in the audit identity. When
+    # someone asks months later why this deployment put subtype 14 on the
+    # wire, "which release was it speaking" has to be answerable from the
+    # record, not from whoever remembers the deployment.
+    identifier = f"{loaded.profile.identifier()}+{config.release}"
+    log.info("profile loaded: %s (3GPP %s)",
+             loaded.profile.identifier(), config.release)
 
     store = store or SqliteStore(config.data_dir)
     recovered = sum(1 for s in store.sessions() if s.get("state") == "established")
