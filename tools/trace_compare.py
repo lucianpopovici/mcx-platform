@@ -26,9 +26,11 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 NAME = b"MCPT"
-TYPES = {1: "request", 2: "granted", 3: "deny", 4: "release",
-       5: "idle", 6: "taken", 7: "revoke", 8: "queue-position-request",
-       9: "queue-position-info", 10: "ack"}
+TYPES = {0: "request", 1: "granted", 2: "taken", 3: "deny", 4: "release",
+         5: "idle", 6: "revoke", 7: "revoke-request",
+         8: "queue-position-request", 9: "queue-position-info", 10: "ack",
+         11: "unicast-media-flow-control", 14: "queued-floor-requests",
+         15: "release-multi-talker"}
 FROM_CLIENT = {"request", "release", "queue-position-request", "ack"}
 FROM_SERVER = {"granted", "deny", "idle", "taken", "revoke",
                "queue-position-info"}
@@ -80,9 +82,9 @@ def parse(data: bytes):
         raise ValueError(f"length field {words} does not match {len(data)} octets")
     if data[8:12] != NAME:
         raise ValueError(f"name {data[8:12]!r}")
-    name = TYPES.get(b0 & 0x1F)
+    name = TYPES.get(b0 & 0x0F)
     if name is None:
-        raise ValueError(f"subtype {b0 & 0x1F}")
+        raise ValueError(f"subtype {b0 & 0x0F}")
     fields: Dict[str, bytes] = {}
     i = 12
     while i < len(data):

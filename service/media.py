@@ -41,12 +41,12 @@ NOT_QUEUED = 255
 TRACE_LIMIT = 20000
 
 _DENY_CAUSE = {
-    fl.DenyReason.QUEUEING_DISABLED: rtcp.CAUSE_ANOTHER_HAS_PERMISSION,
-    fl.DenyReason.LOWER_PRIORITY: rtcp.CAUSE_ANOTHER_HAS_PERMISSION,
-    fl.DenyReason.QUEUE_FULL: rtcp.CAUSE_NO_RESOURCES,
-    fl.DenyReason.ALREADY_QUEUED: rtcp.CAUSE_OTHER,
-    fl.DenyReason.ALREADY_HOLDER: rtcp.CAUSE_OTHER,
-    fl.DenyReason.NO_SESSION: rtcp.CAUSE_INTERNAL_ERROR,
+    fl.DenyReason.QUEUEING_DISABLED: rtcp.DENY_ANOTHER_HAS_PERMISSION,
+    fl.DenyReason.LOWER_PRIORITY: rtcp.DENY_ANOTHER_HAS_PERMISSION,
+    fl.DenyReason.QUEUE_FULL: rtcp.DENY_QUEUE_FULL,   # cause #7 exists
+    fl.DenyReason.ALREADY_QUEUED: rtcp.DENY_OTHER,
+    fl.DenyReason.ALREADY_HOLDER: rtcp.DENY_OTHER,
+    fl.DenyReason.NO_SESSION: rtcp.DENY_INTERNAL_ERROR,
 }
 
 
@@ -191,7 +191,7 @@ class MediaSession:
             log.exception("floor priority unavailable for %s", uri)
             self._send(uri, rtcp.message(
                 MsgType.DENY, PLATFORM_SSRC,
-                rtcp.f_reject(rtcp.CAUSE_INTERNAL_ERROR, "priority-unavailable")))
+                rtcp.f_reject(rtcp.DENY_INTERNAL_ERROR, "priority-unavailable")))
             return
         self.apply(self.floor.handle(fl.Event(
             fl.EventType.FLOOR_REQUEST, participant=uri,
@@ -221,15 +221,15 @@ class MediaSession:
                 for uri in list(self.endpoints):
                     self._send(uri, self._idle())
             elif a.type is A.SEND_DENY and a.target:
-                cause = _DENY_CAUSE.get(a.reason, rtcp.CAUSE_OTHER) \
-                    if a.reason else rtcp.CAUSE_OTHER
+                cause = _DENY_CAUSE.get(a.reason, rtcp.DENY_OTHER) \
+                    if a.reason else rtcp.DENY_OTHER
                 self._send(a.target, rtcp.message(
                     MsgType.DENY, PLATFORM_SSRC,
                     rtcp.f_reject(cause, a.reason.value if a.reason else "")))
             elif a.type is A.SEND_REVOKE and a.target:
                 self._send(a.target, rtcp.message(
                     MsgType.REVOKE, PLATFORM_SSRC,
-                    rtcp.f_reject(rtcp.CAUSE_OTHER, "revoked")))
+                    rtcp.f_reject(rtcp.DENY_OTHER, "revoked")))
             elif a.type is A.SEND_QUEUE_POSITION and a.target:
                 self._send(a.target, rtcp.message(
                     MsgType.QUEUE_POSITION_INFO, PLATFORM_SSRC,

@@ -63,8 +63,23 @@ class MsgType(IntEnum):
     UNICAST_MEDIA_FLOW_CONTROL = 11                             # x1011
     QUEUED_FLOOR_REQUESTS = 14                                  # x1110
     RELEASE_MULTI_TALKER = 15                                   # 01111
-    REWOKE_REQUEST = 7                                          # 00111
+    REVOKE_REQUEST = 7                                          # 00111
 
+
+
+# Bit 4 of the five-bit subtype field: "acknowledgement required". The message
+# TYPE is the low four bits. Masking all five would reject an acknowledged
+# Floor Idle (10101) as an unknown type.
+ACK_REQUIRED = 0x10
+TYPE_MASK = 0x0F
+
+# Messages whose table 8.2.2.1-1 entry begins 'x' may carry the flag; the rest
+# have a literal 0 there, so setting it yields a subtype the table never defines.
+ACK_CAPABLE = frozenset({
+    MsgType.GRANTED, MsgType.TAKEN, MsgType.DENY, MsgType.RELEASE,
+    MsgType.IDLE, MsgType.QUEUE_POSITION_INFO,
+    MsgType.UNICAST_MEDIA_FLOW_CONTROL, MsgType.QUEUED_FLOOR_REQUESTS,
+})
 
 
 class FieldId(IntEnum):
@@ -93,7 +108,7 @@ class FieldId(IntEnum):
     LIST_OF_QUEUED_USERS = 22                            # Release 17
     RESPONSE_STATE = 23                                  # Release 17
     MEDIA_FLOW_CONTROL_INDICATOR = 24                    # Release 17
-    FLOOR_REWOKE_REQUEST_USER_ID = 25                    # Release 19
+    FLOOR_REVOKE_REQUEST_USER_ID = 25                    # Release 19
 
 
 # Fixed-size fields: id -> value length in octets. Others are variable.
@@ -107,13 +122,37 @@ _VARIABLE = (FieldId.REJECT_CAUSE, FieldId.GRANTED_PARTY, FieldId.USER_ID,
              FieldId.QUEUED_USER_ID, FieldId.SOURCE, FieldId.TRACK_INFO)
 
 # Reject causes (16-bit). See the OPEN note above.
-CAUSE_ANOTHER_HAS_PERMISSION = 1
-CAUSE_INTERNAL_ERROR = 2
-CAUSE_ONLY_ONE_CLIENT = 3
-CAUSE_RETRY_AFTER = 4
-CAUSE_RECEIVE_ONLY = 5
-CAUSE_NO_RESOURCES = 6
-CAUSE_OTHER = 255
+# Floor Deny rejection causes, clause 8.2.6.2.
+DENY_ANOTHER_HAS_PERMISSION = 1
+DENY_INTERNAL_ERROR = 2
+DENY_ONLY_ONE_PARTICIPANT = 3
+DENY_RETRY_AFTER = 4
+DENY_RECEIVE_ONLY = 5
+DENY_NO_RESOURCES = 6
+DENY_QUEUE_FULL = 7
+DENY_OTHER = 255
+
+# Floor Revoke causes, clause 8.2.10.2. A SEPARATE namespace: the same number
+# means something different here. 2 is "media burst too long", not "internal
+# error"; 3 is "no permission to send", not "only one participant". Sharing one
+# flat set between the two messages sends the wrong reason on every revoke.
+REVOKE_ONLY_ONE_CLIENT = 1
+REVOKE_MEDIA_BURST_TOO_LONG = 2
+REVOKE_NO_PERMISSION = 3
+REVOKE_PREEMPTED = 4
+REVOKE_NO_RESOURCES = 6
+REVOKE_BY_ANOTHER_CLIENT = 7
+REVOKE_OTHER = 255
+
+# Deprecated aliases, kept so existing call sites keep compiling. They carry
+# the DENY meanings; using one in a Floor Revoke message is a defect.
+CAUSE_ANOTHER_HAS_PERMISSION = DENY_ANOTHER_HAS_PERMISSION
+CAUSE_INTERNAL_ERROR = DENY_INTERNAL_ERROR
+CAUSE_ONLY_ONE_CLIENT = DENY_ONLY_ONE_PARTICIPANT
+CAUSE_RETRY_AFTER = DENY_RETRY_AFTER
+CAUSE_RECEIVE_ONLY = DENY_RECEIVE_ONLY
+CAUSE_NO_RESOURCES = DENY_NO_RESOURCES
+CAUSE_OTHER = DENY_OTHER
 
 
 @dataclass(frozen=True)
@@ -251,9 +290,9 @@ def decode(data: bytes) -> FloorMessage:
     if data[8:12] != NAME:
         raise RtcpError(f"name {data[8:12]!r}, expected {NAME!r}")
     try:
-        mtype = MsgType(b0 & 0x1F)
+        mtype = MsgType(b0 & TYPE_MASK)
     except ValueError:
-        raise RtcpError(f"unknown subtype {b0 & 0x1F}") from None
+        raise RtcpError(f"unknown message type {b0 & TYPE_MASK}") from None
     ssrc = struct.unpack(">I", data[4:8])[0]
 
     fields: Dict[int, bytes] = {}

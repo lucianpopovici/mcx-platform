@@ -54,7 +54,7 @@ def test_known_answer_taken_message_with_padded_string():
             + bytes([5, 2, 0, 1])                       # permission = 1
             + bytes([8, 2, 0, 9]))                      # sequence = 9
     words = (12 + len(body)) // 4 - 1
-    expected = (bytes([0x86, 0xCC]) + struct.pack(">H", words)
+    expected = (bytes([0x82, 0xCC]) + struct.pack(">H", words)
                 + struct.pack(">I", 7) + b"MCPT" + body)
     got = rtcp.encode(rtcp.message(MsgType.TAKEN, 7, rtcp.f_granted_party(uri),
                                    rtcp.f_permission(True), rtcp.f_sequence(9)))
@@ -88,13 +88,48 @@ GOOD = rtcp.encode(rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1)))
     lambda b: b[:1] + bytes([205]) + b[2:],            # wrong packet type
     lambda b: b[:2] + b"\x00\x09" + b[4:],             # length field wrong
     lambda b: b[:8] + b"XXXX" + b[12:],                # wrong name
-    lambda b: bytes([0x80 | 31]) + b[1:],              # unknown subtype
+    lambda b: bytes([0x80 | 12]) + b[1:],              # 12 and 13 are undefined
     lambda b: b[:12] + bytes([99, 2, 0, 0]) + b[16:],  # unknown field id
     lambda b: b[:12] + bytes([8, 3, 0, 0]) + b[16:],   # wrong fixed length
 ])
 def test_decode_is_strict(mutate):
     with pytest.raises(RtcpError):
         rtcp.decode(mutate(GOOD))
+
+
+def test_subtype_values_match_the_specification_table():
+    """TS 24.380 table 8.2.2.1-1, read from docs/3GPP/24380-k00.docx.
+
+    Pinned because the values are NOT sequential and have been got wrong twice
+    by inference. Floor Taken is 2 and Floor Deny is 3, not the reverse.
+    """
+    assert [int(x) for x in (
+        MsgType.REQUEST, MsgType.GRANTED, MsgType.TAKEN, MsgType.DENY,
+        MsgType.RELEASE, MsgType.IDLE, MsgType.REVOKE, MsgType.REVOKE_REQUEST,
+        MsgType.QUEUE_POSITION_REQUEST, MsgType.QUEUE_POSITION_INFO,
+        MsgType.ACK, MsgType.UNICAST_MEDIA_FLOW_CONTROL,
+        MsgType.QUEUED_FLOOR_REQUESTS, MsgType.RELEASE_MULTI_TALKER,
+    )] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15]
+
+
+def test_acknowledgement_bit_is_separate_from_the_message_type():
+    """Five-bit subtype: bit 4 is acknowledgement-required, type is the low four."""
+    acked = bytes([0x80 | rtcp.ACK_REQUIRED | int(MsgType.IDLE)]) + GOOD[1:]
+    assert rtcp.decode(acked).type is MsgType.IDLE
+    assert MsgType.GRANTED in rtcp.ACK_CAPABLE
+    assert MsgType.REQUEST not in rtcp.ACK_CAPABLE
+
+
+def test_deny_and_revoke_cause_namespaces_are_distinct():
+    """Clauses 8.2.6.2 and 8.2.10.2 define DIFFERENT meanings for the same
+    numbers. Value 2 is an internal error in a Deny and 'media burst too long'
+    in a Revoke; one flat set sends the wrong reason on every revoke."""
+    assert rtcp.DENY_INTERNAL_ERROR == 2
+    assert rtcp.REVOKE_MEDIA_BURST_TOO_LONG == 2
+    assert rtcp.DENY_ONLY_ONE_PARTICIPANT == 3
+    assert rtcp.REVOKE_NO_PERMISSION == 3
+    assert rtcp.DENY_QUEUE_FULL == 7
+    assert rtcp.REVOKE_BY_ANOTHER_CLIENT == 7
 
 
 def test_decode_rejects_duplicate_field_and_nonzero_padding():
@@ -294,7 +329,7 @@ def test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire():
     to_floor(ms, C, MsgType.REQUEST)                              # queue full
     d = ios[C].msgs()[0]
     assert d.type is MsgType.DENY
-    assert d.reject_cause == (rtcp.CAUSE_NO_RESOURCES, "queue-full")
+    assert d.reject_cause == (rtcp.DENY_QUEUE_FULL, "queue-full")
     step()
     to_floor(ms, B, MsgType.QUEUE_POSITION_REQUEST)
     assert ios[B].msgs()[0].queue_info == (1, 100)

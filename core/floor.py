@@ -92,8 +92,8 @@ T_FLOOR_IDLE = "T7"           # floor idle (declared, not yet driven)
 
 DEFAULT_TIMERS_MS: Mapping[str, int] = {
     T_STOP_TALKING: 30000,
-    T_GRANTED_RETRY: 100,
-    T_REVOKE: 2000,
+    T_GRANTED_RETRY: 1000,   # T20 default 1 s
+    T_REVOKE: 1000,          # T8 default 1 s
 }
 
 
