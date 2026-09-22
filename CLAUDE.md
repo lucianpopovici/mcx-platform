@@ -57,6 +57,7 @@ core/errors.py      reason codes (closed vocabulary) and exceptions
 core/audit.py       audit records; every one carries the profile triple
 core/invoke.py      the hook invocation boundary: deadlines, error mapping
 core/session.py     the establishment sequence (PLT-ICD-001 §8.1)
+core/qos.py         TS 23.501 standardised 5QI table; 3GPP, never profile
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
@@ -101,7 +102,7 @@ disabled; `tests/test_icx.py` has worked examples.
 
 ## Protocol constants
 
-Eight of the nine constant sets checked against their specification have been
+Nine of the ten constant sets checked against their specification have been
 wrong. The later defects were not wrong values but **absent rules**: eleven
 RTCP field ids had no length constraint at all, so `decode` accepted them at
 any length. A wrong value fails the first time it meets a conformant peer; a

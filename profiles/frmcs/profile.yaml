@@ -197,9 +197,21 @@ bearer:
         paths:
           - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
           - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
+    # ETCS is "ATP Regular Data" in the FRMCS SRS Annex A note (11): ETCS
+    # on-board to ETCS trackside. This asked for 5QI 67, which TS 23.501
+    # table 5.7.4-1 defines as Mission Critical VIDEO, and which clause
+    # 14.6.2.1 of the FRMCS SRS does not permit at all -- the mandatory set
+    # is 5, 8, 65 and 69, with 70 optional (PLT-CONF-AUDIT CA-15).
+    #
+    # 69 is "Mission Critical delay sensitive signalling", the highest
+    # priority level of the mission-critical 5QIs, and is in the mandatory
+    # set. CA-16: the SRS Annex A table that assigns a 5QI per communication
+    # session could not be extracted from the PDF, so this is the best value
+    # derivable from the clauses that do read cleanly, not a transcription of
+    # the table. Confirm it against Annex A before any safety-case use.
     - match: {call_type: etcs-ipcon, media: data}
       decision:
-        qos_identifier: 67
+        qos_identifier: 69
         arp_level: 2
         arp_preemption_capability: true
         arp_preemption_vulnerability: false
@@ -217,10 +229,14 @@ bearer:
         paths:
           - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
           - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
+    # FRMCS SRS clause 14.6.5.3: "The FRMCS system shall apply the ARP values
+    # 1 to 8" (M), with Note 1 recording that 9-15 are a national matter. This
+    # was 9, which is legal in TS 23.501 (the range is 1-15) but outside what
+    # an FRMCS deployment may portably assume.
     - match: {call_type: "*", media: data}
       decision:
         qos_identifier: 70
-        arp_level: 9
+        arp_level: 8
         arp_preemption_capability: false
         arp_preemption_vulnerability: true
         redundancy: single

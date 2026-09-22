@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import model
+from . import qos as qos_spec
 from .errors import CORE_ORIGINATED, ProfileValidationError
 
 # --------------------------------------------------------------------------
@@ -620,6 +621,19 @@ def _bearer(c: _Checker, node: Any, call_types: Set[str]) -> model.Bearer:
         m = _bearer_match(c, f"{rp}.match", item.get("match"), call_types)
         d = _bearer_decision(c, f"{rp}.decision", item.get("decision"))
         if m and d:
+            # A mission-critical 5QI is defined for one kind of media
+            # (TS 23.501 table 5.7.4-1). Asking for the Mission Critical Video
+            # 5QI on a data bearer is not a preference, it is a request the
+            # network cannot satisfy as intended, and an in-tree profile was
+            # doing exactly that (PLT-CONF-AUDIT CA-15). Non-MC and
+            # operator-specific 5QIs carry no such expectation and are left
+            # alone.
+            expected = qos_spec.media_of(d.qos_identifier)
+            if expected is not None and m.media != "*" and m.media != expected:
+                c.add(f"{rp}.decision.qos_identifier", "inconsistent",
+                      f"5QI {d.qos_identifier} is defined for {expected} "
+                      f"(TS 23.501 table 5.7.4-1) but this rule matches "
+                      f"media {m.media!r}")
             rules.append(model.BearerRule(match=m, decision=d))
     return model.Bearer(rules=tuple(rules))
 
@@ -697,8 +711,10 @@ def _bearer_decision(c: _Checker, path: str,
 
     qos = c.typed(path, node, "qos_identifier", int, 0)
     arp = c.typed(path, node, "arp_level", int, 0)
-    if arp is not None and not (1 <= arp <= 15):
-        c.add(f"{path}.arp_level", "bad-value", "must be between 1 and 15")
+    # TS 23.501 clause 5.7.2.2, verified against Rel-17 and Rel-19.
+    if arp is not None and not (qos_spec.ARP_MIN <= arp <= qos_spec.ARP_MAX):
+        c.add(f"{path}.arp_level", "bad-value",
+              f"must be between {qos_spec.ARP_MIN} and {qos_spec.ARP_MAX}")
 
     return model.BearerDecisionSpec(
         qos_identifier=qos or 0,

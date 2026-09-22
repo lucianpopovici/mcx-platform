@@ -52,13 +52,28 @@ from .session import Signal, SignalType
 # TS 24.379 constants
 # --------------------------------------------------------------------------
 
-# Media feature tags. `g.3gpp.mcptt` is confirmed against TS 24.379 V17.15.0
-# (clauses 6.3.2.1.x, 6.3.3.1.x and the flows in annex F). The MCData and
-# MCVideo tags are NOT confirmed: they are defined in TS 24.282 and TS 24.281,
-# neither of which is in this repository (PLT-CONF-AUDIT CA-06).
+# Media feature tags, all three now confirmed (PLT-CONF-AUDIT CA-07):
+#   g.3gpp.mcptt    TS 24.379 clauses 6.3.2.1.x, 6.3.3.1.x and the annex F flows
+#   g.3gpp.mcvideo  TS 24.281
+#   g.3gpp.mcdata   TS 24.282
 FEATURE_TAG_PTT = "+g.3gpp.mcptt"
-FEATURE_TAG_DATA = "+g.3gpp.mcdata"          # unverified
-FEATURE_TAG_VIDEO = "+g.3gpp.mcvideo"        # unverified
+FEATURE_TAG_DATA = "+g.3gpp.mcdata"
+FEATURE_TAG_VIDEO = "+g.3gpp.mcvideo"
+
+# DATA-OP-01. `g.3gpp.mcdata` is real, but TS 24.282 shows it is rarely enough
+# on its own: MCData is three services, and the specification uses a
+# service-specific tag and ICSI for each --
+#
+#   g.3gpp.mcdata.sds      urn:urn-7:3gpp-service.ims.icsi.mcdata.sds
+#   g.3gpp.mcdata.fd       urn:urn-7:3gpp-service.ims.icsi.mcdata.fd
+#   g.3gpp.mcdata.ipconn   urn:urn-7:3gpp-service.ims.icsi.mcdata.ipconn
+#
+# TS 24.481 clause 7.2.8 agrees: an MCData group document's "enabler" attribute
+# is set to ONE OF the SDS, FD or ES values, not to a generic MCData one.
+#
+# The platform cannot express which MCData service a call type is, so a data
+# call is announced generically. Saying which would be a profile schema key and
+# an ICD revision, not an audit correction.
 
 # The IMS Communication Service Identifier for MCPTT. TS 24.379 requires it in
 # both the Contact and a dedicated Accept-Contact header field, percent-encoded

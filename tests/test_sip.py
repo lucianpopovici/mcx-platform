@@ -682,3 +682,14 @@ def test_non_base_feature_tags_carry_the_plus_prefix():
     assert "+g.3gpp.mcptt" in invite.headers.get("Contact")
     for value in invite.headers.get_all("Accept-Contact"):
         assert "+g.3gpp." in value, value
+
+
+def test_the_three_mc_feature_tags_are_the_ones_the_specifications_define():
+    """PLT-CONF-AUDIT CA-07. Confirmed against TS 24.379 (MCPTT),
+    TS 24.281 (MCVideo) and TS 24.282 (MCData), all of which are now in
+    `docs/3GPP/`. Both the MCData and MCVideo tags were marked unverified
+    until those two documents arrived."""
+    from core.sip import FEATURE_TAG_DATA, FEATURE_TAG_PTT, FEATURE_TAG_VIDEO
+    assert FEATURE_TAG_PTT == "+g.3gpp.mcptt"
+    assert FEATURE_TAG_VIDEO == "+g.3gpp.mcvideo"
+    assert FEATURE_TAG_DATA == "+g.3gpp.mcdata"

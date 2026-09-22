@@ -681,3 +681,74 @@ def test_inbound_mapping_builds_valid_request(mcx):
         "target": "sip:b@mcptt.example", "system": "tetra"})
     assert req.call_type == "private"
     assert req.media == (MediaKind.VOICE,)
+
+
+# -- PLT-CONF-AUDIT CA-15: 5QI and ARP -----------------------------------------
+
+
+def test_standardised_5qi_values_match_the_specification():
+    """TS 23.501 table 5.7.4-1, identical in Rel-17 and Rel-19.
+
+    Spelled out rather than imported, so the table and the assertion cannot
+    drift together (PLT-CONF-AUDIT 4.10).
+    """
+    from core.qos import STANDARDISED_5QI
+    assert STANDARDISED_5QI == {
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        65, 66, 67, 69, 70, 71, 72, 73, 74, 75, 76,
+        79, 80, 82, 83, 84, 85, 86, 87, 88, 89, 90,
+    }
+
+
+def test_mission_critical_5qis_carry_the_media_they_were_defined_for():
+    """The five MC values, from table 5.7.4-1's Example Services column.
+    67 is video, which is the whole point of CA-15."""
+    from core.qos import media_of
+    assert media_of(65) == "voice"      # MC user plane Push To Talk voice
+    assert media_of(66) == "voice"      # Non-MC user plane Push To Talk voice
+    assert media_of(67) == "video"      # MC Video user plane
+    assert media_of(69) == "data"       # MC delay sensitive signalling
+    assert media_of(70) == "data"       # MC Data
+    assert media_of(9) is None and media_of(1) is None
+
+
+def test_a_bearer_rule_may_not_request_a_5qi_defined_for_other_media(mutate):
+    """The defect CA-15 found in an in-tree profile: a data bearer asking for
+    the Mission Critical Video 5QI. Accepted silently before, because
+    `qos_identifier` was never validated at all."""
+    raw = mutate()
+    rule = next(r for r in raw["bearer"]["rules"] if r["match"]["media"] == "data")
+    rule["decision"]["qos_identifier"] = 67
+    expect_defects(raw, codes=("inconsistent",),
+                   path_contains="decision.qos_identifier")
+
+
+def test_a_voice_rule_may_not_request_the_data_5qi(mutate):
+    """The same check in the other direction, so it cannot pass by only ever
+    looking at one media kind."""
+    raw = mutate()
+    rule = next(r for r in raw["bearer"]["rules"] if r["match"]["media"] == "voice")
+    rule["decision"]["qos_identifier"] = 70
+    expect_defects(raw, codes=("inconsistent",))
+
+
+def test_an_operator_specific_5qi_is_accepted_and_not_cross_checked(mutate):
+    """TS 23.501 clause 5.7.3 allows pre-configured, non-standardised 5QIs.
+    Their characteristics are not knowable here, so they must not be refused:
+    a validator that accepted only the standardised table would reject a
+    legitimate deployment."""
+    raw = mutate()
+    for rule in raw["bearer"]["rules"]:
+        rule["decision"]["qos_identifier"] = 140
+    build(raw, "test-hash")        # must not raise
+
+
+@pytest.mark.parametrize("arp", [0, 16, 99])
+def test_arp_outside_1_to_15_is_refused(mutate, arp):
+    """TS 23.501 clause 5.7.2.2: "The range of the ARP priority level is 1 to
+    15 with 1 as the highest priority." The range was already enforced; CA-15
+    is the first time it was read from the specification rather than assumed.
+    """
+    raw = mutate()
+    raw["bearer"]["rules"][0]["decision"]["arp_level"] = arp
+    expect_defects(raw, path_contains="arp_level")

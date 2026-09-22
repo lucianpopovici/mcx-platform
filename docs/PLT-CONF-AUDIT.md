@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.9
+**Version:** 1.0
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -18,7 +18,7 @@ consistency check only".
 That is the circular-validation trap, and it was correct. The first constant set
 ever checked against a real specification was wrong, and so was the second.
 
-**Eight of the nine constant sets checked have contained defects.** The one
+**Nine of the ten constant sets checked have contained defects.** The one
 exception, the floor control timer defaults, is recorded in 4.11 as
 prominently as the failures. That is the prior to carry into the items still
 unverified in §5, and it is strong enough that "probably fine" should not be
@@ -806,6 +806,93 @@ This matters for how the finding reads: it was not a transcription error. It
 was a correct value in a place that made it uncheckable and undeployable, and
 that is a different kind of defect from the other eight.
 
+### 4.23 CA-15 — a data bearer was asking for the Mission Critical Video 5QI
+
+**Source:** TS 23.501 table 5.7.4-1, identical in Rel-17 and Rel-19; and UIC
+FRMCS SRS (AT-7800) v2.1.0 clauses 14.6.2 and 14.6.5.
+
+`qos_identifier` was **never validated at all**. Every profile declared one and
+nothing checked it, which is the same shape of defect as 4.12: not a wrong
+value but an absent rule.
+
+The railway profile's ETCS bearer requested **5QI 67**, which table 5.7.4-1
+defines as *Mission Critical Video user plane*, on a rule matching
+`media: data`. Two documents independently say that is wrong:
+
+- TS 23.501 defines 67 for video. A video 5QI on a data bearer is not a
+  preference the network can honour approximately; it is a request for
+  characteristics that were specified for a different kind of traffic.
+- FRMCS SRS clause 14.6.2.1 (M) lists the standardised 5QIs an FRMCS system
+  **shall** support as **5, 8, 65 and 69**, with 70 optional under 14.6.2.2.
+  **67 is not in the set at all.**
+
+The same profile used **ARP level 9** for its general data bearer. That is
+legal in TS 23.501, whose range is 1 to 15 — but FRMCS SRS clause 14.6.5.3 (M)
+says an FRMCS system "shall apply the ARP values 1 to 8", and Note 1 records
+that 9 to 15 are "a national matter". A profile using 9 is not portable across
+FRMCS deployments.
+
+**Corrected:** the ETCS bearer to 5QI 69 and the general data bearer to ARP 8.
+The other two profiles were already right — 65 for voice and 70 for data,
+both matching table 5.7.4-1 — which is the second clean result in the audit.
+
+**The ARP range 1-15 was already enforced** and turns out to be correct. It had
+simply never been read from TS 23.501 clause 5.7.2.2 before.
+
+**New in `core/`:** `core/qos.py`, the standardised 5QI set and the five
+mission-critical values with the media each was defined for. This is 3GPP
+knowledge, not profile knowledge — a 5QI means the same thing in every
+deployment — so it belongs there, while a profile's *choice* of 5QI does not.
+The validator now refuses a mission-critical 5QI on a rule whose media
+contradicts it, and leaves operator-specific values alone, because clause
+5.7.3 permits pre-configured 5QIs whose characteristics cannot be known here.
+
+**The boundary gates caught two mistakes in this change**, which is worth
+recording because it is the third time they have earned their keep:
+
+- `VP1-BND-001` rejected the first draft of `core/qos.py`, whose docstring
+  named the railway profile while explaining the defect. Rewritten
+  profile-neutral.
+- `VP1-BND-012` rejected `ARP_OPERATOR_DOMAIN_MAX = 8`, added "for
+  completeness". It was right to: which ARP levels a deployment may use is
+  policy, not protocol, and nothing in `core/` consumed it. The 1-8 bound now
+  lives in the railway profile's own suite.
+
+### 4.24 CA-16 — the FRMCS Annex A table does not survive extraction
+
+FRMCS SRS clause 14.6.6.1 says the QoS parameter values for each communication
+session "are listed in Annex A (M-V3)". That table is the authoritative
+per-session assignment, and **it does not extract from the PDF**: the columns
+arrive as isolated cells with no row structure, which is the failure mode §2
+is about.
+
+What does extract cleanly is the surrounding prose — the clause requirements
+above, and the table's own notes, which carry real content (note 11: "ATP
+Regular Data" refers to ETCS on-board to ETCS trackside; note 7 gives per
+application ARP values for voice).
+
+So 5QI 69 for the ETCS bearer is **the best value derivable from the clauses
+that read cleanly, not a transcription of Annex A**: 67 is definitively
+excluded, and 69 is the only mandatory-set value whose definition — "Mission
+Critical delay sensitive signalling" — matches train control. It is marked as
+such in the profile. **Confirm it against Annex A before any safety-case use**,
+which is what `CLAUDE.md` already says about this profile as a whole.
+
+### 4.25 CA-07 — both remaining feature tags confirmed, with a caveat
+
+TS 24.281 and TS 24.282 arrived, so `+g.3gpp.mcvideo` and `+g.3gpp.mcdata` are
+confirmed and the `# unverified` markers are gone.
+
+**But `g.3gpp.mcdata` is rarely enough on its own.** TS 24.282 shows MCData is
+three services, each with its own tag and ICSI — `.sds`, `.fd`, `.ipconn` —
+and the service-specific forms outnumber the generic one in the document. TS
+24.481 clause 7.2.8 agrees: an MCData group document's "enabler" attribute is
+set to *one of* the SDS, FD or ES values, never a generic MCData one.
+
+The platform has no way to say which MCData service a call type is, so it
+announces data calls generically. Recorded as **DATA-OP-01**: it is a profile
+schema key and an ICD revision, not an audit correction.
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -821,7 +908,9 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
-| CA-07 | MCData and MCVideo feature tags | TS 24.282, TS 24.281 | **Open, blocked.** Neither specification is in this repository. Marked `# unverified` in `core/sip.py`. |
+| CA-07 | MCData and MCVideo feature tags | TS 24.281, TS 24.282 | **Closed.** See 4.25. Both confirmed; DATA-OP-01 opened for the MCData service-specific ICSIs. |
+| CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
+| CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Open.** The table does not survive PDF extraction and needs a human read. Affects the railway profile only. |
 | CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
@@ -833,7 +922,7 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-**Nine constant sets have now been checked against a primary source. Eight
+**Ten constant sets have now been checked against a primary source. Nine
 were wrong; one was right.** Every constant the platform puts on the wire has
 now been read from a specification, in every release it supports. That is the prior for everything in the table
 above — not a certainty of defect, but nowhere near a presumption of
@@ -896,6 +985,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 1.0 | 2026-09-22 | CA-15 closed: `qos_identifier` was never validated, and the railway profile was requesting the Mission Critical Video 5QI for a data bearer and an ARP level outside the FRMCS mandatory range. CA-07 closed against TS 24.281 and TS 24.282. New `core/qos.py` carrying TS 23.501 table 5.7.4-1. New CA-16 (FRMCS Annex A does not extract) and DATA-OP-01 (MCData service-specific ICSIs). Nine of ten constant sets checked have contained defects. |
 | 0.9 | 2026-09-22 | CA-10 closed against RFC 3840 clause 5: `g.3gpp.mcptt` is not a base tag, so the `+` prefix the code already used is correct and TS 24.379's prefix-less Contact examples are editorially wrong. RFC 8101 confirms `mcpttp`/`mcpttq` are the registered namespace names, so the constants deleted in 4.6 held the right values in the wrong place. Both RFCs fetched from the RFC Editor; neither is needed in the repository. |
 | 0.8 | 2026-09-21 | CA-12 closed. TS 24.379 read across all seven published releases (Rel-15 and Rel-16 converted from legacy .doc). The warning code table grows from 44 codes to 95 in contiguous per-release blocks, and code 179 — one of the three the platform emits — does not exist before Rel-17; a deployment at Rel-13 to Rel-16 was emitting it. Every other signalling constant is stable from Rel-13. Release selection now covers both layers, so PLT-REL-009 lands in R1 rather than R2. |
 | 0.7 | 2026-09-21 | CA-13 closed, and it was a platform defect rather than only a tool defect: the Message Sequence Number was attached to every outgoing message, where clause 8.2.3.10 defines it for Floor Taken and Floor Idle alone — and the trace comparator REQUIRED it on four messages that do not define it, so the tool agreed with the defect instead of catching it. `SHAPE` rewritten from the message content tables. A Deny cause was being sent in a Floor Revoke. New CA-14, FC-OP-05, FC-OP-06. |
