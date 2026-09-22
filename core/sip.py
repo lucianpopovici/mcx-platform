@@ -232,9 +232,20 @@ REFUSALS_WITHOUT_WARNING_TEXT: Mapping[str, str] = {
     CAPACITY_EXHAUSTED: "no code for server admission capacity",
     RECORDING_UNAVAILABLE: "no recording code in table 4.4.2-2",
     QOS_UNAVAILABLE: "no bearer/QoS code in table 4.4.2-2",
-    # Codes 301-350 are reserved for interworking, and table 4.4.2-2 defers
-    # their meaning to TS 29.379, which is not in this repository.
-    GATEWAY_UNAVAILABLE: "interworking codes 301-350 are defined in TS 29.379",
+    # Table 4.4.2-2 reserves 301-350 for interworking and defers their meaning
+    # to TS 29.379. That document has now been read (PLT-CONF-AUDIT CA-09) and
+    # its table 4.2.2-1 allocates three codes and no more:
+    #
+    #   300  LMR end-to-end encryption not permitted
+    #   301  LMR end-to-end encryption required
+    #   302  LMR codec required
+    #
+    # All three are about Land Mobile Radio media security and codec
+    # negotiation at an IWF. None of them means the interworking gateway is
+    # unreachable, which is what `gateway-unavailable` reports, so this
+    # refusal still has no faithful code. The deferral is now a finding.
+    GATEWAY_UNAVAILABLE: "TS 29.379 table 4.2.2-1 allocates only 300-302, all "
+                         "LMR media security; none means gateway unreachable",
     # 179 and 180 are authorisation, not reachability.
     PARTNER_UNAVAILABLE: "179/180 mean not authorised, not unreachable",
     RESOLVER_UNAVAILABLE: "an internal condition, not an MC protocol one",

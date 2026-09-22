@@ -250,3 +250,27 @@ def test_a_release_bound_code_is_gated_but_a_rel_13_code_is_not():
             adapter.reject("unknown-target", ctx).headers.get("Warning")
         assert '"100 function not allowed due to user authorisation"' in \
             adapter.reject("not-authorised", ctx).headers.get("Warning")
+
+
+def test_the_three_interworking_codes_are_not_in_table_4_4_2_2():
+    """PLT-CONF-AUDIT CA-09.
+
+    TS 29.379 table 4.2.2-1 allocates 300, 301 and 302 from Rel-17 onward --
+    V16.5.0 clause 4.2.2 still said only "Existing warning texts as specified
+    in 3GPP TS 24.379 will be used", and the table first appears in V17.5.0.
+
+    They are deliberately absent from SIP_WARNING_INTRODUCED, which models one
+    table in one document: TS 24.379's 4.4.2-2, which reserves the range and
+    assigns no meanings. Keeping them out is what stops the emission path from
+    ever putting an LMR media-security code on a refusal from a platform that
+    performs no IWF role.
+
+    Values spelled out rather than read from the table being checked.
+    """
+    from core.release import supports_sip_warning
+    for release in RELEASES:
+        for code in (300, 301, 302):
+            assert supports_sip_warning(Release(release), code) is False
+        # ...and the rest of the range 24.379 reserved was never allocated.
+        for code in (303, 325, 350):
+            assert supports_sip_warning(Release(release), code) is False

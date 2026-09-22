@@ -202,11 +202,22 @@ SIP_WARNING_INTRODUCED: Mapping[int, Release] = {
 
 
 def supports_sip_warning(release: Release, code: int) -> bool:
-    """Whether this release's table 4.4.2-2 defines that warning code.
+    """Whether this release's TS 24.379 table 4.4.2-2 defines that warning code.
 
-    Codes 301-350 are reserved for interworking and their meaning is deferred
-    to TS 29.379, which is not in this repository, so they are not listed and
-    this returns False for them (PLT-CONF-AUDIT CA-09).
+    Table 4.4.2-2 reserves 301-350 for interworking without giving them
+    meanings, deferring to TS 29.379. That document's table 4.2.2-1 allocates
+    300, 301 and 302 -- LMR end-to-end encryption not permitted, required, and
+    LMR codec required -- from Rel-17 onward, and nothing else in the range.
+
+    They stay out of the table above, and this returns False for them, because
+    they belong to a different document's table describing a role this platform
+    does not perform: an IWF terminating Land Mobile Radio media security. The
+    emission path consults this function only for codes in WARNING_TEXTS, none
+    of which is in the 300 range, and none may become one (PLT-CONF-AUDIT
+    CA-09; pinned by test_no_refusal_emits_an_interworking_warning_code).
+
+    Note also that 300 sits OUTSIDE the 301-350 that table 4.4.2-2 reserved --
+    the two specifications disagree about the lower bound (IWF-OP-01).
     """
     introduced = SIP_WARNING_INTRODUCED.get(code)
     return introduced is not None and release >= introduced

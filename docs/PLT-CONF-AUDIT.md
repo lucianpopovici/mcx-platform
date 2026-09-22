@@ -1,8 +1,8 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.7
-**Date:** 2026-09-21
+**Version:** 1.8
+**Date:** 2026-09-22
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
 
@@ -1257,6 +1257,134 @@ confirm; the FRS states the principle, not the deployment's appetite for it.
 
 ---
 
+### 4.35 CA-09 — the interworking codes exist, and none of them is the one we wanted
+
+The last blocked item. TS 24.379 table 4.4.2-2 ends with a row that assigns
+no meaning at all:
+
+| Code | Explanatory text | Description |
+|---|---|---|
+| 301-350 | | Value allocated for use in interworking (see NOTE). |
+
+with `NOTE: Usage of these values are described in 3GPP TS 29.379 [88].`
+
+That row was the whole of CA-09. `gateway-unavailable` is the platform's one
+interworking refusal, and it emits no MC warning code; the recorded reason was
+not that no code fits but that **the document defining them was not in the
+repository**. That is a different and weaker claim, and it has now been
+settled: all four published revisions of TS 29.379 are in `docs/3GPP/`.
+
+**Table 4.2.2-1 of TS 29.379 allocates three codes and no more:**
+
+| Code | Explanatory text | Description |
+|---|---|---|
+| 300 | LMR end-to-end encryption not permitted | The call is not allowed to use LMR end-to-end encryption. |
+| 301 | LMR end-to-end encryption required | The call is required to use LMR end-to-end encryption. |
+| 302 | LMR codec required | The call requires an LMR defined codec to be used. |
+
+All three concern Land Mobile Radio media security and codec negotiation at
+an IWF terminating an LMR leg. None of them says an interworking gateway is
+unreachable, which is what `gateway-unavailable` reports.
+
+**The behaviour was already right, and stays unchanged.** What changes is the
+reason recorded for it, from a deferral to a finding. That distinction is the
+point of the item: a deferral invites the next reader to resolve it by
+guessing, and 301 is exactly the guess they would make — it is an
+interworking code, and the refusal is about interworking. It happens to mean
+that the call is *required* to use end-to-end encryption, which is not a
+statement this platform is entitled to make about any call.
+
+This is the second time in the audit that an unresolved reference turned out
+to be hiding a plausible wrong answer rather than a missing right one. The
+first was CA-02, where eleven invented warning codes were all plausible
+neighbours and one of them told a conformant peer that the user had declined
+a call that nobody had offered.
+
+**Introduced at Rel-17.** V16.5.0 clause 4.2.2 reads, in full, "Existing
+warning texts as specified in 3GPP TS 24.379 [29] will be used." The table
+first appears in V17.5.0 and is unchanged in V18.0.0 and V19.1.0. TS 24.379's
+own `301-350` row likewise first appears in V17.x. The two documents gained
+the feature in the same release.
+
+**Pinned by two tests, each killing a mutant nothing else catches.**
+
+`test_the_three_interworking_codes_are_not_in_table_4_4_2_2` holds them out of
+`SIP_WARNING_INTRODUCED`. The tempting change is to add them, on the reasoning
+that the release model should know every code that exists; the release model
+models *one table in one document*, and merging a second document's table into
+it would let the emission path put an LMR media-security code on a refusal
+from a platform that performs no IWF role. The mutant that adds them dies here
+and nowhere else in 544 tests.
+
+`test_no_refusal_emits_an_interworking_warning_code` sweeps every reason code
+in `REASON_TO_STATUS` at every supported release and asserts that no emitted
+warn-text begins with a number at or above 300. Two existing guards already
+cover the obvious mutation — `WARNING_TEXTS` is pinned as an exact dictionary,
+and local texts are checked for a three-digit prefix — but both are snapshots
+of the current contents, and a snapshot is satisfied by any change that
+updates it. The sweep is a rule rather than a snapshot. The mutant that maps
+`gateway-unavailable` to 301, teaches the release model the code, removes the
+excusal, *and dutifully updates both snapshot tests to match* passes all 543
+others and dies only here.
+
+**IWF-OP-01 — the two specifications disagree about the lower bound.**
+TS 24.379 reserves `301-350`. TS 29.379 allocates `300`, which is outside it.
+Code 300 is therefore defined by the interworking specification and reserved
+by neither — a receiver validating incoming warn-texts against table 4.4.2-2
+alone would reject a code that TS 29.379 tells an IWF to send. This platform
+has no receive-side warning parser at all, so nothing is broken today; it is
+recorded because building one without knowing this would build the defect.
+A question for 3GPP CT1, not a platform change.
+
+**IWF-OP-02 — `CT_MC_INFO` is declared and never used.** TS 29.379 uses
+`application/vnd.3gpp.mcptt-info+xml` 349 times and the repository's spelling
+of it is exactly right, but nothing constructs such a body. Left in place and
+recorded rather than deleted: it is correct, and the MIME body is required by
+almost every procedure in that document, so the constant is where it will be
+needed. Noted so that "it is already there" is not mistaken for "it is
+already done".
+
+**A second source for five constants.** TS 29.379 is an independent document
+that uses the same identifiers, and all five match the repository's spelling
+exactly: `urn:urn-7:3gpp-service.ims.icsi.mcptt`, `g.3gpp.mcptt`,
+`g.3gpp.icsi-ref`, `application/vnd.3gpp.mcptt-info+xml` and
+`application/vnd.3gpp.mcptt-location-info+xml`. This is the first
+corroboration in the audit that did not come from the document that defined
+the constant in the first place.
+
+Occurrence counts in V19.1.0, since a bare "it appears" is not a measurement:
+50, 33, 29, 349 and 15 respectively, **counting each string only where it is
+not a prefix of a longer identifier**. That rule matters for exactly one of
+them: `g.3gpp.mcptt` occurs 37 times as a raw substring, the extra four being
+`g.3gpp.mcptt-info` (2) and `g.3gpp.mcptt-floor-request` (2), which are
+different feature tags. The first draft of this paragraph gave 33 without
+stating the rule, which is the same defect in miniature as the numbers this
+audit exists to find: a figure that is right under one reading and wrong under
+another, published without saying which. The 349 is likewise occurrences and
+not lines — the same MIME type appears more than once on some lines, and a
+line-based count reads 333.
+
+What the counts are and are not evidence of: they show the identifiers are
+load-bearing throughout a second document rather than mentioned once, and
+they were produced from the same extraction as everything else here, so they
+corroborate that extraction's fidelity. The corroboration that matters is
+narrower and does not depend on any count — a specification written by a
+different working group, for a different purpose, spells these five strings
+the way the repository does. CA-06 and CA-10 were verified against TS 24.379
+and RFC 3840, and a transcription error made while reading those would have
+reproduced itself in the check. Here it could not. It is worth more than the count suggests:
+CA-06 and CA-10 were verified against TS 24.379 and RFC 3840, and a
+transcription error made while reading those would have reproduced itself in
+the check. Here it could not.
+
+The document also contains two spelling errors of its own —
+`application/vnd.3gpp.mcptt.info+xml` with a dot, and
+`application/vnd.3gpp.mcptt-info` without `+xml`, once each against 349
+correct uses. Recorded so that a future mechanical extraction from this
+document does not pick up the wrong one and "correct" the code to match.
+
+---
+
 ## 5. NOT verified — the work that remains
 
 CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
@@ -1280,7 +1408,9 @@ ordered by consequence:
 | FRMCS-OP-02 | Application vocabulary too coarse for FRS table J-1 | FRS appendix J | **Closed** by 4.34: table J-1's bands were read, and FRS 10.3/10.4 are band D. |
 | CA-19 | Priority ordering across all three fields, and pre-emption flags | FRS table J-1 | **Closed.** See 4.34. Nothing could pre-empt an ATO session, including the REC the appendix names. |
 | CA-08 | Group document, OMA-defined parts | OMA XSDs + RFC 4826 `resource-lists.xsd` (all present) | **Closed.** See 4.27. Element order is enforced and full XSD validation runs and passes. |
-| CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
+| CA-09 | Interworking warning codes 301-350 | TS 29.379 table 4.2.2-1 (all four revisions present) | **Closed.** See 4.35. Three codes exist — 300, 301, 302, all LMR media security — and none means the gateway is unreachable, so `gateway-unavailable` correctly carries no code. New IWF-OP-01, IWF-OP-02. |
+| IWF-OP-01 | TS 24.379 reserves 301-350; TS 29.379 allocates 300 | Both tables | **Open, for 3GPP CT1.** See 4.35. No effect today — there is no receive-side warning parser — but it would be a defect in one. |
+| IWF-OP-02 | `CT_MC_INFO` declared and unused | TS 29.379, throughout | **Open, low consequence.** See 4.35. The spelling is right; nothing builds the body. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
 
 **Confirmed against a specification and pinned by test:** the 14 RTCP field
@@ -1290,11 +1420,23 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-**Ten constant sets have now been checked against a primary source. Nine
-were wrong; one was right.** Every constant the platform puts on the wire has
-now been read from a specification, in every release it supports. That is the prior for everything in the table
-above — not a certainty of defect, but nowhere near a presumption of
-correctness.
+**Fifteen of the items in the table above have been checked against a
+primary source, on top of CA-01, CA-02, CA-04 and CA-06 closed in v0.3. Four
+of the fifteen found the code already correct — CA-05, CA-07, CA-09 and
+CA-10. The other eleven found at least one defect.** Every constant the
+platform puts on the wire has now been read from a specification, in every
+release it supports, and every blocked item is unblocked. That is the prior
+for what remains — not a certainty of defect, but nowhere near a presumption
+of correctness.
+
+This paragraph previously carried a running tally, incremented by hand at
+each closure. It stopped being incremented after 4.23 and was four items out
+of date, and its "one was right" had been false since CA-07 and CA-10 closed.
+It has been replaced by a count derived from the table above, which is the
+authoritative record. A hand-maintained number, in a document that exists
+because hand-written constants drift from their source, is the same failure
+one level up — and it drifted in the same direction: towards the flattering
+answer, since an undercount of the clean results is the one nobody checks.
 
 ---
 
@@ -1323,27 +1465,53 @@ correctness.
 
 ## 7. Recommendation
 
-**Nothing further can be closed from the documents in this repository.**
-Every constant the platform puts on the wire has now been read from a
-specification, in every release it supports.
+**Every document this audit asked for is now in the repository, and every
+item that was blocked on one is closed.** Every constant the platform puts on
+the wire has been read from a primary specification, in every release the
+platform supports. That was not true of a single one of them when this
+document opened.
 
-What remains needs documents this project does not have: the three OMA
-supporting schema files (CA-08, the only one with a verification case behind
-it), TS 24.281 (CA-07) and TS 29.379 (CA-09, R4 only). Both IETF references
-were fetched and are closed. CA-14 and FC-OP-05 are open by choice, both low-consequence and
-both recorded with their reasoning rather than resolved by assumption.
+Most of section 7 as it stood at v1.6 was written when CA-07, CA-08 and CA-09
+were blocked and the FRMCS profile had never been reconciled with the UIC
+documents. All of that has since happened, and the paragraphs saying otherwise
+have been removed rather than left to be read as current. Two of its
+instructions were also spent: "do not schedule interoperability testing before
+CA-03 closes" was right and CA-03 closed in v0.6, and the three OMA schema
+files arrived for CA-08.
 
-**The remaining R1 work is no longer a conformance question.** `VP1-SIG-001`
-needs a second, independent SIP core (VP-OP-01 is still undecided), and the
-FRMCS profile is still a stub that has never been reconciled with the UIC
-FRS/SRS. Neither is answerable from the 3GPP documents.
+**What is left is no longer a conformance question, and cannot be made into
+one by reading more 3GPP.** Three kinds of thing remain:
 
-CA-07 through CA-09 need documents this project does not have. CA-08 is the
-only one with a verification case behind it.
+- *Open by choice, low consequence, recorded with the reasoning rather than
+  resolved by assumption*: CA-14, FC-OP-05, FC-OP-06, DATA-OP-01, BER-OP-02,
+  IWF-OP-02.
+- *Questions for the specification bodies, not for this platform*:
+  FRMCS-OP-01 and SHUNT-OP-01 for UIC, IWF-OP-01 for 3GPP CT1. Each is a gap
+  or a contradiction in a published document. None can be closed by changing
+  code, and all three would be closed wrongly by a reader who assumed the
+  document was self-consistent.
+- *A test-environment problem*: `VP1-SIG-001` needs a second, independent SIP
+  core. VP-OP-01 is still undecided. No document answers this.
 
-**Do not schedule interoperability testing before CA-03 closes.** A field
-length error desynchronises the parse, which presents as an unrelated failure
-somewhere downstream and costs a day of test time to trace back.
+**The standing recommendation, now that the audit is out of findings.** The
+prior this document established still holds and should govern what happens
+next: of fifteen constant sets checked against a primary source, eleven were
+wrong. Nothing about closing the list makes the next constant written from
+recollection any more likely to be right. The rule that produced these
+findings — no protocol constant enters the codebase without a clause
+reference, a test that spells the value out rather than importing it, and a
+mutant that dies — is what should be carried into R2, and it is cheaper to
+apply at the point of writing than to reconstruct afterwards. This audit cost
+far more than it would have to never need it.
+
+**The one thing to watch in R2.** The character of the findings changed
+partway through, and the later ones were not wrong values but *absent rules*:
+eleven field IDs with no length constraint at all, `qos_identifier` never
+validated, `voice-operational` with no priority rule, `preemption_vulnerability`
+never checked against band membership. A wrong value fails a test somewhere
+eventually. A missing rule is silent, and every one of these was found by
+reading a specification and noticing something the code had no opinion about
+— never by a test going red.
 
 ---
 
@@ -1351,6 +1519,7 @@ somewhere downstream and costs a day of test time to trace back.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.8 | 2026-09-22 | CA-09 closed, the last blocked item. TS 29.379 table 4.2.2-1 allocates three interworking warning codes — 300, 301 and 302, all Land Mobile Radio media security — and none of them means an interworking gateway is unreachable, so `gateway-unavailable` correctly carries no code. The behaviour was already right; the recorded reason was a deferral rather than a finding, and a deferral invites the next reader to resolve it by guessing 301. Pinned by two tests, each killing a mutant nothing else in 544 catches — including a coordinated change that updates both existing snapshot guards to match. TS 29.379 independently corroborates five identifiers, the first corroboration in this audit not drawn from the document that defined the constant. New IWF-OP-01 (the two specifications disagree about the lower bound of the reserved range: 24.379 reserves 301-350, 29.379 allocates 300) and IWF-OP-02. The running tally in §5 was found four items out of date and replaced by a count derived from the table. |
 | 1.7 | 2026-09-22 | CA-19: table J-1's bands read by hand. CA-17's fix was incomplete — the priority ordering is carried by three fields and only `level` had been corrected, so ATO still out-ranked shunting on the floor and, more seriously, carried `preemption_vulnerability: false`, meaning nothing could pre-empt an active ATO session, including the REC the appendix's own worked example names. ETCS the same. All three fields now derive from band membership, and FRMCS-OP-02 closes. The band boundaries inferred in CA-17 would have been wrong in four of seven; nothing had been committed from that inference. |
 | 1.6 | 2026-09-22 | CA-18 closed by a human read of Annex A table A.1-1. Two defects: the railway emergency call carried ARP 1, which the table reserves for FRMCS internal signalling, so it out-ranked the control plane that establishes it; and ATP Regular Data carried ARP 2 rather than 4. The whole table is now pinned, not only the rows that changed. The railway profile's QoS is fully transcribed; what remains unreconciled is structural rather than numeric. |
 | 1.5 | 2026-09-22 | CA-17: the railway profile ranked ATO above shunting, inverting FRS table J-1 — under congestion it would have pre-empted a shunting call for automatic train operation data. Corrected, along with the driver-to-controller ARP, which SRS Annex A note (7) gives as 5 rather than the catch-all 6. New SHUNT-OP-01 (the SRS does not cover shunting at all), FRMCS-OP-02 (the application vocabulary is too coarse to express table J-1's bands) and CA-18 (the Annex A ARP column still needs a human read). |

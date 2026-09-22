@@ -693,3 +693,41 @@ def test_the_three_mc_feature_tags_are_the_ones_the_specifications_define():
     assert FEATURE_TAG_PTT == "+g.3gpp.mcptt"
     assert FEATURE_TAG_VIDEO == "+g.3gpp.mcvideo"
     assert FEATURE_TAG_DATA == "+g.3gpp.mcdata"
+
+
+def test_no_refusal_emits_an_interworking_warning_code():
+    """PLT-CONF-AUDIT CA-09. TS 24.379 table 4.4.2-2 reserves 301-350 for
+    interworking and defers their meaning; TS 29.379 table 4.2.2-1 then
+    allocates exactly three, 300, 301 and 302, all of them Land Mobile Radio
+    media security and codec negotiation at an IWF:
+
+        300  LMR end-to-end encryption not permitted
+        301  LMR end-to-end encryption required
+        302  LMR codec required
+
+    This platform is not an IWF and terminates no LMR media, so none of its
+    refusals may ever carry one. `gateway-unavailable` is the one that would
+    tempt a future reader -- it is about interworking, and 301 is an
+    interworking code -- but it reports that the gateway is unreachable, which
+    is not what any of the three means.
+
+    The whole reason space is swept rather than the one tempting member, so a
+    reason code added later is covered without anybody remembering to do it.
+    """
+    from core.sip import REASON_TO_STATUS
+
+    for release in (13, 14, 15, 16, 17, 18, 19, 20):
+        adapter = Adapter("sip:server@mcptt.example", Release(release))
+        ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
+        for reason in REASON_TO_STATUS:
+            warning = adapter.reject(reason, ctx).headers.get("Warning")
+            if warning is None:
+                continue
+            quoted = warning.split('"')
+            assert len(quoted) >= 2, f"{reason}: malformed Warning {warning!r}"
+            head = quoted[1].split(" ", 1)[0]
+            if not head.isdigit():
+                continue
+            assert int(head) < 300, (
+                f"{reason} at Rel-{release} emits MC code {head}, which is in "
+                f"the interworking range TS 29.379 owns")

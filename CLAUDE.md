@@ -11,7 +11,7 @@ public-safety deployment or a railway FRMCS deployment, from one codebase and on
 image, with the profile chosen at deploy time.
 
 **Current state: a thoroughly tested library that has never run as a process.**
-542 tests pass, 20 boundary gates pass, and there is no entry point, no socket,
+544 tests pass, 20 boundary gates pass, and there is no entry point, no socket,
 and no media path. The three task briefs close exactly that gap.
 
 ## The one rule
@@ -63,7 +63,7 @@ core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
 service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only SIP socket)
 service/media.py    RTP relay gated by the floor + floor control over UDP; MediaSession is pure, UdpMediaPlane owns the sockets
-core/rtcp.py        TS 24.380 floor messages as RTCP APP packets (encoding UNVERIFIED, see FC-OP-03)
+core/rtcp.py        TS 24.380 floor messages as RTCP APP packets (constants read from source; byte layout never checked against a third-party capture, FC-OP-03)
 tools/trace_compare.py  floor trace comparator, independent of the encoder
 profiles/common/    shared table-driven hook implementations
 profiles/{mcx,frmcs,utility}/
@@ -159,8 +159,11 @@ reasons are specific, not general:
 
 - **VP1-SIG-001** needs two independent SIP cores; none was available, and
   which two is VP-OP-01. Nothing has run against a third-party core.
-- **VP1-FC-002** cannot close: the TS 24.380 text was not available, so the RTCP
-  encoding and the comparator are both from memory (FC-OP-03).
+- **VP1-FC-002** cannot close: no third-party capture has ever been decoded
+  (FC-OP-03, narrowed 2026-09-22). The constants themselves have been read from
+  TS 24.380 across all eight releases and corrected; what is missing is any
+  evidence that another implementation's encoder agrees with this one. The
+  comparator shares this repository's assumptions, so it cannot supply it.
 - **VP1-DOC-001**'s "schema-valid" clause: CLOSED (SVC-OP-01, 2026-09-22).
   RFC 4826's `resource-lists.xsd` was the one file the OMA-defined XSD
   validation was skipping on; it is now in `docs/OMA/` and
