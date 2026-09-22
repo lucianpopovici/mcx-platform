@@ -227,3 +227,85 @@ def test_shunting_has_no_invented_qos(bearer_rules):
     """
     assert not any(r["match"].get("call_type") == "shunting-group"
                    for r in bearer_rules)
+
+
+# -- Annex A table A.1-1, both QoS columns (PLT-CONF-AUDIT CA-18) ---------------
+
+# "Mapping of FRS application to QoS system requirements and attribute values".
+# Read from the document by hand, as neither column survives PDF extraction.
+#
+# The table and the notes corroborate each other, which is why it is trusted:
+# Voice's ARP range 3-8 is exactly note (7)'s per-application 3/5/6/8; Urgent
+# Data's "3, 5" is note (8)'s 11.34=3 and 11.15=5; General Data's "5, 6" is
+# note (9)'s 11.3=5 and 11.9=6. Two representations of the same assignment,
+# extracted by different means, agreeing.
+#
+# communication session -> (5QI, ARP or a permitted set)
+ANNEX_A = {
+    "FRMCS Signalling (4)":     ({5, 69}, {1}),
+    "Pre-defined Default (5)":  ({8},     {8}),
+    "Emergency Voice (6)":      ({65},    {2}),
+    "Voice (7)":                ({65},    {3, 4, 5, 6, 7, 8}),
+    "Urgent Data (8)":          ({8},     {3, 5}),
+    "General Data (9)":         ({8},     {5, 6}),
+    "TCMS (10)":                ({8},     {7}),
+    "ATP Regular Data (11)":    ({4},     {4}),
+    "ATP Compl. Data (12)":     ({8},     {6}),
+    "ATO (13)":                 ({8},     {6}),
+}
+
+# Which communication session each of this profile's bearer rules serves.
+RULE_TO_SESSION = {
+    "rec-broadcast": "Emergency Voice (6)",
+    "etcs-ipcon": "ATP Regular Data (11)",
+    "driver-controller": "Voice (7)",
+}
+
+
+@pytest.mark.parametrize("call_type,session", sorted(RULE_TO_SESSION.items()))
+def test_each_bearer_rule_matches_its_annex_a_row(bearer_rules, call_type,
+                                                  session):
+    """CA-18. Emergency Voice was carrying ARP 1 and ATP Regular Data ARP 2;
+    the table says 2 and 4."""
+    qos, arp = ANNEX_A[session]
+    rule = next(r for r in bearer_rules
+                if r["match"].get("call_type") == call_type)
+    assert rule["decision"]["qos_identifier"] in qos, (call_type, session)
+    assert rule["decision"]["arp_level"] in arp, (call_type, session)
+
+
+def test_arp_1_is_reserved_for_frmcs_signalling(bearer_rules):
+    """Table A.1-1 gives ARP 1 to FRMCS Signalling (4) alone — note (4):
+    "'FRMCS Signalling' refers to the FRMCS internal signalling (related to
+    MCX and 5G)".
+
+    No user-plane bearer may claim it. A railway emergency call is the highest
+    user-plane priority, not the highest priority outright: taking ARP 1 for
+    it would out-rank the signalling that sets the call up. This profile did
+    exactly that.
+
+    The platform models no signalling bearer at all (BER-OP-02), so nothing
+    here should use ARP 1 — and if a signalling bearer is ever added, this
+    test is where the reservation is written down.
+    """
+    for rule in bearer_rules:
+        assert rule["decision"]["arp_level"] != 1, rule["match"]
+
+
+def test_the_catch_all_data_rule_is_the_predefined_default_row(bearer_rules):
+    """5QI 8 with ARP 8 is Pre-defined Default (5), which is what a data call
+    with no more specific rule should get."""
+    qos, arp = ANNEX_A["Pre-defined Default (5)"]
+    rule = next(r for r in bearer_rules
+                if r["match"].get("call_type") == "*"
+                and r["match"].get("media") == "data")
+    assert rule["decision"]["qos_identifier"] in qos
+    assert rule["decision"]["arp_level"] in arp
+
+
+def test_every_5qi_in_the_profile_appears_in_annex_a(bearer_rules):
+    """Cross-check of the whole table against the whole profile, so a future
+    rule cannot introduce a 5QI Annex A never assigns."""
+    assigned = set().union(*(q for q, _ in ANNEX_A.values()))
+    used = {r["decision"]["qos_identifier"] for r in bearer_rules}
+    assert used <= assigned, sorted(used - assigned)

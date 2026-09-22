@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.5
+**Version:** 1.6
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1136,6 +1136,58 @@ correction, and it is recorded rather than attempted. It is also the clearest
 evidence yet for what `CLAUDE.md` already says: this profile is a stub and
 must not be used as safety-case input.
 
+### 4.33 CA-18 — a railway emergency call out-ranked the signalling that sets it up
+
+**Source:** UIC FRMCS SRS (AT-7800) v2.1.0 Annex A table A.1-1, "Mapping of
+FRS application to QoS system requirements and attribute values", read from
+the document by hand — neither QoS column survives PDF extraction.
+
+| Communication session | 5QI | ARP |
+|---|---|---|
+| FRMCS Signalling (4) | 5 / 69 | **1** |
+| Pre-defined Default (5) | 8 | 8 |
+| Emergency Voice (6) | 65 (GBR) | **2** |
+| Voice (7) | 65 (GBR) | 3-8 |
+| Urgent Data (8) | 8 | 3, 5 |
+| General Data (9) | 8 | 5, 6 |
+| TCMS (10) | 8 | 7 |
+| ATP Regular Data (11) | 4 (GBR) | **4** |
+| ATP Compl. Data (12) | 8 | 6 |
+| ATO (13) | 8 | 6 |
+
+**The table is trusted because it corroborates the notes**, which do extract:
+Voice's ARP range 3-8 is exactly note (7)'s per-application 3/5/6/8; Urgent
+Data's "3, 5" is note (8)'s 11.34=3 and 11.15=5; General Data's "5, 6" is note
+(9)'s 11.3=5 and 11.9=6. Two representations of one assignment, obtained by
+different means, agreeing.
+
+**Two defects.** `rec-broadcast` carried **ARP 1** and should be 2;
+`etcs-ipcon` carried **ARP 2** and should be 4.
+
+The first is the interesting one. Table A.1-1 gives **ARP 1 to FRMCS
+Signalling alone** — note (4): *"'FRMCS Signalling' refers to the FRMCS
+internal signalling (related to MCX and 5G)"*. A railway emergency call is the
+highest **user-plane** priority, not the highest priority outright. Giving it
+ARP 1 put it above the signalling that establishes and maintains it, so under
+contention the platform would have starved the control plane to protect the
+call that depends on it.
+
+The profile's original values were not random — 1 and 2 are a plausible
+"emergency first, safety second" ordering, and that is the trap. The real
+table has a reserved band above both, and it was invisible until someone read
+it. A test now asserts that **no user-plane bearer uses ARP 1**, so the
+reservation is written down rather than remembered.
+
+**The rest of the table is pinned too**, not only the two rows that changed: a
+5QI cross-check over the whole profile, the Voice band as a range rather than
+a point, and the catch-all data rule identified as Pre-defined Default (5).
+
+**CA-18 closes, and with it the QoS reconciliation.** Every bearer rule in the
+railway profile is now transcribed from Annex A. What remains unreconciled is
+structural, not numeric: SHUNT-OP-01 (the SRS covers no shunting application)
+and FRMCS-OP-02 (the application vocabulary cannot express FRS table J-1's
+bands).
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -1156,7 +1208,7 @@ ordered by consequence:
 | CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Closed** by a human read of the table. See 4.24 — the value this audit derived was wrong. |
 | FRMCS-OP-01 | SRS clause 14.6.2.1 excludes a 5QI Annex A assigns | UIC FRMCS SRS | **Open, for UIC.** See 4.26. |
 | CA-17 | Railway priority ordering and per-application ARP | FRS appendix J, SRS Annex A notes | **Closed.** See 4.30. ATO and shunting were inverted. |
-| CA-18 | Annex A ARP column for Emergency Voice and ATP Regular Data | UIC FRMCS SRS Annex A | **Open.** The ARP column does not extract; the 5QI column was read by hand in CA-16 and the ARP one still needs the same. |
+| CA-18 | Annex A ARP column | UIC FRMCS SRS Annex A table A.1-1 | **Closed** by a human read. See 4.33 — ARP 1 is reserved for FRMCS Signalling and the emergency call was taking it. |
 | SHUNT-OP-01 | The SRS does not cover shunting (FRS 10.8) | UIC FRMCS SRS Annex A note (1) | **Open, for UIC.** See 4.31. |
 | FRMCS-OP-02 | Application vocabulary too coarse for FRS table J-1 | FRS appendix J | **Open, profile design.** See 4.32. |
 | CA-08 | Group document, OMA-defined parts | OMA XSDs + RFC 4826 `resource-lists.xsd` (all present) | **Closed.** See 4.27. Element order is enforced and full XSD validation runs and passes. |
@@ -1231,6 +1283,7 @@ somewhere downstream and costs a day of test time to trace back.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.6 | 2026-09-22 | CA-18 closed by a human read of Annex A table A.1-1. Two defects: the railway emergency call carried ARP 1, which the table reserves for FRMCS internal signalling, so it out-ranked the control plane that establishes it; and ATP Regular Data carried ARP 2 rather than 4. The whole table is now pinned, not only the rows that changed. The railway profile's QoS is fully transcribed; what remains unreconciled is structural rather than numeric. |
 | 1.5 | 2026-09-22 | CA-17: the railway profile ranked ATO above shunting, inverting FRS table J-1 — under congestion it would have pre-empted a shunting call for automatic train operation data. Corrected, along with the driver-to-controller ARP, which SRS Annex A note (7) gives as 5 rather than the catch-all 6. New SHUNT-OP-01 (the SRS does not cover shunting at all), FRMCS-OP-02 (the application vocabulary is too coarse to express table J-1's bands) and CA-18 (the Annex A ARP column still needs a human read). |
 | 1.4 | 2026-09-22 | CA-08 closure verified against a second concern: `resource-lists.xsd` was cross-read against RFC 4826 line by line (transcription is a transformation, and transformations get checked), and its own `xml.xsd` import turned the build red rather than skipping, since libxml2 does not treat the XML namespace as predefined. `docs/OMA/xml.xsd` added (fetched from `http://www.w3.org/2001/xml.xsd`, checked well-formed and buildable standalone). `test_the_group_document_is_schema_valid` runs and passes, including three new negative assertions -- two bad orderings and a missing `@uri` -- all rejected, so the pass is not vacuous. |
 | 1.3 | 2026-09-22 | CA-08 closed. `resource-lists.xsd` added to `docs/OMA/`, transcribed from RFC 4826 §3.2 read at rfc-editor.org — not from the schema's own `schemaLocation` URL, which serves IANA's namespace-registry placeholder page (HTML, not a schema) rather than the file. `test_the_group_document_is_schema_valid` now runs instead of skipping and passes. Closes `VP1-DOC-001`'s "schema-valid" clause and SVC-OP-01. |

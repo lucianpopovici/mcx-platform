@@ -193,10 +193,16 @@ priority:
 
 bearer:
   rules:
+    # SRS Annex A table A.1-1: Emergency Voice (6) is 5QI 65 (GBR), ARP 2.
+    # This was ARP 1, which the same table reserves for FRMCS Signalling (4) --
+    # the FRMCS-internal signalling for MCX and 5G. A railway emergency call is
+    # the highest USER-PLANE priority, not the highest priority full stop, and
+    # claiming ARP 1 for it would have out-ranked the signalling that sets the
+    # call up (PLT-CONF-AUDIT CA-18).
     - match: {call_type: rec-broadcast, media: voice}
       decision:
         qos_identifier: 65
-        arp_level: 1
+        arp_level: 2
         arp_preemption_capability: true
         arp_preemption_vulnerability: false
         redundancy: multihomed
@@ -213,10 +219,14 @@ bearer:
     # The Example Services column of table 5.7.4-1 describes a traffic class
     # for the general-purpose 5QIs; it only names a service for the
     # mission-critical ones. A guaranteed bit rate was the requirement.
+    # ...and ARP 4, not the 2 this carried. Table A.1-1 puts ATP Regular Data
+    # between Emergency Voice (2) and the Voice band (3-8), which is what
+    # "control-command (safety) priority" sitting below the railway emergency
+    # call looks like in numbers.
     - match: {call_type: etcs-ipcon, media: data}
       decision:
         qos_identifier: 4
-        arp_level: 2
+        arp_level: 4
         arp_preemption_capability: true
         arp_preemption_vulnerability: false
         redundancy: multihomed
