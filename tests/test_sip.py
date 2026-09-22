@@ -652,3 +652,33 @@ def test_the_inbound_guard_uses_the_same_warning_shape():
     assert warning is not None, "the refusal must say why"
     assert warning.startswith('399 ps.mcptt.example "'), warning
     assert "mcx" not in warning
+
+
+def test_non_base_feature_tags_carry_the_plus_prefix():
+    """IETF RFC 3840 clause 5 (PLT-CONF-AUDIT CA-10).
+
+    Base tags carry no prefix; every other tag "MUST" have a leading "+".
+    None of the MC tags is a base tag. TS 24.379's own Contact examples are
+    inconsistent -- six omit the prefix, two include it -- so this is pinned
+    against the RFC rather than against the examples.
+    """
+    from core.sip import (FEATURE_TAG_DATA, FEATURE_TAG_ICSI_REF,
+                          FEATURE_TAG_PTT, FEATURE_TAG_VIDEO)
+    base_tags = {"audio", "video", "data", "control", "mobility", "isfocus",
+                 "actor", "text", "automata", "class", "duplex",
+                 "description", "events", "priority", "methods", "schemes",
+                 "application", "language", "type"}
+    for tag in (FEATURE_TAG_PTT, FEATURE_TAG_DATA, FEATURE_TAG_VIDEO,
+                FEATURE_TAG_ICSI_REF):
+        assert tag.startswith("+"), tag
+        assert tag.lstrip("+") not in base_tags, tag
+
+    adapter = Adapter("sip:ps.mcptt.example", Release.REL_19)
+    ctx = DialogContext(call_id="c1", local_uri="sip:ps.mcptt.example")
+    req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
+                         target="t", call_type="x", media=(MediaKind.VOICE,))
+    invite = adapter.render(Signal(SignalType.INVITE, target="sip:u1@x",
+                                   detail={}), ctx, req)
+    assert "+g.3gpp.mcptt" in invite.headers.get("Contact")
+    for value in invite.headers.get_all("Accept-Contact"):
+        assert "+g.3gpp." in value, value

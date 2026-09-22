@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 0.8
+**Version:** 0.9
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -760,6 +760,52 @@ regrouped" → "group is regrouped" at Rel-16; 149 "SIP-INFO" → "SIP INFO" at
 Rel-17). Neither is emitted here, and both are recorded so that a future
 reader does not mistake an editorial change for a semantic one.
 
+### 4.21 CA-10 closed — the `+` prefix is correct, and RFC 3840 says why
+
+**Source:** IETF RFC 3840 clause 5, fetched from the RFC Editor.
+
+TS 24.379's own signalling flows are inconsistent: six Contact examples write
+`g.3gpp.mcptt` without a prefix, two write `+g.3gpp.mcptt`, and the normative
+text specifies neither. The audit kept the prefix and recorded the ambiguity
+rather than resolving it by majority vote on non-normative examples.
+
+RFC 3840 settles it. **Base tags** — the twenty defined by that RFC, such as
+`audio`, `video`, `isfocus` — appear with no prefix. For any other tag,
+clause 5 states "a plus sign ('+') MUST be added as the first character", and
+the ABNF makes it structural:
+
+```
+enc-feature-tag = base-tags / other-tags
+other-tags      = "+" ftag-name
+```
+
+`g.3gpp.mcptt` and `g.3gpp.icsi-ref` are not base tags, so `+g.3gpp.mcptt` is
+right in both Contact and Accept-Contact. **The code was already correct and
+the specification's examples are editorially wrong.**
+
+Recorded as a finding because "we checked and it was right" is one, and
+because the next reader to notice the inconsistency should find the answer
+here rather than re-deriving it.
+
+### 4.22 The deleted Resource-Priority namespaces were the right values
+
+**Source:** IETF RFC 8101, fetched from the RFC Editor.
+
+4.6 deleted `RP_NAMESPACE_NORMAL = "mcpttp"` and
+`RP_NAMESPACE_EMERGENCY = "mcpttq"` from `core/`, on the grounds that the
+namespace is retrieved per deployment from the service configuration document
+(TS 24.484) and that the citation to RFC 4412 was wrong.
+
+RFC 8101 does register exactly those two namespaces — `mcpttp` with a
+pre-emption algorithm and `mcpttq` with a queuing algorithm, each with
+priority levels 0 to 15. So the **values** were right; what was wrong was
+their being constants in the one module forbidden to hold configuration, and
+the citation.
+
+This matters for how the finding reads: it was not a transcription error. It
+was a correct value in a place that made it uncheckable and undeployable, and
+that is a different kind of defect from the other eight.
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -778,7 +824,7 @@ ordered by consequence:
 | CA-07 | MCData and MCVideo feature tags | TS 24.282, TS 24.281 | **Open, blocked.** Neither specification is in this repository. Marked `# unverified` in `core/sip.py`. |
 | CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
-| CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 | **Open.** TS 24.379's own flows are inconsistent — six examples without the prefix, two with. The normative text specifies neither. RFC 3840 is the arbiter and is not here. Kept with the prefix. |
+| CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
 
 **Confirmed against a specification and pinned by test:** the 14 RTCP field
 IDs, the `MCPT` name, PT=204, the floor control subtypes, the Deny and Revoke
@@ -824,10 +870,10 @@ correctness.
 Every constant the platform puts on the wire has now been read from a
 specification, in every release it supports.
 
-What remains needs four documents this project does not have: OMA XDM Group
-(CA-08, the only one with a verification case behind it), TS 24.282 and
-TS 24.281 (CA-07), TS 29.379 (CA-09, R4 only) and RFC 3840 (CA-10,
-cosmetic). CA-14 and FC-OP-05 are open by choice, both low-consequence and
+What remains needs documents this project does not have: the three OMA
+supporting schema files (CA-08, the only one with a verification case behind
+it), TS 24.281 (CA-07) and TS 29.379 (CA-09, R4 only). Both IETF references
+were fetched and are closed. CA-14 and FC-OP-05 are open by choice, both low-consequence and
 both recorded with their reasoning rather than resolved by assumption.
 
 **The remaining R1 work is no longer a conformance question.** `VP1-SIG-001`
@@ -835,8 +881,8 @@ needs a second, independent SIP core (VP-OP-01 is still undecided), and the
 FRMCS profile is still a stub that has never been reconciled with the UIC
 FRS/SRS. Neither is answerable from the 3GPP documents.
 
-CA-07 through CA-10 need four documents this project does not have. CA-08
-(OMA XDM Group) is the only one with a verification case behind it.
+CA-07 through CA-09 need documents this project does not have. CA-08 is the
+only one with a verification case behind it.
 
 **Do not schedule interoperability testing before CA-03 closes.** A field
 length error desynchronises the parse, which presents as an unrelated failure
@@ -850,6 +896,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 0.9 | 2026-09-22 | CA-10 closed against RFC 3840 clause 5: `g.3gpp.mcptt` is not a base tag, so the `+` prefix the code already used is correct and TS 24.379's prefix-less Contact examples are editorially wrong. RFC 8101 confirms `mcpttp`/`mcpttq` are the registered namespace names, so the constants deleted in 4.6 held the right values in the wrong place. Both RFCs fetched from the RFC Editor; neither is needed in the repository. |
 | 0.8 | 2026-09-21 | CA-12 closed. TS 24.379 read across all seven published releases (Rel-15 and Rel-16 converted from legacy .doc). The warning code table grows from 44 codes to 95 in contiguous per-release blocks, and code 179 — one of the three the platform emits — does not exist before Rel-17; a deployment at Rel-13 to Rel-16 was emitting it. Every other signalling constant is stable from Rel-13. Release selection now covers both layers, so PLT-REL-009 lands in R1 rather than R2. |
 | 0.7 | 2026-09-21 | CA-13 closed, and it was a platform defect rather than only a tool defect: the Message Sequence Number was attached to every outgoing message, where clause 8.2.3.10 defines it for Floor Taken and Floor Idle alone — and the trace comparator REQUIRED it on four messages that do not define it, so the tool agreed with the defect instead of catching it. `SHAPE` rewritten from the message content tables. A Deny cause was being sent in a Floor Revoke. New CA-14, FC-OP-05, FC-OP-06. |
 | 0.6 | 2026-09-21 | CA-03 closed against TS 24.380 clause 8.2.3, read from the prose beneath each field diagram. Eleven of twenty-six field ids had no length rule at all; Source was in the wrong class and SSRC is 6 octets, not the 4 that would have been guessed. Track Info was being UTF-8 validated, so a conformant Floor Request carrying it was rejected as malformed. The field framing was checked and found already correct. New CA-13: the trace comparator's message shapes are incomplete and flag conformant traffic. |

@@ -66,6 +66,13 @@ FEATURE_TAG_VIDEO = "+g.3gpp.mcvideo"        # unverified
 MCPTT_ICSI = "urn:urn-7:3gpp-service.ims.icsi.mcptt"
 FEATURE_TAG_ICSI_REF = "+g.3gpp.icsi-ref"
 
+# The "+" is required, not stylistic. IETF RFC 3840 clause 5: base tags (audio,
+# video, isfocus and seventeen others) carry no prefix, and for every other tag
+# "a plus sign ('+') MUST be added as the first character". The ABNF makes it
+# structural -- other-tags = "+" ftag-name. TS 24.379's Contact examples are
+# inconsistent about this and six of the eight are editorially wrong
+# (PLT-CONF-AUDIT CA-10).
+
 
 def _pct(value: str) -> str:
     """Percent-encode a feature tag value as TS 24.379 shows it on the wire."""
