@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 
+XDM - Forwarding Notification List
+    version - 1.0.1
+    date    - 03 May 2016
+    
+FILE INFORMATION
+    
+    OMA Permanent Document
+      File: OMA-SUP-XSD_xdm_forwarding_notification_list-V1_0_1-20160503-A
+      Type: Text - Schema Description
+    
+    Public Reachable Information
+      Path: http://www.openmobilealliance.org/tech/profiles
+      Name: xdm_forwarding_notification_list-v1_0.xsd
+    
+NORMATIVE INFORMATION
+    
+    Information about this file can be found in the specification
+	
+      OMA-TS-XDM_List-V2_1
+	  
+    available at http://www.openmobilealliance.org/
+    
+    Send comments to technical-comments@mail.openmobilealliance.org
+	
+CHANGE HISTORY
+
+03052016 Status changed to Approved by TP, TP Ref # OMA-TP-2016-0052R01-INP_XDM_V2_2_ERP_for_final_Approval
+
+LEGAL DISCLAIMER
+
+  Copyright 2016 Open Mobile Alliance Ltd.  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  1. Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived
+  from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  The above license is used as a license under copyright only.  Please
+  reference the OMA IPR Policy for patent licensing terms:
+  http://www.openmobilealliance.org/ipr.html
+-->
+
+<xs:schema
+    targetNamespace="urn:oma:xml:xdm:forwarding-notification-list"
+    xmlns="urn:oma:xml:xdm:forwarding-notification-list"   
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:rl="urn:ietf:params:xml:ns:resource-lists"
+    elementFormDefault="qualified" attributeFormDefault="unqualified">
+    
+    <!-- This import brings in the XML language attribute xml:lang -->
+    <xs:import namespace="http://www.w3.org/XML/1998/namespace"
+        schemaLocation="http://www.w3.org/2001/xml.xsd"/>
+	<!-- This import brings in the Resource List from IETF -->
+	<xs:import namespace="urn:ietf:params:xml:ns:resource-lists" schemaLocation="http://www.iana.org/assignments/xml-registry/schema/resource-lists.xsd"/>
+    
+    <!-- The root "forward-notification-list" element -->
+    <xs:element name="forward-notification-list">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="request-notification-list" type="requestNotificationListType" minOccurs="0" maxOccurs="unbounded"/>
+                <xs:element name="delivery-notification-list" type="deliveryNotificationListType" minOccurs="0" maxOccurs="unbounded"/>
+                <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+    
+    <xs:complexType name="requestNotificationListType">
+		<xs:sequence>
+			<xs:element name="request" type="requestType" minOccurs="0" maxOccurs="unbounded"/>
+		</xs:sequence>
+       <xs:attribute name="auid" type="xs:string"/>
+    </xs:complexType>
+    
+    <xs:complexType name="requestType">
+        <xs:sequence>
+            <xs:element name="sender-asserted-identity" type="senderAssertedIdentityType"/>
+            <xs:element name="expiration-time" type="xs:dateTime"/>
+            <xs:element name="size" type="xs:integer"/>
+            <xs:element name="status" type="xs:string"/>
+            <xs:element name="note" type="xs:string"/>
+            <xs:element name="content-type" type="xs:string"/>
+            <xs:element name="timestamp" type="xs:dateTime"/>
+        </xs:sequence>
+        <xs:attribute name="document-uri" type="xs:anyURI"/>
+    </xs:complexType>
+
+	<xs:complexType name="senderAssertedIdentityType">
+		<xs:sequence>
+			<xs:element name="display-name" type="xs:string"/>
+		</xs:sequence>
+	</xs:complexType>
+	                
+    <xs:complexType name="deliveryNotificationListType">
+        <xs:sequence>
+			<xs:element name="delivery-notification" type="deliveryNotificationType" minOccurs="0" maxOccurs="unbounded"/>
+		</xs:sequence>
+    </xs:complexType>
+	
+	<xs:complexType name="deliveryNotificationType">
+		<xs:sequence>
+			<xs:element name="document-uri" type="xs:string"/>
+			<xs:element name="recipients-list" type="recipientsListType"/>
+			<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+		</xs:sequence>
+		<xs:attribute name="request-id" type="xs:string"/>
+	</xs:complexType>
+	
+	<xs:complexType name="recipientsListType">
+		<xs:complexContent>
+			<xs:extension base="rl:entryType">
+				<xs:attribute name="status" type="statusType"/>
+			</xs:extension>
+		</xs:complexContent>
+	</xs:complexType>
+	
+	<xs:simpleType name="statusType">
+		<xs:restriction base="xs:string">
+                    <xs:enumeration value="pending"/>
+                    <xs:enumeration value="delivered"/>
+					<xs:enumeration value="rejected"/>
+					<xs:enumeration value="expired"/>
+        </xs:restriction>
+	</xs:simpleType>
+			    
+</xs:schema>

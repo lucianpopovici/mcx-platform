@@ -1,0 +1,159 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 
+	XDM - 2.2 Extensions
+	    version - 1.0
+	    date    - 03 May 2016
+
+FILE INFORMATION
+
+  OMA Permanent Document
+	File: OMA-SUP-XSD_xdm_2_2_extensions-V1_0-20160503-A
+	Type: Text - Schema Description
+
+  Public Reachable Information
+	Path: http://www.openmobilealliance.org/tech/profiles
+	Name: xdm_2_2_extensions-V1_0.xsd
+
+NORMATIVE INFORMATION
+    
+  Information about this file can be found in the specification
+
+    OMA-TS-XDM_Core-V2_2
+    
+  available at http://www.openmobilealliance.org/
+    
+  Send comments to technical-comments@mail.openmobilealliance.org
+    
+CHANGE HISTORY
+
+03052016 Status changed to Approved by TP, TP Ref # OMA-TP-2016-0052R01-INP_XDM_V2_2_ERP_for_final_Approval
+
+LEGAL DISCLAIMER
+
+  Copyright 2016 Open Mobile Alliance Ltd.  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  1. Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived
+  from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  The above license is used as a license under copyright only.  Please
+  reference the OMA IPR Policy for patent licensing terms:
+  http://www.openmobilealliance.org/ipr.html
+  -->
+
+<xs:schema targetNamespace="urn:oma:xml:xdm:2.2extensions"
+    xmlns="urn:oma:xml:xdm:2.2extensions"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    
+    xmlns:filter="urn:ietf:params:xml:ns:simple-filter"
+    elementFormDefault="qualified" attributeFormDefault="unqualified">    
+    	
+   	<!-- This import brings in the ietf defined "simple-filter" XML schema -->
+	<xs:import  namespace="urn:ietf:params:xml:ns:simple-filter"
+        schemaLocation="http://www.iana.org/assignments/xml-registry/schema/simple-filter.xsd"/> 
+ <!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+<!-- OMA specific XDM version 2.2 extensions to "XDCP"-->
+<!--New child elements to the <request> element-->
+  <xs:element name="delete-docs">
+    <xs:complexType >
+      <xs:sequence>
+        <xs:element ref="doc-list">
+        </xs:element>
+	      <xs:any namespace="##other" processContents="lax"/>
+      </xs:sequence>
+      <xs:anyAttribute processContents="lax"/>
+    </xs:complexType>
+  </xs:element>
+  <xs:element name="retrieve-doc-ref-with-filter" type="emptyType">
+  </xs:element>
+  
+  <xs:element name="set-doc-ref-with-filter" type="DocRefWithFilterType"/>
+  
+    <xs:complexType name="DocRefWithfFilterType">
+		  <xs:sequence>
+			  <xs:element name="reference" type="xs:anyURI" />
+			  <xs:element name="display-name" type="xs:string" minOccurs="0" maxOccurs="1"/>
+			  <xs:element ref="filter:filter-set" minOccurs="0" maxOccurs="1">
+			  </xs:element>	
+		  </xs:sequence>
+	  </xs:complexType>
+
+ <!--New child elements to the <response> element--> 
+ 
+  <xs:element name="retrieve-doc-ref-with-filter-result" type="DocRefWithFilterType"/>
+   <!--New type definations--> 
+    <xs:complexType name="DocRefWithFilterType">
+		  <xs:sequence>
+			  <xs:element name="reference" type="xs:anyURI" />
+			  <xs:element name="display-name" type="xs:string" minOccurs="0" maxOccurs="1"/>
+			  <xs:element ref="filter:filter-set" minOccurs="0" maxOccurs="1">
+			  </xs:element>	
+		  </xs:sequence>
+	  </xs:complexType> 
+
+<!-- OMA specific XDM version 2.2 extensions to "XCAP server Capabilities Document"-->
+<!-- New child elements to the <requests> element -->
+  <xs:element name="reference-with-filter" type="emptyType">
+  </xs:element>
+  
+  <xs:element name="delete" type="emptyType">
+  </xs:element>
+
+<!-- OMA specific XDM version 2.2 extensions to DESCRIBE WHAT YOU EXTEND HERE-->
+
+<!-- OMA specific XDM version 2.2 extensions to type and common element definitions-->
+  <xs:element name="doc-list">  
+      <xs:complexType>
+        <xs:choice>
+          <xs:sequence minOccurs="1" maxOccurs="unbounded">
+            <xs:element ref="entry">
+            </xs:element>
+          </xs:sequence>
+          <xs:element name="all-except">
+          <xs:complexType>
+            <xs:sequence minOccurs="0" maxOccurs="unbounded">
+              <xs:element ref="entry">
+              </xs:element>
+            </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+        </xs:choice>
+      </xs:complexType>
+ </xs:element>
+
+  <xs:element name="entry">
+    <xs:complexType>
+      <xs:simpleContent>
+			  <xs:extension base="xs:string">
+				  <xs:attribute name="udds" type="xs:anyURI"/>
+				  <xs:attribute name="udds-contains" type="xs:anyURI"/>
+			  </xs:extension>
+		  </xs:simpleContent>
+	  </xs:complexType>
+  </xs:element>
+  
+  <xs:complexType name="emptyType"></xs:complexType>
+</xs:schema>

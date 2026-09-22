@@ -1,0 +1,301 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 
+XDM - 2.1 Extensions
+	version - 1.0.1
+	date    - 03 May 2016
+
+FILE INFORMATION
+
+	OMA Permanent Document
+	   File: OMA-SUP-XSD_xdm_2_1_extensions-V1_0_1-20160503-A
+	   Type: Text - Schema Description
+
+	Public Reachable Information
+	   Path: http://www.openmobilealliance.org/tech/profiles
+	   Name: xdm_2_1_extensions-V1_0.xsd
+
+NORMATIVE INFORMATION
+    
+    Information about this file can be found in the specification
+	
+       OMA-TS-XDM_Core-V2_2
+	
+    available at http://www.openmobilealliance.org/
+    
+    Send comments to technical-comments@mail.openmobilealliance.org
+
+CHANGE HISTORY
+
+03052016 Status changed to Approved by TP, TP Ref # OMA-TP-2016-0052R01-INP_XDM_V2_2_ERP_for_final_Approval
+
+LEGAL DISCLAIMER
+
+  Copyright 2016 Open Mobile Alliance Ltd.  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  1. Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived
+  from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  The above license is used as a license under copyright only.  Please
+  reference the OMA IPR Policy for patent licensing terms:
+  http://www.openmobilealliance.org/ipr.html
+-->
+
+<xs:schema targetNamespace="urn:oma:xml:xdm:2.1extensions"
+    xmlns="urn:oma:xml:xdm:2.1extensions"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:cp="urn:ietf:params:xml:ns:common-policy"
+    xmlns:ext="urn:oma:xml:xdm:extensions"
+    xmlns:geo="urn:ietf:params:xml:ns:pidf:geopriv10"
+    xmlns:geoca="urn:ietf:params:xml:ns:pidf:geopriv10:civicAddr"
+    elementFormDefault="qualified" attributeFormDefault="unqualified">
+
+    <!-- This import brings in common policy namespace from RFC 4745 -->
+    <xs:import namespace="urn:ietf:params:xml:ns:common-policy"
+    schemaLocation="common-policy.xsd"/>
+
+<!-- This import brings in geopriv10 namespace from RFC 4119 -->
+    <xs:import namespace="urn:ietf:params:xml:ns:pidf:geopriv10"
+    schemaLocation="geopriv10.xsd"/>
+    
+<!-- This import brings in geopriv10 Civiladdress namespace from RFC 5139 -->
+    <xs:import namespace="urn:ietf:params:xml:ns:pidf:geopriv10:civicAddr"
+    schemaLocation="civicAddr.xsd"/>
+
+    
+<!-- This import brings in xdm extensions namespace -->
+    <xs:import namespace="urn:oma:xml:xdm:extensions"
+    schemaLocation="http://www.openmobilealliance.org/tech/profiles/xdm_extensions-v1_0.xsd"/>
+
+<!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+<!-- OMA specific XDM version 2.1 extensions to "common Policy" RFC 4745 -->
+<!-- OMA specific "conditions" child elements -->
+
+<xs:element name="upp-list" type="uppListType"/>
+
+    <xs:element name="invited-identities" type="cp:identityType"/>
+
+
+    <xs:element name="qoe-list">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="qoe" type="ext:qoeType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:element name="country-region-list">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="civicAddress" type="restrictedCivicAddressType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:element name="location-list">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="location-info" type="geo:locInfoType" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:complexType name="restrictedCivicAddressType">        
+<!-- Only the types from the namespace "geoca:" for the "country", "A1" and "A2" element are reused. -->
+        <xs:sequence>
+            <xs:element name="country" type="geoca:iso3166a2" minOccurs="0"/>
+            <xs:element name="A1" type="geoca:caType" minOccurs="0"/>
+            <xs:element name="A2" type="geoca:caType" minOccurs="0"/>
+        </xs:sequence>
+            <xs:anyAttribute namespace="##any" processContents="lax"/>
+    </xs:complexType>
+
+    <xs:complexType name="uppListType">
+        <xs:choice>
+            <xs:sequence>
+                <xs:element ref="upp" minOccurs="1" maxOccurs="unbounded"/>
+            </xs:sequence>
+            <xs:element name="all-upp-except">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element ref="upp" minOccurs="0" maxOccurs="unbounded"/>
+                    </xs:sequence>   
+                </xs:complexType>
+            </xs:element>
+        </xs:choice>
+    </xs:complexType>
+
+    <xs:element name="upp">
+        <xs:complexType>
+            <xs:attribute name="upp-id" type="xs:string" use="required"/>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="deferred-messages" type="extType"/>
+
+    <xs:element name="expired" type="extType"/>
+<!-- XDM version 2.1 add also the element <activities> element from the "urn:ietf:params:xml:ns:pidf:rpid" namespace as a possible child element-->
+
+
+<!-- OMA specific "actions" child elements -->
+
+    <xs:element name="allow-defer" type="xs:boolean"/>
+    <xs:element name="allow-deliver-and-interwork">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="methods-list" type="methodsList"/>
+                <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+            <xs:attribute name="execute" type="xs:boolean" use="required"/>
+            <xs:anyAttribute namespace="##any" processContents="lax"/>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="allow-deliver-reference-media" type="xs:boolean"/>
+    <xs:element name="allow-do-not-disturb" type="xs:boolean"/>
+    <xs:element name="allow-forward">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="forward-to" type="xs:anyURI"/>
+                <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+                
+            </xs:sequence>
+            <xs:attribute name="execute" type="xs:boolean" use="required"/>
+            <xs:anyAttribute namespace="##any" processContents="lax"/>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="allow-interwork">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="methods-list" type="methodsList"/>
+                <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+            <xs:attribute name="execute" type="xs:boolean" use="required"/>
+            <xs:anyAttribute namespace="##any" processContents="lax"/>
+        </xs:complexType>
+    </xs:element>
+    <xs:element name="allow-pull" type="xs:boolean"/> 
+    <xs:element name="allow-push" type="xs:boolean"/> 
+    <xs:element name="allow-store" type="xs:boolean"/>
+    <xs:complexType name="methodsList">
+        <xs:sequence>
+            <xs:element name="method" minOccurs="1" maxOccurs="unbounded">
+				<xs:complexType>
+                <xs:simpleContent>
+                    <xs:extension base="xs:string">
+                        <xs:attribute name="priority" type="qvalue"/>
+                    </xs:extension>
+                </xs:simpleContent>
+				</xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+    <xs:simpleType name="qvalue">
+       <xs:restriction base="xs:decimal">
+         <xs:pattern value="0(.[0-9]{0,3})?"/>
+         <xs:pattern value="1(.0{0,3})?"/>
+       </xs:restriction>
+     </xs:simpleType>
+
+<!-- OMA specific "transformations" child elements -->
+<!-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+
+<!-- ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+<!-- OMA specific XDM version 2.1 extensions to the XDM Capabilities Document -->
+    <xs:element name="xdm-caps" type="xdmCapsType"/>
+
+    <xs:complexType name="xdmCapsType">
+        <xs:sequence>
+            <xs:element name="au" type="auType" minOccurs="0" maxOccurs="unbounded"/>
+            <xs:element name="subscribe" type="subscribeType" minOccurs="0"/>
+            <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="auType">
+        <xs:sequence>
+            <xs:element name="requests" type="requestsType" minOccurs="0"/>         
+            <xs:element name="docs" type="docsType" minOccurs="0"/>
+            <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+        <xs:attribute name="auid" type="xs:token" use="required"/>
+        <xs:anyAttribute processContents="lax"/>
+    </xs:complexType>
+
+    <xs:complexType name="requestsType">
+        <xs:sequence>
+            <xs:element name="diff-read" type="extType" minOccurs="0"/>
+            <xs:element name="diff-write" type="extType" minOccurs="0"/> 
+            <xs:element name="reference" type="extType" minOccurs="0"/> 
+            <xs:element name="forward" type="extType" minOccurs="0"/>
+            <xs:element name="restore" type="extType" minOccurs="0"/> 
+            <xs:element name="search" type="extType" minOccurs="0"/> 
+            <xs:element name="subscribe" type="extType" minOccurs="0"/> 
+            <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="docsType">
+        <xs:sequence>
+            <xs:element name="apd" type="extType" minOccurs="0"/>
+            <xs:element name="mod-hist" type="extType" minOccurs="0"/> 
+            <xs:element name="prefs" type="extType" minOccurs="0"/> 
+            <xs:element name="request-hist" type="extType" minOccurs="0"/>
+            <xs:element name="restore" type="extType" minOccurs="0"/> 
+            <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="subscribeType">
+        <xs:sequence>
+            <xs:element name="sip" type="extType" minOccurs="0"/> 
+            <xs:element name="xdcp" type="extType" minOccurs="0"/>     
+            <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="extType">
+        <xs:sequence minOccurs="0" maxOccurs="unbounded">
+            <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence> 
+        <xs:anyAttribute processContents="lax"/>
+    </xs:complexType>
+<!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+
+<!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+<!-- OMA specific XDM version 2.1 extensions to "XDM Directory Document -->
+    <xs:attribute name="reference" type="xs:anyURI"/>
+    <xs:attribute name="reference-display-name" type="xs:string"/>
+<!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+
+<!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+<!-- OMA specific XDM version 2.1 extensions to "Extended Group Advertisement Document -->
+    <xs:element name="group-doc-uri" type="xs:anyURI"/>
+<!-- +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+
+<!-- OMA specific XDM version 2.1 extensions to the <mediaListType> and the <allMediaExceptType> element
+defined in the namespace "urn:oma:xml:xdm:extensions"-->
+    <xs:element name="standalone-message" type="ext:extensionType"/>
+
+</xs:schema>

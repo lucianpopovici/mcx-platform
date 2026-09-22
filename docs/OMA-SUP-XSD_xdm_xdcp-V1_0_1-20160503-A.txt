@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+XDM - XDCP Document
+	version - 1.0.1
+	date    - 03 May 2016
+
+FILE INFORMATION
+
+    OMA Permanent Document
+	   File: OMA-SUP-XSD_xdm_xdcp-V1_0_1-20160503-A
+	   Type: Text - Schema description
+
+    Public Reachable Information
+	   Path: http://www.openmobilealliance.org/tech/profiles
+	   Name: xdm_xdcp-v1_0.xsd
+
+NORMATIVE INFORMATION
+
+    Information about this file can be found in the latest revision of the specification
+	
+	   OMA-TS-XDM_Core-V2_2
+	
+    available at http://www.openmobilealliance.org/
+
+    Send comments to technical-comments@mail.openmobilealliance.org
+	
+CHANGE HISTORY
+
+03052016 Status changed to Approved by TP, TP Ref # OMA-TP-2016-0052R01-INP_XDM_V2_2_ERP_for_final_Approval
+	
+LEGAL DISCLAIMER
+
+  Copyright 2016 Open Mobile Alliance Ltd.  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  1. Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived
+  from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  The above license is used as a license under copyright only.  Please
+  reference the OMA IPR Policy for patent licensing terms:
+  http://www.openmobilealliance.org/ipr.html
+-->
+
+<xs:schema targetNamespace="urn:oma:xml:xdm:xdcp"
+	xmlns="urn:oma:xml:xdm:xdcp"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:xml="http://www.w3.org/XML/1998/namespace"
+	xmlns:rls="urn:ietf:params:xml:ns:resource-lists"
+	xmlns:filter="urn:ietf:params:xml:ns:simple-filter"
+	elementFormDefault="qualified" attributeFormDefault="unqualified">
+    
+	<!-- This import brings in the XML language attribute xml:lang -->
+	<xs:import namespace="http://www.w3.org/XML/1998/namespace"
+		schemaLocation="http://www.w3.org/2001/xml.xsd"/>
+        
+	<!-- This import brings in the ietf defined "resource-lists" XML Schema-->
+	<xs:import namespace="urn:ietf:params:xml:ns:resource-lists"
+        schemaLocation="resource-lists.xsd"/>
+    
+
+	<!-- This import brings in the ietf defined "simple-filter" XML schema -->
+	<xs:import  namespace="urn:ietf:params:xml:ns:simple-filter"
+        schemaLocation="simple-filter.xsd"/>
+
+
+	<!-- The root "xdcp-document" element -->
+
+	
+	<xs:element name="xdcp-document">
+		<xs:complexType>
+			<xs:choice>
+				<xs:element name="request" type="requestType" />
+				<xs:element name="response" type="responseType" />
+			</xs:choice>
+		</xs:complexType>
+	</xs:element>
+
+	<xs:complexType name="requestType">
+		<xs:sequence>
+			<xs:choice>
+				<xs:element name="diff-read" type="diffReadType" />
+				<xs:element name="diff-write" type="diffWriteType" />
+				<xs:element name="forward" type="forwardType" />
+				<xs:element name="forward-accept"
+					type="forwardAcceptType" />
+				<xs:element name="forward-delivery-report"
+					type="forwardDeliveryReportType" />
+				<xs:element name="forward-reject"
+					type="forwardRejectType" />
+				<xs:element name="forward-remote"
+					type="forwardRemoteType" />
+				<xs:element name="remove-doc-ref"
+					type="removeDocRefType" />
+				<xs:element name="restore" type="restoreType" />
+				<xs:element name="retrieve-doc-ref"
+					type="retrieveDocRefType" />
+				<xs:element name="set-doc-ref" type="docRefType" />
+				<xs:element name="subscribe" type="subscribeType" />
+				<xs:any namespace="##other" processContents="lax" />
+			</xs:choice>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="diffReadType">
+		<xs:sequence>
+			<xs:element name="etag" type="xs:string" minOccurs="0"
+				maxOccurs="1" />
+			<xs:element ref="filter:filter-set" minOccurs="0"
+				maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="diffWriteType">
+		<xs:sequence>
+			<xs:element ref="filter:filter-set" minOccurs="0"
+				maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+	<xs:complexType name="docRefType">
+		<xs:sequence>
+			<xs:element name="reference" type="xs:anyURI" />
+			<xs:element name="display-name" type="xs:string"
+				minOccurs="0" maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="removeDocRefType"></xs:complexType>
+
+	<xs:complexType name="restoreType">
+		<xs:sequence>
+			<xs:element name="back-to-etag" type="xs:string" />
+			<xs:element name="current-etag" type="xs:string"
+				minOccurs="0" maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="retrieveDocRefType"></xs:complexType>
+
+	<xs:complexType name="forwardType">
+		<xs:sequence>
+			<xs:element name="recipients-list" type="rls:listType" />
+			<xs:element name="note" type="xs:string" minOccurs="0"
+				maxOccurs="1" />
+			<xs:element name="expiration-time" type="xs:duration"
+				minOccurs="0" maxOccurs="1" />
+			<xs:element ref="filter:filter-set" minOccurs="0"
+				maxOccurs="1" />
+			<xs:element name="display-name" type="xs:string"
+				minOccurs="0" maxOccurs="1" />
+			<xs:element name="delivery-report" type="xs:boolean"
+				minOccurs="0" maxOccurs="1" />
+			<xs:element name="request-id" type="xs:string" minOccurs="0"
+				maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="forwardRemoteType">
+		<xs:sequence>
+			<xs:element name="document-uri" type="xs:anyURI" />
+			<xs:element name="note" type="xs:string" minOccurs="0"
+				maxOccurs="1" />
+			<xs:element name="size" type="xs:integer" minOccurs="0"
+				maxOccurs="1" />
+			<xs:element name="sender-identity" type="xs:anyURI" />
+			<xs:element name="display-name" type="xs:string"
+				minOccurs="0" maxOccurs="1" />
+			<xs:element name="expiration-time" type="xs:duration"
+				minOccurs="0" maxOccurs="1" />
+			<xs:element name="content-type" type="xs:string" />
+			<xs:element name="recipients-list" type="rls:listType" />
+			<xs:element name="delivery-report" type="xs:boolean"
+				minOccurs="0" maxOccurs="1" />
+			<xs:element name="request-id" type="xs:string" minOccurs="0"
+				maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="forwardAcceptType">
+		<xs:sequence>
+			<xs:element name="document-uri" type="xs:anyURI" />
+			<xs:choice minOccurs="0" maxOccurs="1">
+				<xs:element name="do-not-store" type="emptyType" />
+				<xs:element name="store">
+					<xs:complexType>
+						<xs:attribute name="udds" type="xs:anyURI" />
+					</xs:complexType>
+				</xs:element>
+				<xs:any namespace="##other" processContents="lax"
+					minOccurs="0" maxOccurs="unbounded" />
+			</xs:choice>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="forwardDeliveryReportType">
+		<xs:sequence>
+			<xs:element name="request-id" type="xs:string" />
+			<xs:element name="recipient-uri" type="xs:anyURI" />
+			<xs:element name="status">
+				<xs:simpleType>
+					<xs:restriction base="xs:string">
+						<xs:enumeration value="delivered" />
+						<xs:enumeration value="rejected" />
+						<xs:enumeration value="expired" />
+						<xs:enumeration value="value"></xs:enumeration>
+					</xs:restriction>
+				</xs:simpleType>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="forwardRejectType">
+		<xs:sequence>
+			<xs:element name="document-uri" type="xs:anyURI" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="subscribeType">
+		<xs:sequence>
+			<xs:element name="subscription">
+				<xs:complexType>
+					<xs:sequence>
+						<xs:element name="target-documents"
+							type="targetDocumentsType" />
+						<xs:element name="duration" type="xs:integer" />
+						<xs:any namespace="##other"
+							processContents="lax" minOccurs="0" maxOccurs="unbounded" />
+					</xs:sequence>
+				</xs:complexType>
+			</xs:element>
+			<xs:element name="notification">
+				<xs:complexType>
+					<xs:choice>
+						<xs:element name="push">
+							<xs:complexType>
+								<xs:sequence>
+									<xs:element name="push-address"
+										type="xs:string" />
+									<xs:element
+										name="wap-application-id" type="xs:string" />
+									<xs:element
+										name="user-interaction-level" type="xs:string" />
+									<xs:element
+										name="preferred-notification-type" type="xs:string" />
+									<xs:element name="gzip"
+										type="emptyType" minOccurs="0" maxOccurs="1" />
+									<xs:any namespace="##other"
+										processContents="lax" minOccurs="0" maxOccurs="unbounded" />
+								</xs:sequence>
+							</xs:complexType>
+						</xs:element>
+						<xs:any namespace="##other"
+							processContents="lax" />
+					</xs:choice>
+				</xs:complexType>
+			</xs:element>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="targetDocumentsType">
+		<xs:sequence minOccurs="1" maxOccurs="unbounded">
+			<xs:choice>
+				<xs:element name="resource-uri" type="listUriType" />
+				<xs:element name="resource-list"
+					type="resourceListType" />
+				<xs:element name="list-uri" type="listUriType" />
+			</xs:choice>
+
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="listUriType">
+		<xs:sequence>
+			<xs:element name="uri" type="xs:anyURI" minOccurs="1"
+				maxOccurs="unbounded" />
+			<xs:element ref="filter:filter-set" minOccurs="0"
+				maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="resourceListType">
+		<xs:sequence>
+			<xs:element name="list" type="rls:listType" minOccurs="1"
+				maxOccurs="unbounded" />
+			<xs:element ref="filter:filter-set" minOccurs="0"
+				maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="responseType">
+		<xs:sequence>
+			<xs:choice>
+				<!-- Successful responses -->
+				<xs:element name="done" type="emptyType" />
+				<xs:element name="done-new-etag" type="emptyType" />
+				<xs:element name="forward-result"
+					type="forwardResultType" />
+				<xs:element name="new-etag-value" type="xs:string" />
+				<xs:element name="remote-forward-result"
+					type="forwardResultType" />
+				<xs:element name="retrieve-doc-ref-result"
+					type="docRefType" />
+
+				<!-- Failure responses -->
+				<xs:element name="application-usage-defined-conflict"
+					type="applicationUsageDefinedConflictType" />
+				<xs:element name="constraint-failure" type="emptyType" />
+				<xs:element name="doc-ref-active" type="emptyType" />
+				<xs:element name="etag-missing" type="emptyType" />
+				<xs:element name="filter-set-not-allowed"
+					type="emptyType" />
+				<xs:element name="invalid-recipient" type="emptyType" />
+				<xs:element name="invalid-request" type="emptyType" />
+				<xs:element name="no-diff-document" type="emptyType" />
+				<xs:element name="not-found" type="emptyType" />
+				<xs:element name="not-latest-etag-value"
+					type="emptyType" />
+				<xs:element name="not-supported-request"
+					type="emptyType" />
+				<xs:element name="restore-version-not-found"
+					type="emptyType" />
+				<xs:element name="unknown-etag-value" type="emptyType" />
+				<xs:element name="diff-write-conflict"
+					type="diffWriteConflictType" />
+				<xs:element name="xcdp-document-structure-not-ok"
+					type="emptyType" />
+				<xs:element name="other-conflict"
+					type="otherConflictType" />
+				<xs:any namespace="##other" processContents="lax" />
+			</xs:choice>
+			<xs:element name="display-text" type="xs:string"
+				minOccurs="0" maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="applicationUsageDefinedConflictType">
+		<xs:sequence>
+			<xs:any namespace="##other" processContents="lax"
+				minOccurs="0" maxOccurs="unbounded" />
+		</xs:sequence>
+		<xs:attribute name="phrase" type="xs:string" />
+	</xs:complexType>
+
+
+	<xs:complexType name="diffWriteConflictType">
+		<xs:choice>
+			<xs:any namespace="##other" processContents="lax" />
+			<!-- The element <patch-ops-error> from the namespace "urn:ietf:params:xml:ns:patch-ops-error",
+				<xcap-error> element from the namespace"urn:ietf:params:xml:ns:xcap-error" or
+				any other element from another namespace may be inserted here -->
+		</xs:choice>
+	</xs:complexType>
+
+	<xs:complexType name="emptyType"></xs:complexType>
+
+
+	<xs:complexType name="forwardResultType">
+		<xs:sequence>
+			<xs:element name="not-found-recipients-list"
+				type="rls:listType" minOccurs="0" maxOccurs="1" />
+			<xs:element name="not-authorized-recipients-list"
+				type="rls:listType" minOccurs="0" maxOccurs="1" />
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="otherConflictType">
+		<xs:sequence>
+			<xs:any namespace="##other" processContents="lax"
+				minOccurs="0" maxOccurs="unbounded" />
+		</xs:sequence>
+	</xs:complexType>
+</xs:schema>

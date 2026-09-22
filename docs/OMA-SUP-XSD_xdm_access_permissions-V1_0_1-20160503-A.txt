@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- 
+XDM - Access Permissions
+	version - 1.0.1
+	date    - 03 May 2016
+
+FILE INFORMATION
+
+	OMA Permanent Document
+	   File: OMA-SUP-XSD_xdm_access_permissions-V1_0_1-20160503-A
+	   Type: Text - Schema Description
+
+	Public Reachable Information
+	   Path: http://www.openmobilealliance.org/tech/profiles
+	   Name: xdm_access_permissions-v1_0.xsd
+
+NORMATIVE INFORMATION
+
+	Information about this file can be found in the specification
+	    
+	   OMA-TS-XDM_Core-V2_2
+		
+	available at http://www.openmobilealliance.org/
+
+	Send comments to technical-comments@mail.openmobilealliance.org
+	
+CHANGE HISTORY
+
+03052016 Status changed to Approved by TP, TP Ref # OMA-TP-2016-0052R01-INP_XDM_V2_2_ERP_for_final_Approval
+
+LEGAL DISCLAIMER
+
+  Copyright 2016 Open Mobile Alliance Ltd.  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions
+  are met:
+
+  1. Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived
+  from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+  COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  The above license is used as a license under copyright only.  Please
+  reference the OMA IPR Policy for patent licensing terms:
+  http://www.openmobilealliance.org/ipr.html
+-->
+<xs:schema xmlns="urn:oma:xml:xdm:ap"
+	targetNamespace="urn:oma:xml:xdm:ap"
+	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+	xmlns:cp="urn:ietf:params:xml:ns:common-policy"
+	elementFormDefault="qualified">
+
+<!-- Import elements from common policy RFC 4745 -->
+	<xs:import namespace="urn:ietf:params:xml:ns:common-policy" schemaLocation="http://www.iana.org/assignments/xml-registry/schema/common-policy.xsd"/>
+
+<!-- The top level element -->
+	<xs:element name="ap-rules" type="apRulesType"/>
+
+	<xs:complexType name="apRulesType">
+		<xs:sequence minOccurs="0" maxOccurs="unbounded">
+			<xs:choice>
+				<xs:element name="access-permissions-document-rule" type="rulesSetType"/>
+				<xs:element name="directory-rule" type="rulesSetType"/>
+				<xs:element name="document-rule">
+					<xs:complexType>
+						<xs:complexContent>
+							<xs:extension base="rulesSetType">
+								<xs:attribute name="path" type="xs:anyURI" use="required"/>
+							</xs:extension>
+						</xs:complexContent>
+					</xs:complexType>
+				</xs:element>
+			</xs:choice>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="rulesSetType">
+		<xs:sequence>
+			<xs:element ref="cp:ruleset"/>
+		</xs:sequence>
+	</xs:complexType>
+
+	<xs:complexType name="emptyType"/>
+
+<!-- common policy "actions" child elements described in OMA-TS-XDM_Core-V2_1
+used in an Access Permissions Document in a "rule" element in a "rule-set" element -->
+
+	<xs:element name="allow-any-operation" type="emptyType"/>
+
+	<xs:element name="allow-any-operation-own-data" type="emptyType"/>
+
+    <xs:element name="allow-create" type="emptyType"/>
+    
+	<xs:element name="allow-delete" type="emptyType"/>
+
+	<xs:element name="allow-forwarding" type="allowForwardingType"/>
+
+	<xs:element name="allow-modify" type="emptyType"/>
+
+
+	<xs:element name="allow-restore" type="emptyType"/>
+
+	<xs:element name="allow-retrieve" type="emptyType"/>
+
+	<xs:element name="allow-retrieve-own-data" type="emptyType"/>
+
+	<xs:complexType name="allowForwardingType">
+		<xs:sequence>
+		<xs:element name="recipients-list" minOccurs="0">
+			<xs:complexType>                
+				<xs:choice>
+					<xs:element name="black-list" type="listType"/>
+					<xs:element name="white-list" type="listType"/>
+					<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+				</xs:choice>
+			</xs:complexType>
+		</xs:element>
+		</xs:sequence>	
+	</xs:complexType>
+    
+	<xs:complexType name="listType">
+		<xs:sequence minOccurs="0" maxOccurs="unbounded">
+			<xs:choice>
+				<xs:element name="one" type="cp:oneType"/>                
+				<xs:any namespace="##other" processContents="lax"/>
+                <!-- The <external-list> element from the urn:oma:xml:xdm:common-policy namespace is a valid choice due to the xs:any declaration --> 
+			</xs:choice>
+		</xs:sequence>
+	</xs:complexType>
+
+</xs:schema>
