@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.2
+**Version:** 1.4
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -998,6 +998,69 @@ through the same loader and resolver and validates a document against it that
 must fail, so a validator that returned True unconditionally would have been
 caught.
 
+### 4.28 CA-08 — the document validates, and the chain is now complete
+
+**Source:** RFC 4826's `resource-lists.xsd`, added to `docs/OMA/`, plus the
+OMA schemas already there.
+
+**The transcription was checked, not taken on trust.** The schema was
+hand-transcribed from RFC 4826, so it was cross-read against the RFC itself:
+the target namespace, all five complexTypes (`listType`, `entryType`,
+`entry-refType`, `externalType`, `display-nameType`), the `resource-lists`
+top-level element, `elementFormDefault="qualified"`, the `display-nameType`
+simpleContent extension carrying `xml:lang`, and the `xs:import` line
+verbatim. Every one matches. Transcription is a transformation, and this
+document's rule is that transformations get checked.
+
+**The observation in that commit is worth keeping.** The `schemaLocation` the
+OMA schema names does not serve the schema: IANA serves an HTML registry page
+at that URL shape. A file pulled from it would have looked present, made the
+skip disappear, and validated against nothing — the same failure shape as a
+constant that is wrong but never meets a conformant peer.
+
+**The chain needs one more file.** RFC 4826 itself imports the XML namespace:
+
+```
+<xs:import namespace="http://www.w3.org/XML/1998/namespace"
+ schemaLocation="http://www.w3.org/2001/xml.xsd"/>
+```
+
+and types `<display-name>` with `<xs:attribute ref="xml:lang"/>`. libxml2 2.14
+does not treat the XML namespace as predefined for schema validation, so that
+attribute declaration must come from a file:
+
+```
+poc_listService  ->  resource-lists  ->  xml.xsd
+```
+
+**The validation was run anyway, and it passes.** Using a W3C `xml.xsd`
+obtained out of tree, the schema set builds and the rendered group document is
+**schema-valid**. The validation is also not vacuous — the same schema set
+rejects:
+
+| Document | Result |
+|---|---|
+| as rendered | **valid** |
+| `supported-services` before `display-name` | rejected |
+| `list` before `display-name` | rejected |
+| `@uri` removed | rejected |
+
+The middle two matter: **the schema independently confirms the ordering
+constraint** that 4.27 derived by reading the content model, and that
+`check_rendered` now enforces. Those assertions are in the test, so it cannot
+pass by accepting everything.
+
+**Status: closed.** `docs/OMA/xml.xsd` is now in the repository — fetched
+from `http://www.w3.org/2001/xml.xsd` itself rather than trusted from
+whatever happened to be installed locally, checked well-formed and buildable
+standalone before being trusted, same as `resource-lists.xsd` in 4.27. A
+repository has to carry its own schemas; validating against a copy that
+happens to be present in one environment is the reproducibility version of
+the same mistake this document keeps finding. `tests/test_group_schema.py`
+now runs the full chain — `poc_listService -> resource-lists -> xml.xsd` —
+instead of skipping, and passes, including the three negative assertions
+above. `VP1-DOC-001`'s "schema-valid" clause is closed.
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -1089,6 +1152,7 @@ somewhere downstream and costs a day of test time to trace back.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4 | 2026-09-22 | CA-08 closure verified against a second concern: `resource-lists.xsd` was cross-read against RFC 4826 line by line (transcription is a transformation, and transformations get checked), and its own `xml.xsd` import turned the build red rather than skipping, since libxml2 does not treat the XML namespace as predefined. `docs/OMA/xml.xsd` added (fetched from `http://www.w3.org/2001/xml.xsd`, checked well-formed and buildable standalone). `test_the_group_document_is_schema_valid` runs and passes, including three new negative assertions -- two bad orderings and a missing `@uri` -- all rejected, so the pass is not vacuous. |
 | 1.3 | 2026-09-22 | CA-08 closed. `resource-lists.xsd` added to `docs/OMA/`, transcribed from RFC 4826 §3.2 read at rfc-editor.org — not from the schema's own `schemaLocation` URL, which serves IANA's namespace-registry placeholder page (HTML, not a schema) rather than the file. `test_the_group_document_is_schema_valid` now runs instead of skipping and passes. Closes `VP1-DOC-001`'s "schema-valid" clause and SVC-OP-01. |
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |

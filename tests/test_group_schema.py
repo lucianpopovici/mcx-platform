@@ -44,6 +44,9 @@ lxml_etree = pytest.importorskip("lxml.etree")
 
 DOCS = ROOT / "docs" / "OMA"
 
+LIST_SERVICE_NS = "urn:oma:xml:poc:list-service"
+XDM_EXTENSIONS_NS = "urn:oma:xml:xdm:extensions"
+
 # Remote schemaLocation -> the local file that satisfies it. The OMA schemas
 # are published as .txt; the content is XSD.
 LOCAL_SCHEMAS = {
@@ -55,18 +58,36 @@ LOCAL_SCHEMAS = {
         "OMA-SUP-XSD_xdm_rsrclst_uriusage-V1_0_2-20160503-A.txt",
 }
 
-# The one file that is not here. RFC 4826 appendix A publishes it; IANA serves
-# it at the schemaLocation the OMA schema names.
+# RFC 4826's schema, now in docs/OMA/.
 RESOURCE_LISTS = "resource-lists.xsd"
+
+# ...which imports the XML namespace for `xml:lang`:
+#
+#   <xs:import namespace="http://www.w3.org/XML/1998/namespace"
+#    schemaLocation="http://www.w3.org/2001/xml.xsd"/>
+#
+# and types <display-name> as a simpleContent extension carrying
+# `<xs:attribute ref="xml:lang"/>`. libxml2 2.14 does not treat the XML
+# namespace as predefined for schema validation, so that attribute
+# declaration has to come from a file. It is the last link in the chain.
+XML_NAMESPACE_SCHEMA = "xml.xsd"
+
+# Every file the schema set needs, in the order the imports chain through
+# them. Listed separately so a skip names WHICH one is absent rather than
+# saying "schema unavailable".
+REQUIRED = (
+    LOCAL_SCHEMAS["urn:oma:xml:poc:list-service"],
+    RESOURCE_LISTS,
+    XML_NAMESPACE_SCHEMA,
+)
 
 
 def _schema_path(name: str) -> Path:
     return DOCS / name
 
 
-def _have_resource_lists() -> bool:
-    return any((DOCS / n).is_file()
-               for n in (RESOURCE_LISTS, "OMA-SUP-XSD_resource_lists.txt"))
+def _missing() -> tuple:
+    return tuple(n for n in REQUIRED if not (DOCS / n).is_file())
 
 
 class _LocalResolver(lxml_etree.Resolver):
@@ -81,6 +102,7 @@ class _LocalResolver(lxml_etree.Resolver):
         self._by_tail = {
             "poc_listService-v1_0.xsd": LOCAL_SCHEMAS["urn:oma:xml:poc:list-service"],
             "resource-lists.xsd": RESOURCE_LISTS,
+            "xml.xsd": XML_NAMESPACE_SCHEMA,
             **extra,
         }
 
@@ -113,12 +135,11 @@ def test_the_schema_harness_itself_works():
     assert not schema.validate(wrong), "the validator accepts anything"
 
 
-@pytest.mark.skipif(not _have_resource_lists(),
-                    reason=f"docs/OMA/{RESOURCE_LISTS} (RFC 4826) is not in the "
-                           f"repository; OMA-SUP-XSD_poc_listService imports "
-                           f"urn:ietf:params:xml:ns:resource-lists and types "
-                           f"display-name and entry from it, so the schema "
-                           f"set cannot be built without it")
+@pytest.mark.skipif(bool(_missing()),
+                    reason=f"absent from docs/OMA/: {', '.join(_missing())} — "
+                           f"the schema set chains poc_listService -> "
+                           f"resource-lists -> xml.xsd and cannot be built "
+                           f"until every link is present")
 def test_the_group_document_is_schema_valid():
     """VP1-DOC-001's "schema-valid" clause, done properly."""
     from service.groups import Group, render
@@ -130,6 +151,36 @@ def test_the_group_document_is_schema_valid():
                   ("sip:u1@mcptt.example", "sip:u2@mcptt.example"))
     doc = lxml_etree.fromstring(render(group))
     assert schema.validate(doc), schema.error_log
+
+    # ...and the schema must REJECT a document that breaks the content model,
+    # or "valid" above would mean nothing. Each of these was confirmed against
+    # the real schema set: reordering fails, and so does dropping @uri.
+    ls, oxe = "{%s}" % LIST_SERVICE_NS, "{%s}" % XDM_EXTENSIONS_NS
+
+    def build(order, uri=True):
+        root = lxml_etree.Element(ls + "group")
+        service = lxml_etree.SubElement(root, ls + "list-service")
+        if uri:
+            service.set("uri", group.id)
+        for kind in order:
+            if kind == "display-name":
+                lxml_etree.SubElement(service, ls + "display-name").text = "A"
+            elif kind == "list":
+                lst = lxml_etree.SubElement(service, ls + "list")
+                lxml_etree.SubElement(lst, ls + "entry").set("uri", "sip:u@x")
+            else:
+                lxml_etree.SubElement(service, oxe + "supported-services")
+        return root
+
+    good = ["display-name", "list", "supported-services"]
+    assert schema.validate(build(good)), schema.error_log
+    assert not schema.validate(build(["supported-services", "display-name",
+                                      "list"])), \
+        "the xs:sequence puts the ##other wildcard last; this must not pass"
+    assert not schema.validate(build(["list", "display-name",
+                                      "supported-services"]))
+    assert not schema.validate(build(good, uri=False)), \
+        "@uri is use=required"
 
 
 def test_the_content_model_order_is_what_the_schema_requires():
