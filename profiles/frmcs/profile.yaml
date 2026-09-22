@@ -197,21 +197,19 @@ bearer:
         paths:
           - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
           - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
-    # ETCS is "ATP Regular Data" in the FRMCS SRS Annex A note (11): ETCS
-    # on-board to ETCS trackside. This asked for 5QI 67, which TS 23.501
-    # table 5.7.4-1 defines as Mission Critical VIDEO, and which clause
-    # 14.6.2.1 of the FRMCS SRS does not permit at all -- the mandatory set
-    # is 5, 8, 65 and 69, with 70 optional (PLT-CONF-AUDIT CA-15).
+    # ETCS is "ATP Regular Data" in FRMCS SRS Annex A note (11): ETCS on-board
+    # to ETCS trackside. Annex A assigns it 5QI 4, GBR (PLT-CONF-AUDIT CA-16).
     #
-    # 69 is "Mission Critical delay sensitive signalling", the highest
-    # priority level of the mission-critical 5QIs, and is in the mandatory
-    # set. CA-16: the SRS Annex A table that assigns a 5QI per communication
-    # session could not be extracted from the PDF, so this is the best value
-    # derivable from the clauses that do read cleanly, not a transcription of
-    # the table. Confirm it against Annex A before any safety-case use.
+    # TS 23.501 calls 5QI 4 "Non-Conversational Video (Buffered Streaming)",
+    # which reads oddly for train control until you look at what was actually
+    # being selected: 4 is GBR with priority level 50, and Annex A.3 derives
+    # the ETCS requirement from Subset-093's 2.6 s transaction transfer delay.
+    # The Example Services column of table 5.7.4-1 describes a traffic class
+    # for the general-purpose 5QIs; it only names a service for the
+    # mission-critical ones. A guaranteed bit rate was the requirement.
     - match: {call_type: etcs-ipcon, media: data}
       decision:
-        qos_identifier: 69
+        qos_identifier: 4
         arp_level: 2
         arp_preemption_capability: true
         arp_preemption_vulnerability: false
@@ -229,13 +227,18 @@ bearer:
         paths:
           - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
           - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
+    # Annex A assigns 5QI 8 to General Data (9), Urgent Data (8), TCMS (10),
+    # ATP Compl. Data (12) and ATO (13) alike -- every data session that is
+    # not ATP Regular Data. This was 70 (Mission Critical Data), which clause
+    # 14.6.2.2 makes optional and which Annex A does not assign to anything.
+    #
     # FRMCS SRS clause 14.6.5.3: "The FRMCS system shall apply the ARP values
-    # 1 to 8" (M), with Note 1 recording that 9-15 are a national matter. This
-    # was 9, which is legal in TS 23.501 (the range is 1-15) but outside what
-    # an FRMCS deployment may portably assume.
+    # 1 to 8" (M), with Note 1 recording that 9-15 are a national matter. The
+    # ARP was 9, legal in TS 23.501 (the range is 1-15) but outside what an
+    # FRMCS deployment may portably assume.
     - match: {call_type: "*", media: data}
       decision:
-        qos_identifier: 70
+        qos_identifier: 8
         arp_level: 8
         arp_preemption_capability: false
         arp_preemption_vulnerability: true

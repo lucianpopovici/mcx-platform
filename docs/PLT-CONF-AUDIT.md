@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -858,25 +858,59 @@ recording because it is the third time they have earned their keep:
   policy, not protocol, and nothing in `core/` consumed it. The 1-8 bound now
   lives in the railway profile's own suite.
 
-### 4.24 CA-16 — the FRMCS Annex A table does not survive extraction
+### 4.24 CA-16 — Annex A read, and the derived value was wrong
 
-FRMCS SRS clause 14.6.6.1 says the QoS parameter values for each communication
-session "are listed in Annex A (M-V3)". That table is the authoritative
-per-session assignment, and **it does not extract from the PDF**: the columns
-arrive as isolated cells with no row structure, which is the failure mode §2
-is about.
+**Source:** UIC FRMCS SRS (AT-7800) v2.1.0 Annex A, read from the document by
+a human after the extraction failed.
 
-What does extract cleanly is the surrounding prose — the clause requirements
-above, and the table's own notes, which carry real content (note 11: "ATP
-Regular Data" refers to ETCS on-board to ETCS trackside; note 7 gives per
-application ARP values for voice).
+FRMCS SRS clause 14.6.6.1 (M-V3) says the QoS parameter values that shall be
+applied "are listed in Annex A". That table is the authoritative per-session
+assignment and **it does not extract from the PDF**: the columns arrive as
+isolated cells with no row structure, which is the failure mode §2 is about.
+What does extract cleanly is the surrounding prose and the table's own notes.
 
-So 5QI 69 for the ETCS bearer is **the best value derivable from the clauses
-that read cleanly, not a transcription of Annex A**: 67 is definitively
-excluded, and 69 is the only mandatory-set value whose definition — "Mission
-Critical delay sensitive signalling" — matches train control. It is marked as
-such in the profile. **Confirm it against Annex A before any safety-case use**,
-which is what `CLAUDE.md` already says about this profile as a whole.
+v1.0 therefore derived 5QI 69 for the ETCS bearer from the clauses that read
+cleanly, marked it as derived rather than transcribed, and said to confirm it
+against Annex A.
+
+**The derivation was wrong.** Annex A assigns:
+
+| Communication session | 5QI |
+|---|---|
+| FRMCS Signalling (4) | 5 / 69 |
+| Pre-defined Default (5) | 8 |
+| Emergency Voice (6) | 65 (GBR) |
+| Voice (7) | 65 (GBR) |
+| Urgent Data (8) | 8 |
+| General Data (9) | 8 |
+| TCMS (10) | 8 |
+| **ATP Regular Data (11)** | **4 (GBR)** |
+| ATP Compl. Data (12) | 8 |
+| ATO (13) | 8 |
+
+ETCS is ATP Regular Data (note 11), so **5QI 4**, not 69. And the profile's
+general data bearer should be **5QI 8**, not the 70 it carried — Annex A
+assigns 70 to nothing at all.
+
+**Why the derivation failed is worth more than the correction.** The reasoning
+was: 67 is excluded, ETCS is delay-sensitive, 69 is "Mission Critical delay
+sensitive signalling" and is in the mandatory set, therefore 69. Every step
+was true and the conclusion was still wrong, because the actual selection
+criterion was not the service label at all. 5QI 4 is GBR with priority level
+50, and Annex A.3 derives the ETCS requirement from Subset-093's 2.6 s
+transaction transfer delay. **A guaranteed bit rate was the requirement**; the
+"Non-Conversational Video (Buffered Streaming)" label in TS 23.501 describes
+the traffic class that happens to carry those characteristics.
+
+This is the strongest argument in this document for reading the table rather
+than reasoning toward it. A derivation from correct premises, clearly labelled
+as a derivation, still put the wrong 5QI on the safety-relevant bearer.
+
+It also vindicates one earlier design decision: `core/qos.py` cross-checks
+media only for the five **mission-critical** 5QIs, whose Example Services
+column names a service definitionally, and leaves the general-purpose values
+alone because theirs describes a traffic class. Had that check covered every
+5QI, it would now be rejecting the correct value.
 
 ### 4.25 CA-07 — both remaining feature tags confirmed, with a caveat
 
@@ -892,6 +926,22 @@ set to *one of* the SDS, FD or ES values, never a generic MCData one.
 The platform has no way to say which MCData service a call type is, so it
 announces data calls generically. Recorded as **DATA-OP-01**: it is a profile
 schema key and an ICD revision, not an audit correction.
+
+### 4.26 FRMCS-OP-01 — the SRS contradicts itself on 5QI 4
+
+Clause 14.6.2.1 (M) says an FRMCS system "shall support the standardized 5QI
+values 5, 8, 65, 69", and 14.6.2.2 adds 70 as optional. **Annex A assigns 5QI
+4 to ATP Regular Data, and 4 is in neither list.**
+
+The two clauses answer different questions — 14.6.2.1 which values a system
+must support, Annex A which are actually used — but a deployment cannot
+interoperate with a value its own specification does not require it to
+support. Where they disagree this platform follows Annex A, because that is
+what the per-session table is for and clause 14.6.6.1 makes it mandatory.
+
+Pinned by a test, so a future SRS revision that adds 4 to 14.6.2.1 will fail
+it and the open point can be closed. **This is a question for UIC**, and it
+sits on the ETCS bearer, which is the safety-relevant one.
 
 ---
 
@@ -910,7 +960,8 @@ ordered by consequence:
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
 | CA-07 | MCData and MCVideo feature tags | TS 24.281, TS 24.282 | **Closed.** See 4.25. Both confirmed; DATA-OP-01 opened for the MCData service-specific ICSIs. |
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
-| CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Open.** The table does not survive PDF extraction and needs a human read. Affects the railway profile only. |
+| CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Closed** by a human read of the table. See 4.24 — the value this audit derived was wrong. |
+| FRMCS-OP-01 | SRS clause 14.6.2.1 excludes a 5QI Annex A assigns | UIC FRMCS SRS | **Open, for UIC.** See 4.26. |
 | CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
@@ -985,6 +1036,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 1.1 | 2026-09-22 | CA-16 closed by a human read of FRMCS SRS Annex A. The 5QI this audit DERIVED for the ETCS bearer was wrong: Annex A assigns 4 (GBR), not the 69 derived from the prose clauses, and general data is 8 rather than 70. Every step of the derivation was true and the conclusion was still wrong, because the selection criterion was a guaranteed bit rate rather than the service label. New FRMCS-OP-01: clause 14.6.2.1 does not list 5QI 4, which Annex A assigns. |
 | 1.0 | 2026-09-22 | CA-15 closed: `qos_identifier` was never validated, and the railway profile was requesting the Mission Critical Video 5QI for a data bearer and an ARP level outside the FRMCS mandatory range. CA-07 closed against TS 24.281 and TS 24.282. New `core/qos.py` carrying TS 23.501 table 5.7.4-1. New CA-16 (FRMCS Annex A does not extract) and DATA-OP-01 (MCData service-specific ICSIs). Nine of ten constant sets checked have contained defects. |
 | 0.9 | 2026-09-22 | CA-10 closed against RFC 3840 clause 5: `g.3gpp.mcptt` is not a base tag, so the `+` prefix the code already used is correct and TS 24.379's prefix-less Contact examples are editorially wrong. RFC 8101 confirms `mcpttp`/`mcpttq` are the registered namespace names, so the constants deleted in 4.6 held the right values in the wrong place. Both RFCs fetched from the RFC Editor; neither is needed in the repository. |
 | 0.8 | 2026-09-21 | CA-12 closed. TS 24.379 read across all seven published releases (Rel-15 and Rel-16 converted from legacy .doc). The warning code table grows from 44 codes to 95 in contiguous per-release blocks, and code 179 — one of the three the platform emits — does not exist before Rel-17; a deployment at Rel-13 to Rel-16 was emitting it. Every other signalling constant is stable from Rel-13. Release selection now covers both layers, so PLT-REL-009 lands in R1 rather than R2. |
