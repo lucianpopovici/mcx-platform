@@ -972,26 +972,31 @@ walked the tree by name and would have accepted `supported-services` before
 and it is now pinned in both the runtime check and a test, with a mutant to
 prove the check can fail.
 
-**Full XSD validation is written and skips on one missing file.**
-`poc_listService` imports `urn:ietf:params:xml:ns:resource-lists` (RFC 4826)
-and types `display-name` and `entry` from it, with a `schemaLocation` pointing
-at iana.org, which this build environment's egress policy refuses. Without
-`resource-lists.xsd`, libxml2 cannot resolve those two QNames and the schema
-set cannot be built at all. `common-policy` is imported but **never
-referenced** — zero `cp:` QNames in the file — so it is not needed.
+**Full XSD validation was written and skipped on one missing file, now
+closed.** `poc_listService` imports `urn:ietf:params:xml:ns:resource-lists`
+(RFC 4826) and types `display-name` and `entry` from it, with a
+`schemaLocation` pointing at iana.org, which this build environment's egress
+policy refuses. Without `resource-lists.xsd`, libxml2 could not resolve those
+two QNames and the schema set could not be built at all. `common-policy` is
+imported but **never referenced** — zero `cp:` QNames in the file — so it was
+never needed.
 
-`tests/test_group_schema.py` carries the validation, skipping with that exact
-reason. **Writing a stand-in for the IETF schema would make the test pass and
-prove nothing**, which is the failure this document exists to prevent.
+`resource-lists.xsd` is now in `docs/OMA/`, transcribed from RFC 4826 §3.2
+(the RFC's own published schema text, read from rfc-editor.org and copied
+verbatim). One pitfall worth naming: the `schemaLocation` URL itself, at
+iana.org, does not serve the schema — it serves IANA's XML-namespace-registry
+placeholder page, an HTML document with the same `.xsd`-shaped URL, that
+merely points a reader at the RFC. A validator fed that page instead of the
+real schema would fail to build silently or validate against nothing, the
+same failure mode as a wrong constant that meets no conformant peer.
+`tests/test_group_schema.py::test_the_group_document_is_schema_valid` now
+runs instead of skipping and passes.
 
-The harness is not left unproven while the target is skipped:
+The harness was not left unproven while the target was skipped:
 `test_the_schema_harness_itself_works` builds a self-contained OMA schema
 through the same loader and resolver and validates a document against it that
-must fail, so a validator that returned True unconditionally would be caught.
-
-**One file closes this**: `resource-lists.xsd`, published in RFC 4826
-appendix A and served by IANA at the schemaLocation the OMA schema names. Drop
-it in `docs/` and the skip becomes a run.
+must fail, so a validator that returned True unconditionally would have been
+caught.
 
 ---
 
@@ -1012,7 +1017,7 @@ ordered by consequence:
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
 | CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Closed** by a human read of the table. See 4.24 — the value this audit derived was wrong. |
 | FRMCS-OP-01 | SRS clause 14.6.2.1 excludes a 5QI Annex A assigns | UIC FRMCS SRS | **Open, for UIC.** See 4.26. |
-| CA-08 | Group document, OMA-defined parts | OMA XSDs (present) + RFC 4826 `resource-lists.xsd` (absent) | **Written and skipping.** See 4.27. Element order is now enforced; full XSD validation needs one IETF file. |
+| CA-08 | Group document, OMA-defined parts | OMA XSDs + RFC 4826 `resource-lists.xsd` (all present) | **Closed.** See 4.27. Element order is enforced and full XSD validation runs and passes. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
 
@@ -1033,10 +1038,10 @@ correctness.
 
 ## 6. Consequences for the verification plan
 
-- `VP1-DOC-001` moves from **OPEN** to **PARTIAL**. Its "schema-valid" clause
-  is satisfied for everything TS 24.481 specifies, and blocked only on
-  CA-08's OMA document. That is a much smaller gap than "the schema was never
-  obtained".
+- `VP1-DOC-001`'s "schema-valid" clause is now **CLOSED**: the rendered group
+  document validates against the real OMA + RFC 4826 schema set, not just
+  TS 24.481's own elements. VP1-DOC-001 as a whole stays open on SVC-OP-03
+  (group configuration's source), which is unrelated to schema validity.
 - `VP1-SIG-001` gains real evidence. The SIP the platform emits was checked
   against the specification for the first time, and it was wrong in four
   independent ways — Warning codes, Warning shape, Accept-Contact, and
@@ -1084,6 +1089,7 @@ somewhere downstream and costs a day of test time to trace back.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.3 | 2026-09-22 | CA-08 closed. `resource-lists.xsd` added to `docs/OMA/`, transcribed from RFC 4826 §3.2 read at rfc-editor.org — not from the schema's own `schemaLocation` URL, which serves IANA's namespace-registry placeholder page (HTML, not a schema) rather than the file. `test_the_group_document_is_schema_valid` now runs instead of skipping and passes. Closes `VP1-DOC-001`'s "schema-valid" clause and SVC-OP-01. |
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
 | 1.2 | 2026-09-22 | CA-08: the OMA schemas confirm the group document structure a third time and add a constraint no prose reading produced -- `list-service-type` is an `xs:sequence`, so element ORDER matters and nothing was checking it. Enforced in the runtime check and pinned. Full XSD validation is written and skips on one missing file, RFC 4826's `resource-lists.xsd`; the harness is proven separately so the skip is about that file and not untested machinery. |

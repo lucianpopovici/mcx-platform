@@ -161,9 +161,13 @@ reasons are specific, not general:
   which two is VP-OP-01. Nothing has run against a third-party core.
 - **VP1-FC-002** cannot close: the TS 24.380 text was not available, so the RTCP
   encoding and the comparator are both from memory (FC-OP-03).
-- **VP1-DOC-001**'s "schema-valid" clause: PARTIAL. Everything TS 24.481
-  specifies is validated; the OMA-defined remainder needs
-  OMA-TS-XDM_Group-V1_1_1, which is not a 3GPP deliverable (SVC-OP-01).
+- **VP1-DOC-001**'s "schema-valid" clause: CLOSED (SVC-OP-01, 2026-09-22).
+  RFC 4826's `resource-lists.xsd` was the one file the OMA-defined XSD
+  validation was skipping on; it is now in `docs/OMA/` and
+  `tests/test_group_schema.py` validates the rendered group document against
+  the real schema set instead of skipping. VP1-DOC-001 as a whole is still
+  open on SVC-OP-03 (group configuration's source is deployment data, not the
+  profile schema).
 - **VP1-MED-001**: enforcement exists, but the codec set is a placeholder (MED-OP-01).
 - **VP1-CC-001**: roles are named in the audit record but not independently
   deployable (SIP-OP-03).
