@@ -160,9 +160,15 @@ priority:
         preemption_vulnerability: false
         floor_priority: 240
         label: etcs-data
+    # FRS appendix J, table J-1: "The ordering of priorities is according to
+    # the row's." ATO (FRS 11.5) sits BELOW shunting (10.8) in that table, and
+    # the appendix's own worked example is a REC pre-empting an active ATO
+    # communication. This profile had ATO at 80 and shunting at 60 -- inverted,
+    # so under congestion it would have pre-empted a shunting call to make room
+    # for automatic train operation data (PLT-CONF-AUDIT CA-17).
     - match: {call_type: "*", application: ato, urgency: "*"}
       decision:
-        level: 80
+        level: 60
         scope: railway
         preemption_capability: true
         preemption_vulnerability: false
@@ -170,7 +176,7 @@ priority:
         label: ato-data
     - match: {call_type: "*", application: shunting, urgency: "*"}
       decision:
-        level: 60
+        level: 80
         scope: railway
         preemption_capability: false
         preemption_vulnerability: true
@@ -217,6 +223,34 @@ bearer:
         paths:
           - {id: bearer-a, transport: sctp, primary: true, weight: 2, attributes: {multihoming: "true"}}
           - {id: bearer-b, transport: sctp, primary: false, weight: 1, attributes: {multihoming: "true"}}
+    # FRS 10.3/10.4 -- on-train voice to and from the controller. SRS Annex A
+    # note (7) gives the ARP per application directly: "Voice" includes
+    # 10.18-10.19 (ARP=3), 10.3-10.6 (ARP=5), 10.10+10.23 (ARP=6), 10.2
+    # (ARP=8). A driver-to-controller call is 10.3/10.4, so ARP 5 -- it was
+    # falling through to the catch-all at 6, which the note reserves for
+    # ground-to-ground and public address (PLT-CONF-AUDIT CA-17).
+    # Pre-emption capability stays false: this call type resolves to the
+    # `operational` priority decision, which does not authorise it, and the
+    # platform refuses a bearer rule that asks for more than its priority
+    # decision grants. That refusal is correct and it exposes a real gap --
+    # FRS table J-1 puts 10.3/10.4 in a band above ATO, while this profile's
+    # single `voice-operational` application drops them into the catch-all.
+    # See FRMCS-OP-02.
+    - match: {call_type: driver-controller, media: voice}
+      decision:
+        qos_identifier: 65
+        arp_level: 5
+        arp_preemption_capability: false
+        arp_preemption_vulnerability: true
+        redundancy: multipath
+        paths:
+          - {id: bearer-a, transport: udp, primary: true, weight: 2, attributes: {}}
+          - {id: bearer-b, transport: udp, primary: false, weight: 1, attributes: {}}
+    # The catch-all keeps ARP 6, which note (7) assigns to 10.10 (ground to
+    # ground) and 10.23 (public address). Shunting voice (10.8) also lands
+    # here, and should not: see SHUNT-OP-01 -- SRS Annex A note (1) lists 10.8
+    # among the FRS applications "not yet covered", so it has no assignment to
+    # transcribe and none is invented.
     - match: {call_type: "*", media: voice}
       decision:
         qos_identifier: 65

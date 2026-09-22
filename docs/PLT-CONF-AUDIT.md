@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.4
+**Version:** 1.5
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1061,6 +1061,81 @@ now runs the full chain — `poc_listService -> resource-lists -> xml.xsd` —
 instead of skipping, and passes, including the three negative assertions
 above. `VP1-DOC-001`'s "schema-valid" clause is closed.
 
+### 4.30 CA-17 — the railway profile pre-empted the wrong call
+
+**Source:** UIC FRMCS FRS (FU-7120) v2.1.0 appendix J, table J-1 "Priority
+ordering"; and FRMCS SRS (AT-7800) v2.1.0 Annex A notes (1), (7), (8), (9).
+
+Appendix J states its own rule plainly: *"The ordering of priorities is
+according to the row's. In total seven priority levels are defined and are
+numbered with letters A to G"*, and a higher-priority application *"can take
+over resources from lower priority FRMCS applications"*. Its worked example is
+a REC-voice pre-empting an active ATO communication.
+
+**The seven category boundaries do not survive PDF extraction. The row order
+does** — and the row order is what the appendix says the ordering *is*. That
+is enough to check relative rank without inferring where the bands fall.
+
+| FRS row order (extract) | This profile |
+|---|---|
+| 10.11 REC | `rec` 95 |
+| 11.4 ATP (ETCS) | `etcs` 85 |
+| 10.8 Shunting voice | `shunting` **60** |
+| 11.5 ATO | `ato` **80** |
+
+**ATO and shunting were inverted.** Under congestion this profile would have
+pre-empted a shunting call to free resources for automatic train operation
+data, where the FRS puts shunting above ATO. Corrected to `shunting` 80,
+`ato` 60.
+
+**A second, smaller one.** SRS Annex A note (7) gives ARP per application
+directly: *"'Voice' include FRS applications 10.18-10.19 (ARP=3), 10.3-10.6
+(ARP=5), 10.10+10.23 (ARP=6), 10.2 (ARP=8)"*. A driver-to-controller call is
+FRS 10.3/10.4, so **ARP 5** — it was falling through to the catch-all at ARP
+6, which that same note reserves for ground-to-ground and public address. A
+dedicated rule now carries it.
+
+**The platform caught a third thing on its own.** The first version of that
+rule asked for ARP pre-emption capability, and the loader refused it: *"bearer
+rule requests ARP pre-emption capability, but the priority decision
+'operational' does not authorise it"*. That refusal is correct, and it exposes
+a real gap rather than a typo — see FRMCS-OP-02.
+
+### 4.31 SHUNT-OP-01 — the SRS does not cover shunting
+
+SRS Annex A note (1) lists the FRS applications "not yet covered", and **10.8
+Shunting voice communication is among them** (as is 11.12 Shunting data). So
+one of this profile's four call types models an application the SRS assigns no
+communication session, no 5QI and no ARP.
+
+Nothing was invented for it. `shunting-group` carries no bearer rule of its
+own and falls through to the catch-all, and a test asserts that it stays that
+way — because a plausible-looking shunting QoS row would be indistinguishable
+from a transcribed one to the next reader, which is how every defect in this
+document got in.
+
+Shunting priority (level 80) is still meaningful: it comes from FRS table J-1,
+which does cover 10.8. It is only the SRS *QoS* assignment that is absent.
+
+### 4.32 FRMCS-OP-02 — the application vocabulary is too coarse for table J-1
+
+FRS table J-1 puts 10.3/10.4 (on-train voice to and from the controller) in a
+band above 11.5 (ATO). This profile has a single `voice-operational`
+application covering 10.3, 10.4, 10.10, 10.23 and 10.2 — which table J-1
+spreads across at least three of its seven bands — and it resolves to the
+catch-all priority decision at level 30, below `ato`.
+
+So driver-to-controller voice currently ranks below automatic train operation
+data, which inverts table J-1 a second time. Unlike the ATO/shunting swap this
+one **cannot be fixed by changing a number**: it needs the profile's
+application vocabulary split to match the bands, which changes what priority
+decisions exist and therefore what the hooks return.
+
+That is a profile design change with safety-case consequences, not an audit
+correction, and it is recorded rather than attempted. It is also the clearest
+evidence yet for what `CLAUDE.md` already says: this profile is a stub and
+must not be used as safety-case input.
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -1080,6 +1155,10 @@ ordered by consequence:
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
 | CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Closed** by a human read of the table. See 4.24 — the value this audit derived was wrong. |
 | FRMCS-OP-01 | SRS clause 14.6.2.1 excludes a 5QI Annex A assigns | UIC FRMCS SRS | **Open, for UIC.** See 4.26. |
+| CA-17 | Railway priority ordering and per-application ARP | FRS appendix J, SRS Annex A notes | **Closed.** See 4.30. ATO and shunting were inverted. |
+| CA-18 | Annex A ARP column for Emergency Voice and ATP Regular Data | UIC FRMCS SRS Annex A | **Open.** The ARP column does not extract; the 5QI column was read by hand in CA-16 and the ARP one still needs the same. |
+| SHUNT-OP-01 | The SRS does not cover shunting (FRS 10.8) | UIC FRMCS SRS Annex A note (1) | **Open, for UIC.** See 4.31. |
+| FRMCS-OP-02 | Application vocabulary too coarse for FRS table J-1 | FRS appendix J | **Open, profile design.** See 4.32. |
 | CA-08 | Group document, OMA-defined parts | OMA XSDs + RFC 4826 `resource-lists.xsd` (all present) | **Closed.** See 4.27. Element order is enforced and full XSD validation runs and passes. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
@@ -1152,6 +1231,7 @@ somewhere downstream and costs a day of test time to trace back.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.5 | 2026-09-22 | CA-17: the railway profile ranked ATO above shunting, inverting FRS table J-1 — under congestion it would have pre-empted a shunting call for automatic train operation data. Corrected, along with the driver-to-controller ARP, which SRS Annex A note (7) gives as 5 rather than the catch-all 6. New SHUNT-OP-01 (the SRS does not cover shunting at all), FRMCS-OP-02 (the application vocabulary is too coarse to express table J-1's bands) and CA-18 (the Annex A ARP column still needs a human read). |
 | 1.4 | 2026-09-22 | CA-08 closure verified against a second concern: `resource-lists.xsd` was cross-read against RFC 4826 line by line (transcription is a transformation, and transformations get checked), and its own `xml.xsd` import turned the build red rather than skipping, since libxml2 does not treat the XML namespace as predefined. `docs/OMA/xml.xsd` added (fetched from `http://www.w3.org/2001/xml.xsd`, checked well-formed and buildable standalone). `test_the_group_document_is_schema_valid` runs and passes, including three new negative assertions -- two bad orderings and a missing `@uri` -- all rejected, so the pass is not vacuous. |
 | 1.3 | 2026-09-22 | CA-08 closed. `resource-lists.xsd` added to `docs/OMA/`, transcribed from RFC 4826 §3.2 read at rfc-editor.org — not from the schema's own `schemaLocation` URL, which serves IANA's namespace-registry placeholder page (HTML, not a schema) rather than the file. `test_the_group_document_is_schema_valid` now runs instead of skipping and passes. Closes `VP1-DOC-001`'s "schema-valid" clause and SVC-OP-01. |
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |

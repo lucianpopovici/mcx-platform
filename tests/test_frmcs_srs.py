@@ -124,3 +124,106 @@ def test_the_5qi_values_are_consistent_with_the_media_they_carry(bearer_rules):
         media = rule["match"]["media"]
         if expected is not None and media != "*":
             assert media == expected, (rule["match"], expected)
+
+
+# -- FRS appendix J: priority ordering (PLT-CONF-AUDIT CA-17) -------------------
+
+# UIC FRMCS FRS (FU-7120) v2.1.0, table J-1 "Priority ordering". The appendix
+# states the rule plainly: "The ordering of priorities is according to the
+# row's. In total seven priority levels are defined and are numbered with
+# letters A to G", and a higher-priority application "can take over resources
+# from lower priority FRMCS applications".
+#
+# The seven CATEGORY boundaries do not survive PDF extraction. The ROW ORDER
+# does, and the row order is what the appendix says the ordering is. So this
+# encodes relative order between the applications this profile models, which
+# is exactly as much as the document supports and no more.
+FRS_ROW_ORDER = (
+    "10.11",        # REC-alert / REC-voice / REC-data
+    "10.18", "10.19",
+    "11.34", "11.4",        # ATP -- ETCS on-board to trackside
+    "10.3", "10.4", "10.5", "10.6", "10.8",     # 10.8 shunting voice
+    "11.3", "11.15",
+    "10.10", "10.23",
+    "11.5",                 # ATO
+    "11.9", "11.18", "11.33", "11.19",
+    "11.27", "11.28",
+    "10.2", "11.2",         # generic voice, generic data
+)
+
+# Which FRS application each of this profile's applications is.
+PROFILE_APPLICATION_TO_FRS = {
+    "rec": "10.11",
+    "etcs": "11.4",
+    "shunting": "10.8",
+    "ato": "11.5",
+}
+
+
+@pytest.fixture(scope="module")
+def priority_rules():
+    with PROFILE.open() as fh:
+        return yaml.safe_load(fh)["priority"]["rules"]
+
+
+def test_priority_levels_follow_the_frs_row_order(priority_rules):
+    """The defect CA-17 found.
+
+    ATO was at level 80 and shunting at 60, so under congestion this profile
+    would have pre-empted a shunting call to make room for automatic train
+    operation data. Table J-1 puts 10.8 above 11.5.
+    """
+    level = {}
+    for rule in priority_rules:
+        app = rule["match"].get("application")
+        if app in PROFILE_APPLICATION_TO_FRS:
+            level[app] = rule["decision"]["level"]
+
+    assert set(level) == set(PROFILE_APPLICATION_TO_FRS), sorted(level)
+
+    ranked = sorted(level, key=lambda a: FRS_ROW_ORDER.index(
+        PROFILE_APPLICATION_TO_FRS[a]))
+    levels = [level[a] for a in ranked]
+    assert levels == sorted(levels, reverse=True), \
+        list(zip(ranked, levels))
+    assert len(set(levels)) == len(levels), "two applications share a level"
+
+    # The pair the appendix's own example turns on, asserted directly.
+    assert level["shunting"] > level["ato"]
+    assert level["rec"] > level["etcs"] > level["shunting"]
+
+
+# SRS Annex A note (7): "Voice" include FRS applications 10.18-10.19 (ARP=3),
+# 10.3-10.6 (ARP=5), 10.10+10.23 (ARP=6), 10.2 (ARP=8).
+# Note (8): "Urgent Data" includes 11.15 (ARP=5), 11.34 (ARP=3).
+# Note (9): "General Data" includes 11.3 (ARP=5), 11.9 (ARP=6).
+FRS_APPLICATION_ARP = {
+    "10.18": 3, "10.19": 3, "11.34": 3,
+    "10.3": 5, "10.4": 5, "10.5": 5, "10.6": 5, "11.3": 5, "11.15": 5,
+    "10.10": 6, "10.23": 6, "11.9": 6,
+    "10.2": 8,
+}
+
+
+def test_the_driver_controller_bearer_uses_the_arp_its_application_is_given(
+        bearer_rules):
+    """A driver-to-controller call is FRS 10.3/10.4, which note (7) gives
+    ARP=5. It was falling through to the catch-all at ARP 6, which the same
+    note reserves for ground-to-ground (10.10) and public address (10.23)."""
+    rule = next(r for r in bearer_rules
+                if r["match"].get("call_type") == "driver-controller")
+    assert rule["decision"]["arp_level"] == FRS_APPLICATION_ARP["10.3"] == 5
+
+
+def test_shunting_has_no_invented_qos(bearer_rules):
+    """SHUNT-OP-01. SRS Annex A note (1) lists 10.8 among the FRS applications
+    "not yet covered", so the SRS assigns shunting voice no communication
+    session, no 5QI and no ARP.
+
+    This profile therefore must NOT carry a shunting-specific bearer rule:
+    there is nothing to transcribe, and inventing one is the failure this
+    audit exists to prevent. Shunting falls through to the catch-all, and that
+    is recorded rather than dressed up as conformance.
+    """
+    assert not any(r["match"].get("call_type") == "shunting-group"
+                   for r in bearer_rules)
