@@ -171,6 +171,15 @@ def check_rendered(group: Group, document: bytes) -> None:
     assert service is not None, "no <list-service> element"
     assert service.get("uri") == group.id
 
+    # OMA-SUP-XSD_poc_listService types <list-service> as an xs:sequence --
+    # display-name, list, invite-members, max-participant-count, then a
+    # trailing xs:any for ##other namespaces -- with @uri use="required".
+    # So an extension element must come AFTER the OMA-defined ones. Walking
+    # the tree by name, as this used to, accepts any order (CA-08).
+    order = [child.tag for child in service]
+    expected = [ls("display-name"), ls("list"), oxe("supported-services")]
+    assert order == expected, (order, expected)
+
     entries = tuple(e.get("uri") for e in service.iter(ls("entry")))
     assert entries == group.members, (entries, group.members)
 

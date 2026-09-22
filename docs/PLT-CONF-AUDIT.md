@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.1
+**Version:** 1.2
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -943,6 +943,56 @@ Pinned by a test, so a future SRS revision that adds 4 to 14.6.2.1 will fail
 it and the open point can be closed. **This is a question for UIC**, and it
 sits on the ETCS bearer, which is the safety-relevant one.
 
+### 4.27 CA-08 — the schemas arrived, and one IETF file still stands in the way
+
+**Source:** OMA-SUP-XSD_poc_listService V1.0.2 and OMA-SUP-XSD_xdm_extensions
+V1.0.1, now in `docs/`.
+
+The OMA schemas confirm the CA-04 structure a **third** time, from a machine
+-readable source rather than prose: `<group>` is declared in
+`urn:oma:xml:poc:list-service` as an `xs:sequence` of `<list-service>`, and
+`<supported-services>` and `<service>` are declared in
+`urn:oma:xml:xdm:extensions`.
+
+They also carry something no prose reading had produced. `list-service-type`
+is an **`xs:sequence`**:
+
+```
+display-name           minOccurs=0
+list                   minOccurs=0
+invite-members         minOccurs=0
+max-participant-count  minOccurs=0
+xs:any ##other         minOccurs=0 maxOccurs=unbounded
+@uri                   use="required"
+```
+
+**Element order is a constraint**, and nothing was checking it. `check_rendered`
+walked the tree by name and would have accepted `supported-services` before
+`display-name`. The renderer happened to emit the right order; that was luck,
+and it is now pinned in both the runtime check and a test, with a mutant to
+prove the check can fail.
+
+**Full XSD validation is written and skips on one missing file.**
+`poc_listService` imports `urn:ietf:params:xml:ns:resource-lists` (RFC 4826)
+and types `display-name` and `entry` from it, with a `schemaLocation` pointing
+at iana.org, which this build environment's egress policy refuses. Without
+`resource-lists.xsd`, libxml2 cannot resolve those two QNames and the schema
+set cannot be built at all. `common-policy` is imported but **never
+referenced** — zero `cp:` QNames in the file — so it is not needed.
+
+`tests/test_group_schema.py` carries the validation, skipping with that exact
+reason. **Writing a stand-in for the IETF schema would make the test pass and
+prove nothing**, which is the failure this document exists to prevent.
+
+The harness is not left unproven while the target is skipped:
+`test_the_schema_harness_itself_works` builds a self-contained OMA schema
+through the same loader and resolver and validates a document against it that
+must fail, so a validator that returned True unconditionally would be caught.
+
+**One file closes this**: `resource-lists.xsd`, published in RFC 4826
+appendix A and served by IANA at the schemaLocation the OMA schema names. Drop
+it in `docs/` and the skip becomes a run.
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -962,7 +1012,7 @@ ordered by consequence:
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
 | CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Closed** by a human read of the table. See 4.24 — the value this audit derived was wrong. |
 | FRMCS-OP-01 | SRS clause 14.6.2.1 excludes a 5QI Annex A assigns | UIC FRMCS SRS | **Open, for UIC.** See 4.26. |
-| CA-08 | Group document, OMA-defined parts | OMA-TS-XDM_Group-V1_1_1 | **Open, blocked.** Not a 3GPP deliverable. The single document still blocking `VP1-DOC-001`. |
+| CA-08 | Group document, OMA-defined parts | OMA XSDs (present) + RFC 4826 `resource-lists.xsd` (absent) | **Written and skipping.** See 4.27. Element order is now enforced; full XSD validation needs one IETF file. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
 
@@ -1036,6 +1086,7 @@ somewhere downstream and costs a day of test time to trace back.
 |---|---|---|
 | 0.1 | 2026-09-21 | Initial audit. Two defects found and corrected; six items recorded as unverified. |
 | 0.2 | 2026-09-21 | CA-01 closed against the TS 24.380 source document. The PDF extraction that produced 0.1's subtype table was found to have invented a plausible sequential table; method rewritten in 2. |
+| 1.2 | 2026-09-22 | CA-08: the OMA schemas confirm the group document structure a third time and add a constraint no prose reading produced -- `list-service-type` is an `xs:sequence`, so element ORDER matters and nothing was checking it. Enforced in the runtime check and pinned. Full XSD validation is written and skips on one missing file, RFC 4826's `resource-lists.xsd`; the harness is proven separately so the skip is about that file and not untested machinery. |
 | 1.1 | 2026-09-22 | CA-16 closed by a human read of FRMCS SRS Annex A. The 5QI this audit DERIVED for the ETCS bearer was wrong: Annex A assigns 4 (GBR), not the 69 derived from the prose clauses, and general data is 8 rather than 70. Every step of the derivation was true and the conclusion was still wrong, because the selection criterion was a guaranteed bit rate rather than the service label. New FRMCS-OP-01: clause 14.6.2.1 does not list 5QI 4, which Annex A assigns. |
 | 1.0 | 2026-09-22 | CA-15 closed: `qos_identifier` was never validated, and the railway profile was requesting the Mission Critical Video 5QI for a data bearer and an ARP level outside the FRMCS mandatory range. CA-07 closed against TS 24.281 and TS 24.282. New `core/qos.py` carrying TS 23.501 table 5.7.4-1. New CA-16 (FRMCS Annex A does not extract) and DATA-OP-01 (MCData service-specific ICSIs). Nine of ten constant sets checked have contained defects. |
 | 0.9 | 2026-09-22 | CA-10 closed against RFC 3840 clause 5: `g.3gpp.mcptt` is not a base tag, so the `+` prefix the code already used is correct and TS 24.379's prefix-less Contact examples are editorially wrong. RFC 8101 confirms `mcpttp`/`mcpttq` are the registered namespace names, so the constants deleted in 4.6 held the right values in the wrong place. Both RFCs fetched from the RFC Editor; neither is needed in the repository. |
