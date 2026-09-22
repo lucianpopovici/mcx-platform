@@ -157,7 +157,12 @@ priority:
         level: 85
         scope: railway
         preemption_capability: true
-        preemption_vulnerability: false
+        # Band C, so a band-A railway emergency call must be able to take its
+        # resources: FRS appendix J, "a FRMCS application with a higher
+        # priority can take over resources from lower priority FRMCS
+        # applications". This was false, which made an ETCS session
+        # un-preemptable by anything, including a REC (PLT-CONF-AUDIT CA-19).
+        preemption_vulnerability: true
         floor_priority: 240
         label: etcs-data
     # FRS appendix J, table J-1: "The ordering of priorities is according to
@@ -171,17 +176,39 @@ priority:
         level: 60
         scope: railway
         preemption_capability: true
-        preemption_vulnerability: false
-        floor_priority: 230
+        # The appendix's worked example, verbatim: "When there is an active ATO
+        # communication and a REC-voice is initiated and there is congestion on
+        # the transportlayer of FRMCS, the REC-voice communication pre-empts the
+        # ATO communication." With this false, nothing could pre-empt an ATO
+        # session at all -- the one case the FRS spells out (CA-19).
+        preemption_vulnerability: true
+        # Band E sits below D, so its floor priority must too. CA-17 corrected
+        # `level` and left this behind: the ordering is carried by three fields
+        # and only one of them was fixed.
+        floor_priority: 180
         label: ato-data
     - match: {call_type: "*", application: shunting, urgency: "*"}
       decision:
         level: 80
         scope: railway
-        preemption_capability: false
+        # Band D is above E, F and G, so it may take their resources.
+        preemption_capability: true
         preemption_vulnerability: true
-        floor_priority: 180
+        floor_priority: 230
         label: shunting
+    # FRS 10.3 and 10.4 -- on-train voice to and from the controller -- are in
+    # band D, alongside shunting. This application had no rule of its own and
+    # fell through to the catch-all at level 30, which put driver-to-controller
+    # voice BELOW automatic train operation data. That was FRMCS-OP-02, and
+    # table J-1's band membership is what closes it.
+    - match: {call_type: "*", application: voice-operational, urgency: "*"}
+      decision:
+        level: 80
+        scope: railway
+        preemption_capability: true
+        preemption_vulnerability: true
+        floor_priority: 230
+        label: voice-controller
     - match: {call_type: "*", application: "*", urgency: "*"}
       decision:
         level: 30

@@ -11,7 +11,7 @@ public-safety deployment or a railway FRMCS deployment, from one codebase and on
 image, with the profile chosen at deploy time.
 
 **Current state: a thoroughly tested library that has never run as a process.**
-280 tests pass, 18 boundary gates pass, and there is no entry point, no socket,
+542 tests pass, 20 boundary gates pass, and there is no entry point, no socket,
 and no media path. The three task briefs close exactly that gap.
 
 ## The one rule
@@ -36,7 +36,7 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (430+ tests)
+python3 -m pytest tests/ -q                   # must stay green (540+ tests)
 python3 tools/check_boundary.py --root .      # must stay 20/20
 MCX_PROFILE=mcx MCX_IDMS=stub MCX_DATA_DIR=/tmp/mcx python3 -m service   # run it
 # profile x release: both axes, every combination

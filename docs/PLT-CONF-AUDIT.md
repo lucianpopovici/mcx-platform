@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.6
+**Version:** 1.7
 **Date:** 2026-09-21
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1188,6 +1188,73 @@ structural, not numeric: SHUNT-OP-01 (the SRS covers no shunting application)
 and FRMCS-OP-02 (the application vocabulary cannot express FRS table J-1's
 bands).
 
+### 4.34 CA-19 — nothing could pre-empt an ATO session, including the call the FRS names
+
+**Source:** UIC FRMCS FRS (FU-7120) v2.1.0 table J-1, read from the document
+by hand — the seven category boundaries do not survive PDF extraction even
+though the row order does.
+
+**First, a check that passed.** CA-17 encoded only the *row order*, stating
+explicitly that the band boundaries could not be extracted. With the real
+table in hand, the row order transcription is **identical**, and the bands are
+**not** what a reasonable reading of that order would have suggested:
+
+| | Inferred from row order | Table J-1 |
+|---|---|---|
+| Band B | 10.18, 10.19 | 10.18, 10.19, **11.34** |
+| Band C | 11.34, 11.4 | **11.4 alone** |
+| Band E | …, 11.19 | 11.19 is **not** in E |
+| Band F | 11.27, 11.28 | **11.19**, 11.27, 11.28 |
+
+Four of the seven bands would have been wrong. Nothing was committed from that
+inference, because only what the extraction supported was encoded. That is the
+rule this document has been arguing for, tested against a case where guessing
+would have been wrong — and it is the first time the discipline has been
+checked rather than merely followed.
+
+**Now the defects the bands expose.** CA-17 corrected `level` and stopped
+there. The priority ordering is carried by **three** fields, and the other two
+were still inverted:
+
+| | `level` | `floor_priority` | `preemption_vulnerability` |
+|---|---|---|---|
+| shunting (band D) | 80 ✓ | **180** ✗ | true ✓ |
+| ato (band E) | 60 ✓ | **230** ✗ | **false** ✗ |
+
+So after CA-17, ATO still out-ranked shunting on the floor, and — the serious
+one — **`preemption_vulnerability: false` meant no call could pre-empt an
+active ATO session at all**. `SessionManager.preemption_victims` skips any
+candidate whose vulnerability flag is false, before it ever compares levels.
+
+Appendix J's worked example is exactly this case, verbatim: *"When there is an
+active ATO communication and a REC-voice is initiated and there is congestion
+on the transportlayer of FRMCS, the REC-voice communication pre-empts the ATO
+communication."* The profile made that impossible. ETCS carried the same flag
+and was equally un-preemptable, including by a railway emergency call.
+
+**A partial fix is its own hazard.** CA-17 looked complete — the levels were
+right, a test proved the ordering, and three mutants died. It was still wrong,
+because a test written against one field cannot notice the other two. The
+lesson generalises past this profile: when an invariant is spread across
+several fields, pinning one of them produces *confidence* without producing
+*correctness*.
+
+**Corrected**, with all three fields derived from band membership, and
+`FRMCS-OP-02` closed along the way: FRS 10.3/10.4 are band D, so
+driver-to-controller voice now ranks with shunting instead of falling through
+to the catch-all below ATO.
+
+The tests now assert band structure rather than pairwise order — same band,
+same level; higher band, strictly higher level; and the same for
+`floor_priority` — plus the appendix's worked example executed through the
+platform's own selection logic rather than asserted about.
+
+**What is still a judgement call.** Pre-emption *capability* now follows band
+membership too (a band may take resources from the bands below it), which is
+appendix J's stated rule. Whether a shunting call should in practice drop an
+ATO session is an operator policy decision that CENELEC sign-off has to
+confirm; the FRS states the principle, not the deployment's appetite for it.
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -1210,7 +1277,8 @@ ordered by consequence:
 | CA-17 | Railway priority ordering and per-application ARP | FRS appendix J, SRS Annex A notes | **Closed.** See 4.30. ATO and shunting were inverted. |
 | CA-18 | Annex A ARP column | UIC FRMCS SRS Annex A table A.1-1 | **Closed** by a human read. See 4.33 — ARP 1 is reserved for FRMCS Signalling and the emergency call was taking it. |
 | SHUNT-OP-01 | The SRS does not cover shunting (FRS 10.8) | UIC FRMCS SRS Annex A note (1) | **Open, for UIC.** See 4.31. |
-| FRMCS-OP-02 | Application vocabulary too coarse for FRS table J-1 | FRS appendix J | **Open, profile design.** See 4.32. |
+| FRMCS-OP-02 | Application vocabulary too coarse for FRS table J-1 | FRS appendix J | **Closed** by 4.34: table J-1's bands were read, and FRS 10.3/10.4 are band D. |
+| CA-19 | Priority ordering across all three fields, and pre-emption flags | FRS table J-1 | **Closed.** See 4.34. Nothing could pre-empt an ATO session, including the REC the appendix names. |
 | CA-08 | Group document, OMA-defined parts | OMA XSDs + RFC 4826 `resource-lists.xsd` (all present) | **Closed.** See 4.27. Element order is enforced and full XSD validation runs and passes. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 | **Open, blocked.** Table 4.4.2-2 reserves the range and defers its meaning. Affects `gateway-unavailable` only; R4. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
@@ -1283,6 +1351,7 @@ somewhere downstream and costs a day of test time to trace back.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.7 | 2026-09-22 | CA-19: table J-1's bands read by hand. CA-17's fix was incomplete — the priority ordering is carried by three fields and only `level` had been corrected, so ATO still out-ranked shunting on the floor and, more seriously, carried `preemption_vulnerability: false`, meaning nothing could pre-empt an active ATO session, including the REC the appendix's own worked example names. ETCS the same. All three fields now derive from band membership, and FRMCS-OP-02 closes. The band boundaries inferred in CA-17 would have been wrong in four of seven; nothing had been committed from that inference. |
 | 1.6 | 2026-09-22 | CA-18 closed by a human read of Annex A table A.1-1. Two defects: the railway emergency call carried ARP 1, which the table reserves for FRMCS internal signalling, so it out-ranked the control plane that establishes it; and ATP Regular Data carried ARP 2 rather than 4. The whole table is now pinned, not only the rows that changed. The railway profile's QoS is fully transcribed; what remains unreconciled is structural rather than numeric. |
 | 1.5 | 2026-09-22 | CA-17: the railway profile ranked ATO above shunting, inverting FRS table J-1 — under congestion it would have pre-empted a shunting call for automatic train operation data. Corrected, along with the driver-to-controller ARP, which SRS Annex A note (7) gives as 5 rather than the catch-all 6. New SHUNT-OP-01 (the SRS does not cover shunting at all), FRMCS-OP-02 (the application vocabulary is too coarse to express table J-1's bands) and CA-18 (the Annex A ARP column still needs a human read). |
 | 1.4 | 2026-09-22 | CA-08 closure verified against a second concern: `resource-lists.xsd` was cross-read against RFC 4826 line by line (transcription is a transformation, and transformations get checked), and its own `xml.xsd` import turned the build red rather than skipping, since libxml2 does not treat the XML namespace as predefined. `docs/OMA/xml.xsd` added (fetched from `http://www.w3.org/2001/xml.xsd`, checked well-formed and buildable standalone). `test_the_group_document_is_schema_valid` runs and passes, including three new negative assertions -- two bad orderings and a missing `@uri` -- all rejected, so the pass is not vacuous. |

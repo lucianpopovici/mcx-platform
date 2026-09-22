@@ -309,3 +309,114 @@ def test_every_5qi_in_the_profile_appears_in_annex_a(bearer_rules):
     assigned = set().union(*(q for q, _ in ANNEX_A.values()))
     used = {r["decision"]["qos_identifier"] for r in bearer_rules}
     assert used <= assigned, sorted(used - assigned)
+
+
+# -- FRS table J-1 bands, now read from the document (PLT-CONF-AUDIT CA-19) -----
+
+# The seven priority bands, transcribed by hand -- the category boundaries do
+# not survive PDF extraction even though the row order does.
+#
+# This matters as evidence: an earlier revision INFERRED the boundaries from
+# the row order and got four of the seven wrong (11.34 is band B not C; 11.4 is
+# alone in C; 11.19 is band F not E). Nothing was committed from that inference
+# because only the row order was encoded. The bands below are read, not derived.
+FRS_BANDS = {
+    "A": ("10.11",),
+    "B": ("10.18", "10.19", "11.34"),
+    "C": ("11.4",),
+    "D": ("10.3", "10.4", "10.5", "10.6", "10.8", "11.3", "11.15"),
+    "E": ("10.10", "10.23", "11.5", "11.9", "11.18", "11.33"),
+    "F": ("11.19", "11.27", "11.28"),
+    "G": ("10.2", "11.2"),
+}
+
+# This profile's applications, by the band their FRS application sits in.
+APPLICATION_BAND = {
+    "rec": "A",                 # 10.11
+    "etcs": "C",                # 11.4
+    "shunting": "D",            # 10.8
+    "voice-operational": "D",   # 10.3 / 10.4
+    "ato": "E",                 # 11.5
+}
+
+
+def test_the_band_table_and_the_row_order_agree():
+    """The two representations of table J-1 must describe the same ordering."""
+    flattened = tuple(app for band in "ABCDEFG" for app in FRS_BANDS[band])
+    assert flattened == FRS_ROW_ORDER
+
+
+def test_priority_levels_group_by_band(priority_rules):
+    """Same band means same level; a higher band means a strictly higher one.
+
+    Bands are equivalence classes, so shunting and driver-to-controller voice
+    -- both FRS band D -- must rank equally rather than being ordered against
+    each other by accident.
+    """
+    level = {r["match"]["application"]: r["decision"]["level"]
+             for r in priority_rules
+             if r["match"].get("application") in APPLICATION_BAND}
+    assert set(level) == set(APPLICATION_BAND), sorted(level)
+
+    by_band = {}
+    for app, band in APPLICATION_BAND.items():
+        by_band.setdefault(band, set()).add(level[app])
+    for band, levels in by_band.items():
+        assert len(levels) == 1, (band, levels)
+
+    ordered = [next(iter(by_band[b])) for b in "ABCDEFG" if b in by_band]
+    assert ordered == sorted(ordered, reverse=True), ordered
+
+
+def test_floor_priority_follows_the_same_band_order(priority_rules):
+    """`level` is not the only field carrying the ordering. CA-17 corrected
+    `level` and left `floor_priority` inverted, so ATO still out-ranked
+    shunting on the floor."""
+    floor = {r["match"]["application"]: r["decision"]["floor_priority"]
+             for r in priority_rules
+             if r["match"].get("application") in APPLICATION_BAND}
+    by_band = {}
+    for app, band in APPLICATION_BAND.items():
+        by_band.setdefault(band, set()).add(floor[app])
+    for band, values in by_band.items():
+        assert len(values) == 1, (band, values)
+    ordered = [next(iter(by_band[b])) for b in "ABCDEFG" if b in by_band]
+    assert ordered == sorted(ordered, reverse=True), ordered
+
+
+def test_everything_below_the_top_band_can_be_preempted(priority_rules):
+    """FRS appendix J: "a FRMCS application with a higher priority can take
+    over resources from lower priority FRMCS applications", and its worked
+    example is a REC-voice pre-empting an active ATO communication.
+
+    ETCS and ATO both carried `preemption_vulnerability: false`, which made
+    them un-preemptable by anything at all -- including the railway emergency
+    call the example names.
+    """
+    decision = {r["match"]["application"]: r["decision"]
+                for r in priority_rules
+                if r["match"].get("application") in APPLICATION_BAND}
+    for app, band in APPLICATION_BAND.items():
+        if band == "A":
+            assert not decision[app]["preemption_vulnerability"], app
+        else:
+            assert decision[app]["preemption_vulnerability"], app
+
+
+def test_the_worked_example_from_the_appendix_actually_works():
+    """The appendix's example, executed rather than asserted about: a REC
+    against an active ATO session, through the platform's own selection."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from core.validation import build
+
+    with PROFILE.open() as fh:
+        model = build(yaml.safe_load(fh), "test-hash")
+    rules = {r.decision.label: r.decision for r in model.priority.rules}
+    rec, ato = rules["railway-emergency"], rules["ato-data"]
+
+    assert rec.preemption_capability, "a REC must be able to pre-empt"
+    assert ato.preemption_vulnerability, "an ATO session must be pre-emptible"
+    assert rec.scope == ato.scope, "cross-scope pairs never pre-empt"
+    assert rec.level > ato.level
