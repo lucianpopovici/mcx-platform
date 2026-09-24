@@ -1,0 +1,14 @@
+# VP1-SIG-001 interop cores, containerized.
+#
+# Ubuntu 24.04 (noble) carries the exact versions PLT-VP-R1 SS7.1.1 already
+# records: Kamailio 5.7.4 and Asterisk 20.6.0. Built once, reused by
+# tools/interop/run.py's podman fallback when the binaries are not on the
+# host PATH (see start_kamailio/start_asterisk).
+FROM docker.io/library/ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+        kamailio kamailio-tls-modules \
+        asterisk \
+    && rm -rf /var/lib/apt/lists/*

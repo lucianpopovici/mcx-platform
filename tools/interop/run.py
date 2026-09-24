@@ -43,6 +43,36 @@ from ua import UA, first_line, header, headers  # noqa: E402
 
 DOMAIN = "mcptt.example"
 U1, U2 = f"sip:u1@{DOMAIN}", f"sip:u2@{DOMAIN}"
+
+# Neither core is required to be on the host PATH. When it is not, and
+# podman is, the same binary runs inside this image instead -- built from
+# Ubuntu 24.04, which carries the exact versions PLT-VP-R1 §7.1.1 already
+# records (Kamailio 5.7.4, Asterisk 20.6.0). --network host puts the
+# container on the same loopback as the platform process, so every port
+# and path below is unchanged either way; see tools/interop/containers/.
+CONTAINER_IMAGE = "localhost/mcx-interop-cores:ubuntu24.04"
+
+
+def _core_argv(binary: str, work: Path, argv: List[str]) -> List[str]:
+    if shutil.which(binary):
+        return argv
+    if not shutil.which("podman"):
+        raise RuntimeError(f"{binary} is not installed and podman is not available")
+    # :z (shared), not :Z (exclusive) -- multiple containers touch the same
+    # work directory concurrently here (the running daemon, plus each
+    # asterisk_cli() call), and :Z's private relabel on the later one
+    # revokes the earlier container's access under SELinux enforcing.
+    return ["podman", "run", "--rm", "--network", "host",
+            "-v", f"{work}:{work}:z", CONTAINER_IMAGE] + argv
+
+
+def _dir_exists(path: str, binary: str) -> bool:
+    if shutil.which(binary):
+        return Path(path).is_dir()
+    if not shutil.which("podman"):
+        return False
+    r = subprocess.run(["podman", "run", "--rm", CONTAINER_IMAGE, "test", "-d", path])
+    return r.returncode == 0
 AS_URI = f"sip:mcptt@{DOMAIN}"
 
 
@@ -117,12 +147,12 @@ def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
 
 
 def start_kamailio(work: Path, core_port: int, platform_port: int) -> Proc:
-    if not shutil.which("kamailio"):
-        raise RuntimeError("kamailio is not installed")
+    if not shutil.which("kamailio") and not shutil.which("podman"):
+        raise RuntimeError("kamailio is not installed and podman is not available")
     modules = next((p for p in ("/usr/lib/x86_64-linux-gnu/kamailio/modules",
                                 "/usr/lib/kamailio/modules",
                                 "/usr/local/lib64/kamailio/modules")
-                    if Path(p).is_dir()), None)
+                    if _dir_exists(p, "kamailio")), None)
     if modules is None:
         raise RuntimeError("kamailio module directory not found")
     tls_cfg = work / "kamailio-tls.cfg"
@@ -143,12 +173,13 @@ def start_kamailio(work: Path, core_port: int, platform_port: int) -> Proc:
                    .replace("@@AS_DOMAIN@@", DOMAIN)
                    .replace("@@MODULES@@", modules + "/")
                    .replace("@@TLS_CFG@@", str(tls_cfg)))
-    check = subprocess.run(["kamailio", "-c", "-f", str(cfg)],
+    check = subprocess.run(_core_argv("kamailio", work, ["kamailio", "-c", "-f", str(cfg)]),
                            capture_output=True, text=True)
     if "config file ok" not in (check.stdout + check.stderr):
         raise RuntimeError("kamailio rejected its configuration:\n" + check.stderr)
-    proc = Proc("kamailio", ["kamailio", "-f", str(cfg), "-DD", "-E",
-                             "-w", str(work), "-P", str(work / "kamailio.pid")],
+    proc = Proc("kamailio", _core_argv("kamailio", work,
+                             ["kamailio", "-f", str(cfg), "-DD", "-E",
+                              "-w", str(work), "-P", str(work / "kamailio.pid")]),
                 work / "kamailio.log")
     wait_tls(core_port, work / "pki/ca.crt")
     return proc
@@ -159,17 +190,18 @@ def _asterisk_conf(work: Path) -> Path:
 
 
 def asterisk_cli(work: Path, command: str) -> str:
-    r = subprocess.run(["asterisk", "-C", str(_asterisk_conf(work)), "-rx", command],
+    r = subprocess.run(_core_argv("asterisk", work,
+                        ["asterisk", "-C", str(_asterisk_conf(work)), "-rx", command]),
                        capture_output=True, text=True, timeout=15)
     return r.stdout + r.stderr
 
 
 def start_asterisk(work: Path, core_port: int, platform_port: int) -> Proc:
-    if not shutil.which("asterisk"):
-        raise RuntimeError("asterisk is not installed")
+    if not shutil.which("asterisk") and not shutil.which("podman"):
+        raise RuntimeError("asterisk is not installed and podman is not available")
     modules = next((p for p in ("/usr/lib/x86_64-linux-gnu/asterisk/modules",
                                 "/usr/lib/asterisk/modules")
-                    if Path(p).is_dir()), None)
+                    if _dir_exists(p, "asterisk")), None)
     if modules is None:
         raise RuntimeError("asterisk module directory not found")
     for d in ("asterisk-etc", "asterisk-var", "asterisk-spool", "asterisk-run",
@@ -185,7 +217,8 @@ def start_asterisk(work: Path, core_port: int, platform_port: int) -> Proc:
         (work / "asterisk-etc" / name).write_text(text)
     (work / "asterisk-etc" / "logger.conf").write_text(
         "[general]\n[logfiles]\nconsole => notice,warning,error,verbose\n")
-    proc = Proc("asterisk", ["asterisk", "-C", str(_asterisk_conf(work)), "-f", "-n", "-vvv"],
+    proc = Proc("asterisk", _core_argv("asterisk", work,
+                             ["asterisk", "-C", str(_asterisk_conf(work)), "-f", "-n", "-vvv"]),
                 work / "asterisk.log")
     wait_tls(core_port, work / "pki/ca.crt", timeout=30)
     asterisk_cli(work, "pjsip set logger on")

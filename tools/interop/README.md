@@ -6,7 +6,16 @@ loopback, and reports each step as PASS, FAIL or OBSERVED.
     python3 tools/interop/run.py --core kamailio   [--workdir DIR]
     python3 tools/interop/run.py --core asterisk   [--workdir DIR]
 
-It needs the `kamailio` and `kamailio-tls-modules` packages, or `asterisk`.
+It needs the `kamailio` and `kamailio-tls-modules` packages, or `asterisk`,
+on the host PATH. If neither is installed, `run.py` falls back to running the
+same binary inside `containers/Containerfile` via `podman` (Ubuntu 24.04:
+Kamailio 5.7.4, Asterisk 20.6.0, matching the versions PLT-VP-R1 §7.1.1
+already records) with `--network host`, so every loopback address and file
+path below is unchanged either way. Build it once with:
+
+    podman build -t localhost/mcx-interop-cores:ubuntu24.04 \
+        -f tools/interop/containers/Containerfile tools/interop/containers
+
 With `--workdir`, the run's configuration, every process log and a
 `transcript.txt` of every message both user agents sent and received are
 kept there.
