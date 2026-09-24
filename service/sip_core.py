@@ -35,6 +35,7 @@ from core.sip import (
     parse_message, parse_sdp,
 )
 
+from core import mcinfo
 from core.mcinfo import sdp_of
 
 from .media import MediaSession, UdpMediaPlane
@@ -291,7 +292,7 @@ class SipCore:
             handler(req, txn, flow)
         except SipError as exc:
             self._final(txn, Response(Status.BAD_REQUEST,
-                                      Headers([("Warning", f'399 mcx "{exc}"')])))
+                                      Headers([("Warning", f'399 mcx "{_quoted(exc)}"')])))
         except Exception:  # noqa: BLE001 - a fault: 500, never a refusal
             log.exception("fault handling %s", req.method)
             self._final(txn, Response(Status.SERVER_ERROR))
@@ -589,13 +590,31 @@ class SipCore:
         if not call.answered:
             call.answered = True
             headers = Headers([("Contact", f"<{self.local_uri}>")])
+            ctype = "application/sdp" if body else ""
+            if call.sr.adhoc:
+                ctype, body = self._adhoc_answer(call, body)
             if body:
-                headers.add("Content-Type", "application/sdp")
+                headers.add("Content-Type", ctype)
             self._final(call.txn, Response(Status.OK, headers, body))
             if call.media is not None:
                 # The floor starts now, when the call is answered, not when it
                 # was admitted: its timers must not run while callees ring.
                 call.media.apply(self.rt.manager.start_floor(call.cid))
+
+    def _adhoc_answer(self, call: Call, sdp: str) -> Tuple[str, str]:
+        """TS 24.379 17.4.2.2: the 200 OK to an ad hoc caller carries an MCPTT
+        info body with <mcptt-calling-group-id> set to the ad hoc group
+        identity the controlling function generated, and the criteria when
+        the members were determined by criteria. The caller learns the
+        group's identity from nothing else."""
+        session = self.rt.manager.session(call.cid)
+        info = mcinfo.McInfo(
+            calling_group_id=session.resolution.group_id if session else None,
+            participant_criteria=call.sr.participant_criteria)
+        parts = [mcinfo.Part("application/sdp", sdp)] if sdp else []
+        parts.append(mcinfo.Part(mcinfo.CONTENT_TYPE,
+                                 mcinfo.render(info, self.rt.config.release)))
+        return mcinfo.build_multipart(parts)
 
     @staticmethod
     def _dialog_of(leg: Leg, resp: ReceivedResponse) -> Tuple[str, str, List[str]]:
@@ -760,7 +779,7 @@ class SipCore:
         session (PLT-SIG-005). The audit trail keeps the reason."""
         call.ended = True
         self._final(call.txn, Response(status, Headers(
-            [("Warning", f'399 mcx "{reason}"')])))
+            [("Warning", f'399 mcx "{_quoted(reason)}"')])))
         self._cancel_unanswered(call)
         self._undo(call.cid, reason)
 
@@ -892,6 +911,15 @@ class SipCore:
             leg.state = "failed"
             if ctxn.method == "INVITE":
                 self._maybe_fail(call, 408)
+
+
+def _quoted(text: object) -> str:
+    """The body of an RFC 3261 quoted-string (25.1: quoted-pair escapes " and
+    backslash; no control characters). Refusal detail can carry text the
+    caller chose -- an XML namespace, an encoding name -- and a bare quote
+    in it used to end the warn-text early (found by review)."""
+    clean = "".join(c if c >= " " and c != "\x7f" else " " for c in str(text))
+    return clean.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _sent_by(headers) -> str:

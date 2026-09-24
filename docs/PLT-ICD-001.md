@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.6 (draft)
+**Version:** 0.7 (draft)
 **Date:** 2026-09-24
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -218,9 +218,50 @@ consult mutable state, because functional-identity bindings change at runtime.
 
 ### 3.4 `identities_of(service_id) -> Sequence[str]`
 
-Read-only. Returns currently held identities for a user, for display and audit.
-Returns an empty sequence for a user holding none; does not raise for an unknown
-user.
+Read-only. Returns the identities a user currently holds, for display and
+audit, and, from v0.7, for admission. The core passes the initiator's
+identities to IF-SES `admit` as `attributes["initiator.roles"]`
+(comma-separated) at §8.1 step 4a, for call types that restrict who may start
+them (`initiator_roles`). The core always writes that attribute itself, so a
+request cannot supply it. Returns an empty sequence for a user holding none,
+and does not raise for an unknown user.
+
+Before v0.7 nothing supplied `initiator.roles`, so every call type that
+declared `initiator_roles` refused every caller: all three FRMCS call types
+that restrict their initiators were unreachable. See §11 ICD-OP-08 for what
+this now depends on.
+
+### 3.5 `determine_participants(criteria, request) -> Resolution` (added in v0.7)
+
+An ad hoc group call (TS 24.379 clause 17, Rel-18 onwards) names no group.
+The caller either lists the users (an RFC 5366 URI list) or describes them
+with criteria (`<call-participants-criterias>`, "a comma separated list",
+17.2.2.1.1 item 12). The server then determines who meets them "based on
+the local policy" (17.4.2.2 step 12 ii). What a criterion means is
+profile knowledge, so it is a hook. `SessionRequest` gains
+`adhoc`, `participants`, `participant_criteria` and `adhoc_alert_group`.
+
+**PRE**
+1. `request.adhoc` is true and `criteria` is the caller's string, uninterpreted.
+
+**POST**
+1. Returns a `GROUP` resolution with at least one member, no duplicates, and
+   `group_id` None. The ad hoc group identity is the controlling function's
+   to generate (17.4.2.2 step 10), and the core does so.
+2. If nobody meets the criteria, or a criterion is not understood, raises with
+   `adhoc-participants-undetermined`. A profile with no criteria vocabulary
+   always raises.
+
+**What the core does around it (§8.1 step 1, ad hoc variant)**, in the order of
+17.4.2.2 (Rel-18 numbering):
+
+| ID | Rule |
+|---|---|
+| ICD-ADH-001 | A list longer than the call type's `max_participants` (the caller is not counted) is refused `adhoc-too-many-participants` (warning 189, step 6). Criteria that find more members than the limit are refused the same way. |
+| ICD-ADH-002 | A list and criteria together (step 7), a call following an ad hoc emergency alert (step 7A: this platform keeps no alert groups), and a request with neither are refused `adhoc-participants-undetermined` (warning 187). |
+| ICD-ADH-003 | Each listed entry is resolved with `resolve`. Entries that yield no user are left out: unknown, outside the domains, a group, or an unheld or location-less functional identity. `resolver-unavailable` still fails the call. If nobody is left, the refusal is 187. The caller is never a member. |
+| ICD-ADH-004 | The core generates the ad hoc group identity (`sip:adhoc-<hash>@<first profile domain>`). It travels as `<mcptt-calling-group-id>` in each member's INVITE (17.4.2.1.1 item 4b) and in the 200 OK to the caller (17.4.2.2). Criteria, when used, travel in both as well (item 4c). |
+| ICD-ADH-005 | Ad hoc handling exists only where the configured release has the `adhoc` session type (Rel-18). Before that, the request takes the ordinary path. |
 
 ---
 
@@ -414,10 +455,13 @@ data-only sessions.
 
 ```
 1  IF-IDR.resolve(target, request)              → Resolution
+      ── ad hoc (§3.5): IF-IDR.resolve per listed entry, OR
+         IF-IDR.determine_participants(criteria, request) ──
 2  IF-IWF.route(request, resolution)            → InterworkingRoute
       ── ONLY when resolution.kind is EXTERNAL ──
       ── if it returns None: refuse `gateway-unavailable`, stop ──
 3  IF-PRI.evaluate(request, resolution)         → PriorityDecision
+4a IF-IDR.identities_of(initiator)             → the initiator's roles (v0.7, §3.4)
 4  IF-SES.admit(request, resolution, priority)  → Admission
    ── if not permitted: reject, stop ──
 5  IF-SES.decide(request, resolution)           → SessionDecision
@@ -502,6 +546,8 @@ they may not redefine these.
 | `hook-timeout` | core | Hook exceeded its deadline |
 | `hook-error` | core | Hook raised |
 | `hook-contract-violation` | core | Returned value failed a POST check |
+| `adhoc-participants-undetermined` | core, IF-IDR | Ad hoc participants cannot be determined (TS 24.379 warning 187) |
+| `adhoc-too-many-participants` | core | Ad hoc participants over the call type's limit (warning 189) |
 
 `hook-contract-violation` is distinguished from `hook-error` deliberately: the
 first indicates a profile defect and should be alertable, the second may be an
@@ -532,6 +578,8 @@ environmental condition.
 | ICD-OP-05 | Confirm that no profile requires a floor-control transition change (§5.3 INV-2). If one does, the core state machine is wrong. | R2 exit |
 | ICD-OP-06 | Floor control across a gateway: TETRA and P25 PTT models do not map cleanly onto 24.380 grant, queue, override and revoke. Decide which are unsupported over IF-IWF rather than discovering it at interop. | R4 start |
 | ICD-OP-07 | Media anchoring for a routed session: does the platform stay in the media path or hand off to the gateway? Affects recording obligations (PLT-OAM-008) for interworked calls. | R4 start |
+| ICD-OP-08 | **From v0.7.** Admission now authorises on `initiator.roles`, and the initiator is taken from P-Asserted-Identity or From. PLT-IDM-004 (bind the authenticated identity to the request) is not enforced on the SIP path, so on a direct TLS connection a caller can assert someone else's identity and so their roles. Before v0.7 the role check failed closed for everyone, so the exposure is new in effect, but the weakness is older. Resolving it is PLT-IDM-004 work: bind the TLS client identity to the registered AoR. | before any deployment |
+| ICD-OP-09 | **From v0.7.** Resolution runs before admission (§8.1), so an unauthorised caller can tell "nobody matches" (187, 404) from "not allowed" (403, 100), and learn whether a user exists or a role is currently held. TS 24.379 17.4.2.2 authorises first (steps 4 and 5). The same was true for prearranged groups before ad hoc calls existed. | R2 |
 
 ---
 
@@ -539,6 +587,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.7 | 2026-09-25 | Major change (ICD-VER-003): IF-IDR gains `determine_participants` (§3.5). `SessionRequest` gains the ad hoc fields. §8.1 gains the ad hoc variant of step 1 and step 4a (`identities_of`, whose result admission now reads, §3.4). §9 gains two reason codes. All in-tree profiles implement the method in the same change set: the directory resolver refuses criteria, and the functional resolver matches functional identities. ICD-OP-08 and ICD-OP-09 opened. |
 | 0.6 | 2026-09-24 | §2.7 added: the ring limit `no_answer_s`, required on every call type (ICD-RNG-001 to 004). It replaces the fixed 64·T1 limit (PLT-VP-R1 SIP-OP-15). All three in-tree profiles updated in the same change set, at 32 s. |
 | 0.5 | 2026-09-24 | ICD-SIG-006: `MCX_STRICT_RELEASE` decides whether a call type the release cannot carry is fatal at startup (REL-OP-02). |
 | 0.4 | 2026-09-24 | §2.6 added: call-type signatures declared in the profile (ICD-SIG-001 to 007). Before this, the core read call type, target, application and urgency from `<mcptt-call_type>`, `<mcptt-target>`, `<mcptt-application>` and `<mcptt-urgency>`, elements that do not exist in TS 24.379 (PLT-CONF-AUDIT CA-20). All three in-tree profiles updated in the same change set. |

@@ -20,6 +20,8 @@ applied to session control).
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -27,11 +29,18 @@ from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from . import floor as floor_mod
 from .audit import Auditor, RecordType
 from .errors import (
+    ADHOC_PARTICIPANTS_UNDETERMINED,
+    ADHOC_TOO_MANY_PARTICIPANTS,
     GATEWAY_UNAVAILABLE,
+    NOT_AUTHORISED,
+    NO_BINDING,
+    NO_LOCATION_BINDING,
     PARTNER_NOT_PERMITTED,
     PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
+    UNKNOWN_TARGET,
+    HookContractViolation,
 )
 from .hooks import (
     BearerDecision,
@@ -163,11 +172,17 @@ class SessionManager:
         signals: List[Signal] = []
 
         try:
-            # 1 — IF-IDR
-            resolution = invoker.call("IF-IDR", "resolve",
-                                      self._hooks.identity_resolver.resolve,
-                                      request.target, request,
-                                      post=self._check_resolution)
+            # 1 — IF-IDR. An ad hoc group call names no group; its members
+            # come from the caller's list or criteria (§3.5).
+            if request.adhoc:
+                resolution, refusal = self._adhoc_members(invoker, request)
+                if refusal is not None:
+                    return self._refuse(cid, request, *refusal)
+            else:
+                resolution = invoker.call("IF-IDR", "resolve",
+                                          self._hooks.identity_resolver.resolve,
+                                          request.target, request,
+                                          post=self._check_resolution)
 
             # 2 — IF-IWF, only when resolution says the target is foreign.
             #
@@ -224,7 +239,7 @@ class SessionManager:
                                     request, resolution)
 
             # 4 — IF-SES.admit
-            enriched = self._with_capacity(request)
+            enriched = self._with_capacity(request, invoker)
             admission = invoker.call("IF-SES", "admit",
                                      self._hooks.session_policy.admit,
                                      enriched, resolution, priority)
@@ -321,8 +336,12 @@ class SessionManager:
                 if member == request.initiator:
                     continue
                 signals.append(Signal(SignalType.INVITE, target=member, detail={
-                    # For <mcptt-calling-group-id> (TS 24.379 10.1.1.4.1.1 item 4b).
+                    # For <mcptt-calling-group-id> (TS 24.379 10.1.1.4.1.1 item
+                    # 4b; for an ad hoc call the generated identity, 17.4.2.1.1
+                    # item 4b).
                     "group_id": resolution.group_id,
+                    # 17.4.2.1.1 item 4c: the criteria travel to each member.
+                    "participant_criteria": request.participant_criteria,
                     "auto_answer": decision.auto_answer,
                     "acknowledgement_required":
                         decision.acknowledgement_required}))
@@ -454,21 +473,31 @@ class SessionManager:
     def _has_floor_media(self, request: SessionRequest) -> bool:
         return any(m in (MediaKind.VOICE, MediaKind.VIDEO) for m in request.media)
 
-    def _with_capacity(self, request: SessionRequest) -> SessionRequest:
-        """Supply current session counts to the admission hook.
+    def _with_capacity(self, request: SessionRequest,
+                       invoker: Invoker) -> SessionRequest:
+        """Supply what the admission hook needs and cannot find out itself:
+        current session counts, and the functional identities the initiator
+        holds (`initiator.roles`, read by call types that restrict who may
+        start them), looked up through IF-IDR `identities_of`.
 
         FINDING: PLT-ICD-001 §5.1 INV-2 says the core supplies these, but
         `SessionRequest` has no field for them, so they travel in `attributes`.
         An explicit field belongs in ICD v0.2.
+
+        FINDING (ADHOC-OP-01 work, 2026-09-25): nothing supplied
+        `initiator.roles` before, so every call type declaring
+        `initiator_roles` was refused not-authorised to every caller.
+        Always written by the core, never taken from the request.
         """
         attributes = dict(request.attributes)
         attributes["core.active_sessions"] = str(self._platform.active_sessions())
-        return SessionRequest(
-            request_id=request.request_id, initiator=request.initiator,
-            target=request.target, call_type=request.call_type,
-            media=request.media, application=request.application,
-            urgency=request.urgency, location=request.location,
-            attributes=attributes)
+        roles = invoker.call("IF-IDR", "identities_of",
+                             self._hooks.identity_resolver.identities_of,
+                             request.initiator)
+        attributes["initiator.roles"] = ",".join(roles)
+        # replace(), not a field-by-field rebuild: a rebuild silently dropped
+        # every field added to SessionRequest after it was written.
+        return dataclasses.replace(request, attributes=attributes)
 
     def _check_resolution(self, resolution: Resolution) -> None:
         """PLT-ICD-001 §3.2 POST-1: kind and member count must agree."""
@@ -492,6 +521,106 @@ class SessionManager:
                     "in resolved_from")
         if len(set(resolution.members)) != len(resolution.members):
             raise HookContractViolation("resolution contains duplicate members")
+
+    # -- ad hoc group calls (TS 24.379 clause 17; PLT-ICD-001 §3.5) -------
+
+    def adhoc_group_id(self, correlation_id: str) -> str:
+        """The ad hoc group identity the controlling function generates
+        (17.4.2.2 step 10): stable for the session, in the profile's first
+        declared domain. The Call-ID is hashed, not embedded, because it may
+        hold characters a SIP URI user part cannot."""
+        digest = hashlib.sha256(correlation_id.encode("utf-8")).hexdigest()[:16]
+        return f"sip:adhoc-{digest}@{self._profile.identity.domains[0]}"
+
+    def _adhoc_members(self, invoker: Invoker, request: SessionRequest
+                       ) -> Tuple[Optional[Resolution], Optional[Tuple[str, str]]]:
+        """(resolution, None), or (None, (reason_code, detail)) to refuse.
+
+        In the order of 17.4.2.2 (Rel-18 numbering):
+          step 6   a list longer than the limit: 189. The limit is the call
+                   type's `max_participants`; the caller is not counted,
+                   since it is never invited.
+          step 7   a list AND criteria: 187.
+          step 7A  a call following an ad hoc emergency alert names the
+                   alert's group; this platform keeps no such groups, so
+                   the group "does not exist": 187.
+          step 12  i: each listed entry is a user to invite, resolved through
+                   IF-IDR so the profile's directory and domain rules apply;
+                   an entry that yields no user (unknown, outside the
+                   domains, a group, an unheld or location-less functional
+                   identity) is left out. ii: criteria go to the profile.
+                   Neither a list nor criteria: nothing to determine, 187.
+        Criteria that find more members than the limit are also 189: the
+        limit is on the call's size, whatever named its members.
+        """
+        listed = tuple(u for u in dict.fromkeys(request.participants)
+                       if u != request.initiator)
+        criteria = request.participant_criteria
+        call_type = self._profile.call_type(request.call_type)
+        limit = call_type.max_participants if call_type else None
+        if limit is not None and len(listed) > limit:
+            return None, (ADHOC_TOO_MANY_PARTICIPANTS,
+                          f"{len(listed)} participants listed, limit {limit}")
+        if listed and criteria is not None:
+            return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
+                          "both a participant list and criteria were given")
+        if request.adhoc_alert_group:
+            return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
+                          "no ad hoc emergency alert group is kept by this platform")
+        if not listed and criteria is None:
+            return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
+                          "no participant list and no criteria")
+        group_id = self.adhoc_group_id(request.request_id)
+        if listed:
+            members: List[str] = []
+            for entry in listed:
+                try:
+                    one = invoker.call("IF-IDR", "resolve",
+                                       self._hooks.identity_resolver.resolve,
+                                       entry, request,
+                                       post=self._check_resolution)
+                except HookFailure as failure:
+                    if failure.reason_code in (UNKNOWN_TARGET, NOT_AUTHORISED,
+                                               NO_BINDING, NO_LOCATION_BINDING):
+                        continue          # yields no user this profile can invite
+                    raise
+                if one.kind is ResolutionKind.USER and one.members[0] not in members:
+                    members.append(one.members[0])
+            if not members:
+                return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
+                              "no listed participant is a user of this profile")
+            return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
+                              group_id=group_id, resolved_from="adhoc:list"), None
+        found = invoker.call("IF-IDR", "determine_participants",
+                             self._hooks.identity_resolver.determine_participants,
+                             criteria, request, post=self._check_participants)
+        members = [m for m in found.members if m != request.initiator]
+        if not members:
+            return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
+                          "the criteria matched only the caller")
+        if limit is not None and len(members) > limit:
+            return None, (ADHOC_TOO_MANY_PARTICIPANTS,
+                          f"the criteria matched {len(members)}, limit {limit}")
+        return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
+                          group_id=group_id,
+                          resolved_from=found.resolved_from or "adhoc:criteria"), None
+
+    @staticmethod
+    def _check_participants(resolution: Resolution) -> None:
+        """§3.5 POST: a GROUP resolution with at least one member, no
+        duplicates, and no group identity -- the ad hoc identity is the
+        controlling function's to generate (17.4.2.2 step 10), not the
+        profile's."""
+        if resolution.kind is not ResolutionKind.GROUP:
+            raise HookContractViolation(
+                f"determine_participants returned {resolution.kind.value}, not group")
+        if resolution.group_id is not None:
+            raise HookContractViolation(
+                "determine_participants must not name a group identity")
+        if not resolution.members:
+            raise HookContractViolation("determine_participants returned no members")
+        if len(set(resolution.members)) != len(resolution.members):
+            raise HookContractViolation("determine_participants returned duplicates")
 
     def _refuse(self, cid: str, request: SessionRequest, reason_code: str,
                 detail: str):

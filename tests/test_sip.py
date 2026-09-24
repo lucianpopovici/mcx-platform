@@ -599,6 +599,11 @@ def test_every_specification_warning_code_is_in_the_specification_table():
         "call-type-not-permitted": (100, "function not allowed due to local policy"),
         "partner-not-permitted":
             (179, "service not authorized with the interconnected system"),
+        # Rel-18 onwards: table 4.4.2-2 of V18.13.0 and V20.0.0.
+        "adhoc-participants-undetermined":
+            (187, "can't determine the adhoc group participants"),
+        "adhoc-too-many-participants":
+            (189, "maximum number of allowed adhoc group participants exceeded"),
     }
 
 

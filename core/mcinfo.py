@@ -42,6 +42,9 @@ from .release import Release, supports_mc_indicator, supports_session_type
 
 NAMESPACE = "urn:3gpp:ns:mcpttInfo:1.0"
 CONTENT_TYPE = "application/vnd.3gpp.mcptt-info+xml"
+# RFC 5366 URI list; TS 24.379 17.2.2.1.1 item 11 names the MIME type.
+CT_RESOURCE_LISTS = "application/resource-lists+xml"
+_RL = "{urn:ietf:params:xml:ns:resource-lists}"
 CT_SDP = "application/sdp"
 _NS = "{" + NAMESPACE + "}"
 
@@ -85,6 +88,9 @@ class McInfo:
     emergency: Optional[bool] = None
     imminent_peril: Optional[bool] = None
     broadcast: Optional[bool] = None
+    # Ad hoc group calls, from <anyExt> (TS 24.379 17.2.2.1.1 items 10d, 12).
+    participant_criteria: Optional[str] = None
+    adhoc_alert_group: Optional[bool] = None
     # Content elements carried with type="Encrypted" (clause 6.6.2). The
     # platform holds no key to read them, so they are recorded, not guessed.
     encrypted: FrozenSet[str] = field(default_factory=frozenset)
@@ -286,7 +292,13 @@ def parse(text: str) -> McInfo:
     else:
         emergency = emergency_ind
 
+    ext = params.find(_NS + "anyExt")
+    crit = ext.find(_NS + "call-participants-criterias") if ext is not None else None
+    alert = ext.find(_NS + "adhoc-grp-emg-alert-grp-ind") if ext is not None else None
+
     return McInfo(
+        participant_criteria=(crit.text or "").strip() if crit is not None else None,
+        adhoc_alert_group=_boolean(alert.text) if alert is not None else None,
         session_type=session_type,
         request_uri=content("mcptt-request-uri"),
         calling_user_id=content("mcptt-calling-user-id"),
@@ -337,10 +349,17 @@ def render(info: McInfo, release: Release) -> str:
     if info.broadcast is not None:
         el["broadcast-ind"] = f"<broadcast-ind>{'true' if info.broadcast else 'false'}</broadcast-ind>"
     uri("mcptt-client-id", info.client_id)
+    ext = ""
     if adhoc and info.emergency is not None:
-        el["anyExt"] = (f"<anyExt><adhoc-emergency-ind>"
-                        f"{'true' if info.emergency else 'false'}"
-                        f"</adhoc-emergency-ind></anyExt>")
+        ext += (f"<adhoc-emergency-ind>{'true' if info.emergency else 'false'}"
+                f"</adhoc-emergency-ind>")
+    if info.participant_criteria is not None:
+        if not supports_mc_indicator(release, "call-participants-criterias"):
+            raise McInfoError(f"{release} has no ad hoc participant criteria")
+        ext += (f"<call-participants-criterias>{_esc(info.participant_criteria)}"
+                f"</call-participants-criterias>")
+    if ext:
+        el["anyExt"] = f"<anyExt>{ext}</anyExt>"
     body = "".join(el[k] for k in _PARAMS_ORDER if k in el)
     return (f'<?xml version="1.0" encoding="UTF-8"?>\r\n'
             f'<mcpttinfo xmlns="{NAMESPACE}"><mcptt-Params>{body}'
@@ -366,3 +385,41 @@ def reachability(call_types: Sequence[object], release: Release
               and not supports_mc_indicator(release, "adhoc-emergency-ind")):
             blocked.append((ct.id, f"{release} has no ad hoc emergency indication"))
     return tuple(undeclared), tuple(blocked)
+
+
+# -- RFC 5366 URI list ---------------------------------------------------------
+
+def participants_of(content_type: str, body: str) -> Optional[Tuple[str, ...]]:
+    """The URIs of the application/resource-lists+xml part, in order and
+    without repeats, or None when the body has no such part.
+
+    Every <entry uri> in every <list>, nested lists included (RFC 4826 3.2).
+    <entry-ref> and <external> point at documents this server would have to
+    fetch, which it does not: a list using them is refused rather than
+    shortened without the caller knowing.
+    """
+    raw = None
+    for p in split_body(content_type, body):
+        if p.content_type == CT_RESOURCE_LISTS:
+            raw = p.body
+    if raw is None:
+        return None
+    if "<!DOCTYPE" in raw or "<!ENTITY" in raw:
+        raise McInfoError("document type declarations are not accepted")
+    try:
+        root = ET.fromstring(raw.strip().encode("utf-8"))
+    except (ET.ParseError, ValueError, LookupError) as exc:
+        raise McInfoError(f"resource list not well-formed: {exc}") from None
+    if root.tag != _RL + "resource-lists":
+        raise McInfoError("root element is not {urn:ietf:params:xml:ns:"
+                          "resource-lists}resource-lists")
+    for tag in ("entry-ref", "external"):
+        if next(root.iter(_RL + tag), None) is not None:
+            raise McInfoError(f"<{tag}> in a participant list is not supported")
+    uris: dict = {}                  # insertion-ordered set: linear, not quadratic
+    for entry in root.iter(_RL + "entry"):
+        uri = (entry.get("uri") or "").strip()
+        if not uri:
+            raise McInfoError("<entry> without a uri attribute")
+        uris[uri] = None
+    return tuple(uris)

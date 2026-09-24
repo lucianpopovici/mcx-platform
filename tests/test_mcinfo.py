@@ -210,3 +210,18 @@ def test_an_encrypted_indication_selects_no_call_type():
             '<emergency-ind type="Encrypted"><x xmlns="urn:enc"/></emergency-ind>'
             "</mcptt-Params></mcpttinfo>")
     assert mcinfo.parse(text).signature() is None
+
+
+@pytest.mark.parametrize("release", [Release.REL_18, Release.REL_20])
+@pytest.mark.parametrize("info", [
+    # what each invited member receives (TS 24.379 17.4.2.1.1 item 4)
+    mcinfo.McInfo(session_type="adhoc", request_uri="sip:u1@x",
+                  calling_user_id="sip:u0@x", calling_group_id="sip:adhoc-1@x",
+                  emergency=True, participant_criteria="train-driver,rec-area"),
+    # what the caller's 200 OK carries (17.4.2.2)
+    mcinfo.McInfo(calling_group_id="sip:adhoc-1@x", participant_criteria="a"),
+    mcinfo.McInfo(calling_group_id="sip:adhoc-1@x"),
+])
+def test_ad_hoc_bodies_are_schema_valid(release, info):
+    schema = _schema(release)
+    assert schema.validate(_doc(mcinfo.render(info, release))), schema.error_log

@@ -13,6 +13,7 @@ from typing import Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from core import model
 from core.errors import (
+    ADHOC_PARTICIPANTS_UNDETERMINED,
     CALL_TYPE_NOT_PERMITTED,
     PARTNER_NOT_PERMITTED,
     CAPACITY_EXHAUSTED,
@@ -410,6 +411,15 @@ class DirectoryResolver:
     def identities_of(self, service_id: MCServiceId) -> Sequence[str]:
         return ()
 
+    def determine_participants(self, criteria: str,
+                               request: SessionRequest) -> Resolution:
+        """A directory has no criteria vocabulary: an ad hoc call described by
+        criteria cannot be served (TS 24.379 warning 187). Calls that list
+        their participants do not come here (PLT-ICD-001 section 3.5)."""
+        raise ResolutionFailure(
+            ADHOC_PARTICIPANTS_UNDETERMINED,
+            "this profile declares no ad hoc participant criteria")
+
 
 class FunctionalResolver(DirectoryResolver):
     """Directory resolution plus functional and location-dependent addressing.
@@ -482,6 +492,46 @@ class FunctionalResolver(DirectoryResolver):
             group_id=target if kind is ResolutionKind.GROUP else None,
             resolved_from=target,  # PLT-HOK-014
         )
+
+    def determine_participants(self, criteria: str,
+                               request: SessionRequest) -> Resolution:
+        """Ad hoc participants by criteria: a comma-separated list (TS 24.379
+        17.2.2.1.1 item 12) of this profile's functional identities, each
+        read at the caller's location. The members are everyone currently
+        holding any of them.
+
+        An identity the profile does not declare refuses the whole request:
+        a criterion that is not understood would silently call fewer people
+        than the caller asked for. An identity that is unheld, or that needs a
+        location the request does not carry, contributes nobody. If nobody is
+        left, the answer is warning 187.
+        """
+        wanted = [c.strip() for c in criteria.split(",") if c.strip()]
+        if not wanted:
+            raise ResolutionFailure(ADHOC_PARTICIPANTS_UNDETERMINED,
+                                    "empty participant criteria")
+        members: List[MCServiceId] = []
+        for identity in wanted:
+            declared = self._profile.functional_identity(identity)
+            if declared is None:
+                raise ResolutionFailure(
+                    ADHOC_PARTICIPANTS_UNDETERMINED,
+                    f"criterion {identity!r} is not a functional identity of "
+                    "this profile")
+            try:
+                slot = self._location_slot(declared, request.location,
+                                           for_binding=False)
+            except ResolutionFailure:
+                continue
+            for holder in self._bindings.get(identity, {}).get(slot, ()):
+                if holder not in members:
+                    members.append(holder)
+        if not members:
+            raise ResolutionFailure(
+                ADHOC_PARTICIPANTS_UNDETERMINED,
+                f"nobody currently meets the criteria {criteria!r}")
+        return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
+                          group_id=None, resolved_from=f"criteria:{criteria}")
 
     def _location_slot(self, declared: model.FunctionalIdentity,
                        location: Optional[LocationContext],

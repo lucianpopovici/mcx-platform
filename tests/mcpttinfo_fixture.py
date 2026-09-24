@@ -90,3 +90,51 @@ def sdp_of(request) -> str:
 
 def mcinfo_of(request) -> Optional[str]:
     return part(request.headers.get("Content-Type") or "", request.body, CT_MCINFO)
+
+
+# -- ad hoc group calls (TS 24.379 17.2.2.1.1 items 10-12), written by hand ----------
+
+CT_RESOURCE_LISTS = "application/resource-lists+xml"
+
+
+def adhoc_xml(criteria: Optional[str] = None, emergency: Optional[bool] = None,
+              request_uri: Optional[str] = None,
+              alert_group: Optional[bool] = None) -> str:
+    """<session-type>adhoc</session-type>, an optional <mcptt-request-uri>,
+    and <anyExt> holding whichever of <adhoc-emergency-ind>,
+    <call-participants-criterias> and <adhoc-grp-emg-alert-grp-ind> apply."""
+    params = ["<session-type>adhoc</session-type>"]
+    if request_uri:
+        params.append(f'<mcptt-request-uri type="Normal"><mcpttURI>{request_uri}'
+                      f"</mcpttURI></mcptt-request-uri>")
+    ext = ""
+    if emergency is not None:
+        ext += f"<adhoc-emergency-ind>{str(emergency).lower()}</adhoc-emergency-ind>"
+    if criteria is not None:
+        ext += f"<call-participants-criterias>{criteria}</call-participants-criterias>"
+    if alert_group is not None:
+        ext += (f"<adhoc-grp-emg-alert-grp-ind>{str(alert_group).lower()}"
+                f"</adhoc-grp-emg-alert-grp-ind>")
+    if ext:
+        params.append(f"<anyExt>{ext}</anyExt>")
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\r\n<mcpttinfo xmlns="{NS}">'
+            f"<mcptt-Params>{''.join(params)}</mcptt-Params></mcpttinfo>")
+
+
+def resource_list(uris, nested: bool = False, extra: str = "") -> str:
+    """RFC 4826 / RFC 5366: <resource-lists><list><entry uri=.../></list>."""
+    entries = "".join(f'<entry uri="{u}"/>' for u in uris)
+    if nested:
+        entries = f"<list>{entries}</list>"
+    return ('<?xml version="1.0" encoding="UTF-8"?>\r\n'
+            '<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists">'
+            f"<list>{entries}{extra}</list></resource-lists>")
+
+
+def adhoc_body(sdp: str, xml: str, rl: Optional[str] = None) -> str:
+    sdp = sdp.replace("\r\n", "\n").rstrip("\n").replace("\n", "\r\n")
+    out = (f"--{BOUNDARY}\r\nContent-Type: application/sdp\r\n\r\n{sdp}\r\n"
+           f"--{BOUNDARY}\r\nContent-Type: {CT_MCINFO}\r\n\r\n{xml}\r\n")
+    if rl is not None:
+        out += f"--{BOUNDARY}\r\nContent-Type: {CT_RESOURCE_LISTS}\r\n\r\n{rl}\r\n"
+    return out + f"--{BOUNDARY}--\r\n"

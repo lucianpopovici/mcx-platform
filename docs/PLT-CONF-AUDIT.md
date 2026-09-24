@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.1
+**Version:** 2.2
 **Date:** 2026-09-24
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1563,6 +1563,37 @@ receives about 30 Revokes during the 3 s default T3. Legal (the count is an
 implementation option) and noisy. The values are the profile owner's to
 choose: PLT-VP-R1 PRF-OP-02.
 
+### 4.38 CA-22 — ad hoc group calls, read before they were written
+
+Ad hoc group calls (PLT-VP-R1 ADHOC-OP-01) were built from TS 24.379 clause
+17 as read in V18.13.0, and checked against V20.0.0. The protocol constants
+introduced were read, not recalled:
+
+| Constant | Source | Where |
+|---|---|---|
+| Warning 187 "can't determine the adhoc group participants" | table 4.4.2-2, V18.13.0 and V20.0.0 (identical; clause 17.4.2.2 step 7A spells it "cant", and the table is followed) | `core/sip.py` |
+| Warning 189 "maximum number of allowed adhoc group participants exceeded" | same table | `core/sip.py` |
+| Codes 184–195 first appear in Rel-18 | table 4.4.2-2 of V17.15.0 has none of them | `core/release.py` (already so) |
+| `<call-participants-criterias>`, `<adhoc-grp-emg-alert-grp-ind>` | annex F.1 schema, Rel-18 and Rel-20; absent in Rel-17 | `core/mcinfo.py`, `core/release.py` |
+| `application/resource-lists+xml`, namespace `urn:ietf:params:xml:ns:resource-lists` | 17.2.2.1.1 item 11; RFC 4826 | `core/mcinfo.py` |
+
+The rendered member-INVITE and 200 OK bodies validate against the Rel-18 and
+Rel-20 schemas (`tests/test_mcinfo.py`).
+
+**Two inconsistencies in the specification**, recorded rather than resolved:
+
+- Warning 185 is "user not authorised to initiate the adhoc group call" in
+  table 4.4.2-2, and "user is not authorised to initiate …" in clauses
+  17.3.2.1.1 step 9 and 17.4.2.2 step 4. The platform does not emit 185
+  (ADHOC-OP-02).
+- Clause 17.4.2.2 numbers its member-determination cases 12 i–iii in Rel-18
+  and 12 a–c in Rel-20. Rel-20's case c points to 17.4.5 for the criteria
+  procedure, which is 17.4.6. Code comments use the Rel-18 numbering.
+
+**Found in the platform, not the specification:** nothing supplied the
+initiator's roles to admission, so every call type declaring
+`initiator_roles` refused every caller (PLT-ICD-001 0.7 §3.4).
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -1578,6 +1609,7 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-22 | Ad hoc group call constants: warnings 187 and 189, the Rel-18 `<anyExt>` elements, the RFC 5366 list | TS 24.379 clause 17, table 4.4.2-2, annex F.1 (V18.13.0, V20.0.0) | **Closed.** See 4.38. Two wording inconsistencies in the specification recorded. |
 | CA-21 | Timer *behaviour* in `core/floor.py` and the media plane | TS 24.380 6.3.4.3-6.3.4.5, 6.3.5.6 | **Closed.** See 4.37. Eleven deviations fixed, one deliberate deviation recorded (FC-OP-07). |
 | CA-07 | MCData and MCVideo feature tags | TS 24.281, TS 24.282 | **Closed.** See 4.25. Both confirmed; DATA-OP-01 opened for the MCData service-specific ICSIs. |
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
@@ -1710,6 +1742,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.2 | 2026-09-25 | CA-22 (4.38): the ad hoc group call constants, read from V18.13.0 and V20.0.0 before use. Two specification inconsistencies recorded, along with one platform defect found on the way (initiator roles never reached admission). |
 | 2.1 | 2026-09-24 | CA-20a closed. The platform read and wrote an MCPTT info body of its own invention (`<mcptt-call_type>` and three other elements that exist in no release of TS 24.379), so no conformant client could place a call. The interop user agent had copied the format from the platform's tests. Replaced by `core/mcinfo.py`, validated against the annex F.1 schema extracted verbatim for Rel-17, 18 and 20; call types declared per profile by signature (PLT-ICD-001 §2.6); `P-Asserted-Identity` and the floor-control m-line corrected. Found on the way: FRMCS group calls need Rel-18 and ad hoc participant resolution; two pairs of call types cannot be told apart; the specification's own example is malformed. v1.9's CA-20 section cited the wrong clause and a header that clause does not require; both corrected. The coverage claim in §5 and §7 is corrected a second time. CA-21 (2.0) landed ahead of this fix on `main`; the two are unrelated and this entry does not revisit it. |
 | 2.0 | 2026-09-24 | CA-21 opened and closed (4.37): the floor timers had the right defaults and the wrong behaviour. T2 started at the grant instead of the first media packet, T20 ran on every grant without limit, T8 did T3's job, T1 was never driven, the revoke causes were always #255, a queued hand-over sent a Floor Idle first, a pre-emptor was not put in front of the queue, and a holder asking again was denied. All fixed against the clause and mutation-tested. Two inconsistencies in TS 24.380 itself recorded. CA-20 (4.36) remains open and unrelated to this change. |
 | 1.9 | 2026-09-24 | CA-20 opened, found by running VP1-SIG-001 rather than by this audit. `service/` builds messages of its own and was never in scope, although v1.8 described the audit as covering every constant the platform puts on the wire; that claim is corrected in §5 and §7. The RFC 3261 §12 dialog-routing part is fixed. The TS 24.379 part is listed in 4.36 (no `isfocus`, no `P-Asserted-Service`, no session timer, a Contact that is not a session identity) and not yet fixed. |

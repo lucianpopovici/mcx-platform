@@ -27,6 +27,9 @@ PARTNER_NOT_PERMITTED = "partner-not-permitted"
 HOOK_TIMEOUT = "hook-timeout"
 HOOK_ERROR = "hook-error"
 HOOK_CONTRACT_VIOLATION = "hook-contract-violation"
+# Ad hoc group calls (TS 24.379 clause 17; warning texts 187 and 189).
+ADHOC_PARTICIPANTS_UNDETERMINED = "adhoc-participants-undetermined"
+ADHOC_TOO_MANY_PARTICIPANTS = "adhoc-too-many-participants"
 
 RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
     {
@@ -45,6 +48,8 @@ RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
         HOOK_TIMEOUT,
         HOOK_ERROR,
         HOOK_CONTRACT_VIOLATION,
+        ADHOC_PARTICIPANTS_UNDETERMINED,
+        ADHOC_TOO_MANY_PARTICIPANTS,
     }
 )
 
@@ -60,6 +65,9 @@ CORE_ORIGINATED: FrozenSet[str] = frozenset(
         HOOK_TIMEOUT,
         HOOK_ERROR,
         HOOK_CONTRACT_VIOLATION,
+        # The limit is the call type's, applied by the core. The other ad hoc
+        # code is raised by a resolver, so a profile may declare it.
+        ADHOC_TOO_MANY_PARTICIPANTS,
     }
 )
 

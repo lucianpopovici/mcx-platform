@@ -28,6 +28,8 @@ from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import (
+    ADHOC_PARTICIPANTS_UNDETERMINED,
+    ADHOC_TOO_MANY_PARTICIPANTS,
     CALL_TYPE_NOT_PERMITTED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
@@ -168,6 +170,9 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     HOOK_TIMEOUT: Status.SERVER_ERROR,
     HOOK_ERROR: Status.SERVER_ERROR,
     HOOK_CONTRACT_VIOLATION: Status.SERVER_ERROR,
+    # TS 24.379 17.4.2.2 steps 6, 7, 7A and 12: both are 403.
+    ADHOC_PARTICIPANTS_UNDETERMINED: Status.FORBIDDEN,
+    ADHOC_TOO_MANY_PARTICIPANTS: Status.FORBIDDEN,
 }
 
 # TS 24.379 clause 4.4.1: the RFC 3261 warn-code is always 399 (miscellaneous
@@ -195,6 +200,15 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     # interconnected system and is rejected in the local system."
     PARTNER_NOT_PERMITTED: (179,
                             "service not authorized with the interconnected system"),
+    # Rel-18 onwards; texts from table 4.4.2-2 of V18.13.0 and V20.0.0, which
+    # agree. "The MCPTT server can not determine the adhoc group participants
+    # based on the input parameters." (Clause 17.4.2.2 step 7A spells it
+    # "cant"; the table is followed.)
+    ADHOC_PARTICIPANTS_UNDETERMINED: (187, "can't determine the adhoc group participants"),
+    # "The maximum number of allowed adhoc group participants exceeded the
+    # configured limit."
+    ADHOC_TOO_MANY_PARTICIPANTS: (189,
+                                  "maximum number of allowed adhoc group participants exceeded"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -701,6 +715,8 @@ class Adapter:
             request_uri=signal.target,
             calling_user_id=request.initiator,
             calling_group_id=signal.detail.get("group_id"),
+            # 17.4.2.1.1 item 4c.
+            participant_criteria=signal.detail.get("participant_criteria"),
             emergency=True if sig.emergency else None,
             imminent_peril=True if sig.imminent_peril else None,
             broadcast=True if sig.broadcast else None)
@@ -792,6 +808,16 @@ class Adapter:
         try:
             raw = mcinfo.mcinfo_of(content_type, message.body)
             info = mcinfo.parse(raw) if raw is not None else mcinfo.McInfo()
+            # Clause 17 exists from Rel-18 (core/release.py); before it an
+            # "adhoc" session type is just one no call type can declare.
+            adhoc = info.session_type == "adhoc" and \
+                supports_session_type(self._release, "adhoc")
+            # TS 24.379 17.2.2.1.1 item 11: an ad hoc caller may list the
+            # users to call as an RFC 5366 URI list. Read for ad hoc calls
+            # only: other INVITEs may carry resource lists for other reasons
+            # (clause 4.8), and are none of this code's business.
+            listed = mcinfo.participants_of(content_type, message.body) \
+                if adhoc else None
         except mcinfo.McInfoError as exc:
             raise SipError(f"MCPTT info body: {exc}") from None
         sig = info.signature()
@@ -821,6 +847,12 @@ class Adapter:
             urgency=None,
             location=None,
             attributes=attributes,
+            # Clause 17: an ad hoc call's members are listed or described,
+            # never a group the core already knows (PLT-ICD-001 section 3.5).
+            adhoc=adhoc,
+            adhoc_alert_group=bool(adhoc and info.adhoc_alert_group),
+            participants=tuple(_uri(u) for u in listed or ()) if adhoc else (),
+            participant_criteria=info.participant_criteria if adhoc else None,
         )
 
     def _media_from_offer(self, message: Request) -> Tuple[MediaKind, ...]:

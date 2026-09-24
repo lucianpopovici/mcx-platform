@@ -246,6 +246,9 @@ MC_INDICATOR_INTRODUCED: Mapping[str, Release] = {
     "imminentperil-ind": Release.REL_13,
     "broadcast-ind": Release.REL_13,
     "adhoc-emergency-ind": Release.REL_18,
+    # Not an indication but an <anyExt> element with the same history: the
+    # ad hoc participant criteria (17.2.2.1.1 item 12), Rel-18 onwards.
+    "call-participants-criterias": Release.REL_18,
 }
 
 
