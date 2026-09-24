@@ -49,7 +49,7 @@ call_types:
       queueing_enabled: true
       override_allowed: false
       max_queue_depth: 5
-      timers_ms: {T2: 5000, T20: 100, T8: 100}
+      timers_ms: {T2: 5000, T20: 100, T8: 1000, T3: 3000}
 
   - id: switching-order
     label: Switching order call
@@ -72,7 +72,7 @@ call_types:
       queueing_enabled: false
       override_allowed: true
       max_queue_depth: 0
-      timers_ms: {T2: 2000, T20: 100, T8: 100}
+      timers_ms: {T2: 2000, T20: 100, T8: 1000, T3: 3000}
 
   - id: telemetry-session
     label: Grid telemetry session

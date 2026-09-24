@@ -183,6 +183,22 @@ def _defects(raw):
     return exc.value.defects
 
 
+def test_in_tree_profiles_state_the_specification_revoke_timers():
+    """PLT-VP-R1 PRF-OP-02, decided 2026-09-24: every profile that sets
+    floor timers states T8 = 1 s and T3 = 3 s, TS 24.380's defaults. The
+    100 ms T8 the profiles carried was written when T8 was (wrongly) the
+    grace period, and would have re-sent the Revoke about 30 times per
+    grace. Literals, not DEFAULT_TIMERS_MS: the decision is pinned, not
+    whatever the default becomes."""
+    for name in ("mcx", "frmcs", "utility"):
+        raw = yaml.safe_load((ROOT / "profiles" / name / "profile.yaml").read_text())
+        for ct in raw["call_types"]:
+            timers = (ct.get("floor") or {}).get("timers_ms") or {}
+            if timers:
+                assert timers.get("T8") == 1000, (name, ct.get("id"))
+                assert timers.get("T3") == 3000, (name, ct.get("id"))
+
+
 def test_every_in_tree_profile_declares_codecs():
     from core import loader
     for name in ("mcx", "frmcs", "utility"):

@@ -45,7 +45,7 @@ call_types:
       queueing_enabled: true
       override_allowed: false
       max_queue_depth: 4
-      timers_ms: {T2: 4000, T20: 100, T8: 100}
+      timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}
 
   - id: prearranged-group
     label: Prearranged group call
@@ -64,7 +64,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 8
-      timers_ms: {T2: 4000, T20: 100, T8: 100}
+      timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}
 
   - id: emergency-group
     label: Emergency group call
@@ -83,7 +83,7 @@ call_types:
       queueing_enabled: false
       override_allowed: true
       max_queue_depth: 0
-      timers_ms: {T2: 2000, T20: 100, T8: 100}
+      timers_ms: {T2: 2000, T20: 100, T8: 1000, T3: 3000}
 
   - id: imminent-peril-group
     label: Imminent peril group call
@@ -102,7 +102,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 4
-      timers_ms: {T2: 3000, T20: 100, T8: 100}
+      timers_ms: {T2: 3000, T20: 100, T8: 1000, T3: 3000}
 
   - id: sds
     label: Short data service
@@ -144,7 +144,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 6
-      timers_ms: {T2: 3500, T20: 100, T8: 100}
+      timers_ms: {T2: 3500, T20: 100, T8: 1000, T3: 3000}
 
 identity:
   domains: ["mcptt.example"]

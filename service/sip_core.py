@@ -60,9 +60,15 @@ class Leg:
     state: str = "inviting"          # inviting | ringing | confirmed | failed
     to_tag: str = ""
     cseq: int = 1
+    invite_cseq: int = 1              # the INVITE's; its ACKs carry it
     # RFC 3261 12.1.2, from the 2xx: where in-dialog requests on this leg go.
     remote_target: str = ""
     route_set: List[str] = field(default_factory=list)
+    # The ACK sent for each 2xx dialog on this leg, by To tag, so that a
+    # retransmitted 2xx is answered with the same ACK (RFC 3261 13.2.2.4).
+    # The leg's own dialog is `to_tag`; any other tag is a fork that was
+    # ACKed and then ended with a BYE.
+    acks: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -463,6 +469,7 @@ class SipCore:
             sdp = self._relay_sdp(call, target)
         ctx = DialogContext(call_id=leg.call_id, local_uri=self.local_uri,
                             sdp=sdp)
+        leg.invite_cseq = leg.cseq = ctx.cseq
         req = self.adapter.render(sig, ctx, call.sr)
         req = self._with_branch(req)
         leg.txn = self.client.start(req, flow, user=leg)
@@ -485,9 +492,31 @@ class SipCore:
         if txn is None:
             log.info("response with no transaction dropped code=%s", resp.code)
             return
+        if txn.user is None:
+            # A BYE that ended a stray forked dialog: nothing waits on it.
+            if resp.code >= 200:
+                self.client.finish(txn)
+            return
         leg: Leg = txn.user
-        call = self._dialogs.get(leg.call_id) if leg is not None else None
+        if txn.accepted:
+            # RFC 6026 7.2: in 'Accepted' a 2xx is passed up to the UAC core.
+            # A 3xx-6xx after a 2xx has no defined use there and is dropped.
+            if 200 <= resp.code < 300:
+                self._2xx_again(leg, resp)
+            return
+        if txn.method == "INVITE" and resp.code >= 300:
+            # What the UAC owes the callee does not depend on whether the call
+            # still exists: a 3xx-6xx is ACKed by the transaction.
+            self._ack_non_2xx(txn, resp)
+        call = self._dialogs.get(leg.call_id)
         if call is None or call.ended:
+            if txn.method == "INVITE" and 200 <= resp.code < 300:
+                # Answered after the call ended (the initiator hung up while
+                # this leg rang): accept the dialog and end it at once.
+                self.client.accept(txn)
+                self._end_stray_dialog(leg, resp)
+            elif resp.code >= 200:
+                self.client.finish(txn)
             return
         if txn.method == "BYE":
             if resp.code >= 200:
@@ -498,20 +527,16 @@ class SipCore:
             if resp.code in (180, 183) and not call.answered:
                 self._provisional(call.txn, Response(Status.RINGING))
             return
-        self.client.finish(txn)
         if resp.code < 300:
+            self.client.accept(txn)
             self._leg_answered(call, leg, resp)
         else:
+            self.client.finish(txn)
             leg.state = "failed"
             self._maybe_fail(call, resp.code)
 
     def _leg_answered(self, call: Call, leg: Leg, resp: ReceivedResponse) -> None:
-        to = resp.headers.get("To") or ""
-        m = re.search(r"tag=([^;>\s]+)", to)
-        leg.to_tag = m.group(1) if m else ""
-        leg.remote_target = _addr_uri(resp.headers.get("Contact") or "") or leg.uri
-        leg.route_set = list(reversed(
-            _header_values(resp.headers.get_all("Record-Route"))))
+        leg.to_tag, leg.remote_target, leg.route_set = self._dialog_of(leg, resp)
         leg.state = "confirmed"
         self._send_ack(call, leg)
         body = resp.body
@@ -544,18 +569,91 @@ class SipCore:
                 # was admitted: its timers must not run while callees ring.
                 call.media.apply(self.rt.manager.start_floor(call.cid))
 
-    def _send_ack(self, call: Call, leg: Leg) -> None:
+    @staticmethod
+    def _dialog_of(leg: Leg, resp: ReceivedResponse) -> Tuple[str, str, List[str]]:
+        """RFC 3261 12.1.2: the To tag, remote target and route set a 2xx
+        establishes (the route set is Record-Route, reversed, at the UAC)."""
+        m = re.search(r"tag=([^;>\s]+)", resp.headers.get("To") or "")
+        return (m.group(1) if m else "",
+                _addr_uri(resp.headers.get("Contact") or "") or leg.uri,
+                list(reversed(_header_values(resp.headers.get_all("Record-Route")))))
+
+    def _ack_2xx(self, leg: Leg, to_tag: str, remote_target: str,
+                 route_set: List[str]) -> str:
+        """The ACK for a 2xx: its own transaction, sent within the dialog
+        (RFC 3261 13.2.2.4). Kept, and re-sent unchanged for each
+        retransmission of that 2xx."""
         h = Headers([
             ("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};"
-                    f"branch=z9hG4bKmcxack{leg.call_id}"),
+                    # Fixed per dialog, so a re-sent ACK is identical; the
+                    # '.' keeps (call-id, tag) pairs from running together.
+                    f"branch=z9hG4bKmcxack{leg.call_id}.{to_tag}"),
             ("From", f"<{self.local_uri}>;tag={leg.call_id}-l"),
-            ("To", f"<{leg.uri}>;tag={leg.to_tag}"),
-            ("Call-ID", leg.call_id), ("CSeq", f"{leg.cseq} ACK"),
+            ("To", f"<{leg.uri}>;tag={to_tag}"),
+            ("Call-ID", leg.call_id), ("CSeq", f"{leg.invite_cseq} ACK"),
             ("Max-Forwards", "70")])
-        ruri, routes = dialog_target(leg.remote_target or leg.uri, leg.route_set)
+        ruri, routes = dialog_target(remote_target or leg.uri, route_set)
         for r in routes:
             h.add("Route", r)
-        leg.flow.send(Request("ACK", ruri, h).render())
+        text = Request("ACK", ruri, h).render()
+        leg.acks[to_tag] = text
+        if leg.flow is not None:
+            leg.flow.send(text)
+        return text
+
+    def _send_ack(self, call: Call, leg: Leg) -> None:
+        self._ack_2xx(leg, leg.to_tag, leg.remote_target, leg.route_set)
+
+    def _2xx_again(self, leg: Leg, resp: ReceivedResponse) -> None:
+        """A 2xx on an INVITE already answered: a retransmission (the ACK was
+        lost on the way) gets the same ACK again; a 2xx with a new To tag is
+        another fork answering, which is ACKed and ended (13.2.2.4)."""
+        to_tag, _, _ = self._dialog_of(leg, resp)
+        ack = leg.acks.get(to_tag)
+        if ack is not None:
+            if leg.flow is not None:
+                leg.flow.send(ack)
+            return
+        self._end_stray_dialog(leg, resp)
+
+    def _end_stray_dialog(self, leg: Leg, resp: ReceivedResponse) -> None:
+        """A dialog nobody wants: ACK it, then BYE it (RFC 3261 13.2.2.4 --
+        'the UAC core MUST generate an ACK ... and then send a BYE')."""
+        to_tag, target, routes_rev = self._dialog_of(leg, resp)
+        self._ack_2xx(leg, to_tag, target, routes_rev)
+        if leg.flow is None:
+            return
+        h = Headers([
+            ("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};"
+                    "branch=z9hG4bK-replaced"),   # _with_branch sets it
+            ("From", f"<{self.local_uri}>;tag={leg.call_id}-l"),
+            ("To", f"<{leg.uri}>;tag={to_tag}"),
+            ("Call-ID", leg.call_id), ("CSeq", f"{leg.invite_cseq + 1} BYE"),
+            ("Max-Forwards", "70")])
+        ruri, routes = dialog_target(target, routes_rev)
+        for r in routes:
+            h.add("Route", r)
+        req = self._with_branch(Request("BYE", ruri, h))
+        self.client.start(req, leg.flow, user=None)
+        leg.flow.send(req.render())
+
+    def _ack_non_2xx(self, txn: ClientTxn, resp: ReceivedResponse) -> None:
+        """RFC 3261 17.1.1.3: the INVITE client transaction ACKs a 3xx-6xx
+        itself -- same Request-URI, Call-ID, From, Route and top Via
+        (branch included) as the INVITE, CSeq number unchanged, and the To
+        of the response, tag and all. The platform's flows are TLS, so
+        Timer D is zero (17.1.1.2) and the transaction ends here."""
+        inv: Request = txn.request
+        h = Headers([("Via", (inv.headers.get_all("Via") or [""])[0]),
+                     ("From", inv.headers.get("From") or ""),
+                     ("To", resp.headers.get("To") or ""),
+                     ("Call-ID", inv.headers.get("Call-ID") or ""),
+                     ("CSeq", f"{cseq_of(inv.headers)[0]} ACK"),
+                     ("Max-Forwards", "70")])
+        for r in inv.headers.get_all("Route"):
+            h.add("Route", r)
+        txn.flow.send(Request("ACK", inv.uri, h).render())
+        self.client.finish(txn)
 
     def _maybe_fail(self, call: Call, code: int) -> None:
         if call.answered or any(l.state in ("inviting", "ringing", "confirmed")
@@ -590,12 +688,24 @@ class SipCore:
         call = self._dialogs.get(req.headers.get("Call-ID") or "")
         if call is None:
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
-        self._final(txn, Response(Status.OK))
         call_id = req.headers.get("Call-ID")
+        leg = call.legs.get(call_id or "")
+        if leg is not None:
+            # RFC 3261 12.2.2: a request belongs to a dialog by Call-ID AND
+            # tags. A leg's Call-ID can carry a second dialog -- a fork that
+            # answered and was ACKed and ended (13.2.2.4) -- whose BYE must
+            # not end the leg's own. The callee is the remote party, so its
+            # tag is in From.
+            m = re.search(r"tag=([^;>\s]+)", req.headers.get("From") or "")
+            tag = m.group(1) if m else ""
+            if tag != leg.to_tag:
+                known = tag in leg.acks
+                return self._final(txn, Response(
+                    Status.OK if known else Status.CALL_DOES_NOT_EXIST))
+        self._final(txn, Response(Status.OK))
         if call_id == call.cid:                     # the initiator hung up
             self._end(call, cause="normal", skip=call.initiator)
             return
-        leg = call.legs.get(call_id or "")
         if leg is not None:
             leg.state = "failed"
             if not any(l.state == "confirmed" for l in call.legs.values()):
@@ -672,6 +782,8 @@ class SipCore:
                             call.cid)
                 self._end(call, cause="ack-timeout")
         for ctxn in self.client.tick():
+            if ctxn.accepted:
+                continue          # Timer M: the 2xx window closed, not a failure
             leg = ctxn.user
             call = self._dialogs.get(leg.call_id) if leg else None
             if call is None or call.ended:

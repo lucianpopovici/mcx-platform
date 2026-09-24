@@ -598,7 +598,9 @@ def test_initiator_bye_releases_and_byes_the_callee(core, rt, world):
 def test_callee_bye_releases_and_byes_the_initiator(core, rt, world):
     _answered_call(core, world)
     leg = world[U[1]].requests("INVITE")[0].headers.get("Call-ID")
-    core.on_bytes(msg("BYE", LOCAL, leg, 2, U[1], U[0]), world[U[1]])
+    # in the leg's dialog: the callee's tag in From, the platform's in To
+    core.on_bytes(msg("BYE", LOCAL, leg, 2, U[1], U[0], from_tag="callee",
+                      to_tag=f"{leg}-l"), world[U[1]])
     assert world[U[1]].codes()[-1] == 200
     byes = world[U[0]].requests("BYE")
     assert len(byes) == 1 and byes[0].headers.get("Call-ID") == "k1"
@@ -970,8 +972,9 @@ def test_bye_to_the_initiator_follows_the_invite_route_set(core, world):
     """The callee hangs up; the platform's BYE to the initiator goes to the
     initiator's Contact with the INVITE's Record-Route, unreversed."""
     req = _proxied_private_call(core, world)
-    core.on_bytes(msg("BYE", LOCAL, req.headers.get("Call-ID"), 2, U[1], LOCAL,
-                      to_tag="callee"), world[U[1]])
+    leg = req.headers.get("Call-ID")
+    core.on_bytes(msg("BYE", LOCAL, leg, 2, U[1], LOCAL, from_tag="callee",
+                      to_tag=f"{leg}-l"), world[U[1]])
     (bye,) = world[U[0]].requests("BYE")
     assert bye.uri == "sip:u0@192.0.2.9:5073;transport=tls"
     assert list(bye.headers.get_all("Route")) == [P2, P1]
@@ -1036,3 +1039,159 @@ def test_addr_uri_ignores_angle_brackets_in_display_names(value, uri):
 ])
 def test_dialog_target_edge_cases(routes, ruri):
     assert dialog_target("sip:t@h;transport=tls", routes)[0] == ruri
+
+
+# ============================================================ SIP-OP-13: the UAC's ACKs
+#
+# The platform is the UAC on every leg toward a callee. Two duties it did not
+# carry out: re-ACK a retransmitted 2xx (RFC 3261 13.2.2.4) -- the INVITE
+# transaction was finished on the first 2xx, so the retransmission matched
+# nothing and was dropped -- and ACK a 3xx-6xx (17.1.1.3), which it never did.
+# With nothing in between neither shows. Behind a proxy that forwards over
+# UDP, a lost ACK makes the callee hang up an answered call after 64*T1.
+
+
+def _leg_invite(world, u=U[1]):
+    return world[u].requests("INVITE")[-1]
+
+
+def test_a_retransmitted_2xx_gets_the_same_ack_again(core, world):
+    _answered_call(core, world, cid="ra1")
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 200, SDP), world[U[1]])        # the retransmission
+    acks = [t for t in world[U[1]].sent if t.startswith("ACK ")]
+    assert len(acks) == 2 and acks[0] == acks[1]
+    assert not world[U[1]].requests("BYE")                    # same dialog: kept
+
+
+def test_the_2xx_window_closes_after_64_t1_without_failing_the_leg(core, rt, world, clock):
+    _answered_call(core, world, cid="ra2")
+    core.on_bytes(msg("ACK", LOCAL, "ra2", 1, U[0], U[1], branch="z9hG4bKra2"),
+                  world[U[0]])
+    clock.now += 64 * 500 + 1
+    core.tick()                                               # Timer M
+    assert rt.manager.session("ra2").state.value != "released"
+    assert not world[U[1]].requests("BYE")
+    core.on_bytes(answer(_leg_invite(world), 200, SDP), world[U[1]])
+    assert len(world[U[1]].requests("ACK")) == 1             # now unmatched
+    # the leg is still confirmed: hanging up reaches the callee
+    core.on_bytes(msg("BYE", LOCAL, "ra2", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    assert len(world[U[1]].requests("BYE")) == 1
+
+
+def test_a_second_fork_answering_is_acked_then_ended(core, rt, world):
+    _answered_call(core, world, cid="ra3")
+    req = _leg_invite(world)
+    fork_contact = "<sip:u1@192.0.2.44:5071;transport=tls>"
+    core.on_bytes(answer(req, 200, SDP, tag="fork2",
+                         extra=[f"Contact: {fork_contact}"]), world[U[1]])
+    ack, bye = world[U[1]].requests()[-2:]
+    assert ack.method == "ACK" and bye.method == "BYE"
+    for m in (ack, bye):
+        assert m.headers.get("To").endswith(";tag=fork2")
+        assert m.uri == "sip:u1@192.0.2.44:5071;transport=tls"
+    assert bye.headers.get("CSeq") == "2 BYE"
+    # the call itself goes on, and the fork's retransmission is re-ACKed only
+    assert rt.manager.session("ra3").state.value != "released"
+    core.on_bytes(answer(req, 200, SDP, tag="fork2",
+                         extra=[f"Contact: {fork_contact}"]), world[U[1]])
+    assert len(world[U[1]].requests("BYE")) == 1
+    assert len(world[U[1]].requests("ACK")) == 3
+    # the stray BYE's 200 closes its transaction
+    n = len(core.client)
+    core.on_bytes(answer(bye, 200, tag="fork2"), world[U[1]])
+    assert len(core.client) == n - 1
+
+
+def test_a_bye_from_the_stray_fork_does_not_end_the_call(core, rt, world):
+    """RFC 3261 12.2.2: dialogs are matched by Call-ID and tags. The fork
+    that answered second shares the leg's Call-ID; its BYE ends its own
+    dialog only. A BYE for a dialog nobody knows gets 481."""
+    _answered_call(core, world, cid="sf1")
+    core.on_bytes(msg("ACK", LOCAL, "sf1", 1, U[0], U[1], branch="z9hG4bKsf1"),
+                  world[U[0]])
+    inv = _leg_invite(world)
+    leg = inv.headers.get("Call-ID")
+    core.on_bytes(answer(inv, 200, SDP, tag="fork2"), world[U[1]])
+    core.on_bytes(msg("BYE", LOCAL, leg, 7, U[1], LOCAL, from_tag="fork2",
+                      to_tag=f"{leg}-l"), world[U[1]])
+    assert world[U[1]].codes()[-1] == 200
+    core.on_bytes(msg("BYE", LOCAL, leg, 8, U[1], LOCAL, from_tag="nobody",
+                      to_tag=f"{leg}-l"), world[U[1]])
+    assert world[U[1]].codes()[-1] == 481
+    assert rt.manager.session("sf1").state.value != "released"
+    assert world[U[0]].requests("BYE") == []
+
+
+def test_an_unanswered_stray_bye_does_not_touch_the_kept_dialog(core, world, clock):
+    _answered_call(core, world, cid="ra5")
+    core.on_bytes(msg("ACK", LOCAL, "ra5", 1, U[0], U[1], branch="z9hG4bKra5"),
+                  world[U[0]])
+    core.on_bytes(answer(_leg_invite(world), 200, SDP, tag="fork2"), world[U[1]])
+    clock.now += 64 * 500 + 1
+    core.tick()                                   # the stray BYE's Timer F
+    core.on_bytes(msg("BYE", LOCAL, "ra5", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    byes = world[U[1]].requests("BYE")
+    assert [b.headers.get("To").rsplit("tag=", 1)[1] for b in byes] == \
+        ["fork2", "callee"]
+
+
+def test_the_non_2xx_ack_carries_the_invites_route(core):
+    """17.1.1.3: 'the ACK MUST contain ... the Route header fields of the
+    request'. No leg INVITE carries a Route today (no outbound proxy), so
+    the transaction is driven directly."""
+    from service.sip_core import Leg
+    from core.sip import Headers as H
+    flow = Flow()
+    inv = Request("INVITE", "sip:u1@mcptt.example", H([
+        ("Via", "SIP/2.0/TLS mcptt.example;branch=z9hG4bKr1"),
+        ("From", f"<{LOCAL}>;tag=a"), ("To", f"<{U[1]}>"),
+        ("Call-ID", "rt1"), ("CSeq", "1 INVITE"),
+        ("Route", "<sip:ob1.example;lr>"), ("Route", "<sip:ob2.example;lr>")]))
+    txn = core.client.start(inv, flow, user=Leg(uri=U[1], call_id="rt1", flow=flow))
+    core.on_bytes(answer(inv, 404, tag="nf"), flow)
+    (ack,) = flow.requests("ACK")
+    assert list(ack.headers.get_all("Route")) == ["<sip:ob1.example;lr>",
+                                                  "<sip:ob2.example;lr>"]
+    assert txn.done
+
+
+def test_a_decline_is_acked_by_the_invite_transaction(core, world):
+    """RFC 3261 17.1.1.3: same Request-URI, Call-ID, From and top Via as the
+    INVITE (branch included), the response's To with its tag, CSeq number
+    unchanged with method ACK."""
+    core.on_bytes(invite("na1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 486, tag="busy"), world[U[1]])
+    (ack,) = world[U[1]].requests("ACK")
+    assert ack.uri == req.uri
+    assert ack.headers.get_all("Via")[0] == req.headers.get_all("Via")[0]
+    for h in ("From", "Call-ID"):
+        assert ack.headers.get(h) == req.headers.get(h)
+    assert ack.headers.get("To") == f"{req.headers.get('To')};tag=busy"
+    assert ack.headers.get("CSeq") == f"{req.headers.get('CSeq').split()[0]} ACK"
+    assert list(ack.headers.get_all("Route")) == list(req.headers.get_all("Route"))
+
+
+def test_an_answer_after_the_call_ended_is_acked_and_ended(core, rt, world):
+    """A group call: u1 answers, the initiator hangs up while u2 still rings,
+    then u2 answers. Its dialog must be ACKed and closed, not left to time out."""
+    core.on_bytes(invite("la1", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    reqs = {u: _leg_invite(world, u) for u in U[1:]}
+    core.on_bytes(answer(reqs[U[1]], 200, SDP), world[U[1]])
+    core.on_bytes(msg("BYE", LOCAL, "la1", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    core.on_bytes(answer(reqs[U[2]], 200, SDP, tag="late"), world[U[2]])
+    ack, bye = world[U[2]].requests()[-2:]
+    assert (ack.method, bye.method) == ("ACK", "BYE")
+    assert bye.headers.get("To").endswith(";tag=late")
+    # and a decline after the end is still ACKed
+    core.on_bytes(answer(reqs[U[3]], 603, tag="no"), world[U[3]])
+    assert world[U[3]].requests()[-1].method == "ACK"
+
+
+def test_a_non_2xx_after_the_2xx_is_discarded(core, rt, world):
+    """RFC 6026 7.2: in 'Accepted' only 2xx responses are passed up."""
+    _answered_call(core, world, cid="ra4")
+    core.on_bytes(answer(_leg_invite(world), 500, tag="other"), world[U[1]])
+    assert len(world[U[1]].requests("ACK")) == 1
+    assert rt.manager.session("ra4").state.value != "released"

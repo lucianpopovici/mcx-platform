@@ -163,6 +163,11 @@ class ClientTxn:
     expires_at: int
     done: bool = False
     user: Any = None
+    request: Any = None
+    # RFC 6026 7.2 'Accepted': an INVITE that got a 2xx stays matchable for
+    # 64*T1 (Timer M), so a retransmitted 2xx, or a 2xx from another fork,
+    # reaches the UAC core instead of being dropped as unmatched.
+    accepted: bool = False
 
 
 class ClientTransactions:
@@ -176,7 +181,8 @@ class ClientTransactions:
     def start(self, request: Request, flow: Any, user: Any = None) -> ClientTxn:
         txn = ClientTxn(branch=top_branch(request.headers), method=request.method,
                         request_text=request.render(), flow=flow,
-                        expires_at=self._now() + 64 * self._t1, user=user)
+                        expires_at=self._now() + 64 * self._t1, user=user,
+                        request=request)
         self._txns[(txn.branch, txn.method)] = txn
         return txn
 
@@ -184,12 +190,19 @@ class ClientTransactions:
         _, method = cseq_of(response.headers)
         return self._txns.get((top_branch(response.headers), method))
 
+    def accept(self, txn: ClientTxn) -> None:
+        """INVITE got a 2xx: 'Accepted' until Timer M (64*T1) fires."""
+        txn.accepted = True
+        txn.expires_at = self._now() + 64 * self._t1
+
     def finish(self, txn: ClientTxn) -> None:
         txn.done = True
         self._txns.pop((txn.branch, txn.method), None)
 
     def tick(self) -> List[ClientTxn]:
-        """Transactions whose Timer B/F fired: no final response arrived."""
+        """Transactions whose timer fired: Timer B/F (no final response
+        arrived), or Timer M for an accepted INVITE (`accepted` is set; that
+        one is not a failure)."""
         now = self._now()
         expired = [t for t in self._txns.values() if now >= t.expires_at]
         for t in expired:
