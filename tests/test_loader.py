@@ -787,3 +787,40 @@ def test_a_malformed_signature_is_refused(mutate, sig, path):
     raw = mutate()
     raw["call_types"][0]["mc_signature"] = sig
     expect_defects(raw, path_contains=path)
+
+
+# --------------------------------------------------------------------------
+# no_answer_s (PLT-ICD-001 2.7, PLT-VP-R1 SIP-OP-15)
+# --------------------------------------------------------------------------
+
+
+def test_every_call_type_must_state_how_long_a_member_may_ring(mutate):
+    """Required, no default: the 32 s it used to be was Timer B, a transport
+    constant nobody chose for any call type."""
+    raw = mutate()
+    del raw["call_types"][0]["no_answer_s"]
+    expect_defects(raw, codes=["missing-key"], path_contains="call_types[0].no_answer_s")
+
+
+@pytest.mark.parametrize("value, code", [
+    (0, "bad-value"), (-5, "bad-value"), (True, "bad-type"), ("30", "bad-type"),
+    (12.5, "bad-type"), (None, "bad-type"),
+])
+def test_a_bad_ring_limit_is_refused(mutate, value, code):
+    raw = mutate()
+    raw["call_types"][0]["no_answer_s"] = value
+    expect_defects(raw, codes=[code], path_contains="call_types[0].no_answer_s")
+
+
+def test_the_declared_ring_limit_reaches_the_model(mutate):
+    raw = mutate()
+    raw["call_types"][0]["no_answer_s"] = 75
+    prof = build(raw, "test-hash")
+    assert prof.call_types[0].no_answer_s == 75
+
+
+@pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
+def test_every_in_tree_call_type_declares_a_ring_limit(name):
+    loaded = loader.load(PROFILES / name)
+    assert all(isinstance(ct.no_answer_s, int) and ct.no_answer_s >= 1
+               for ct in loaded.profile.call_types)

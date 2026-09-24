@@ -804,3 +804,23 @@ def test_timer_b_on_a_ringing_invite_asks_for_a_cancel_instead_of_ending():
     assert txns.tick() == [] and not ringing.done
     now[0] = 64_000
     assert txns.tick() == [ringing] and ringing.done
+
+
+def test_the_ring_limit_replaces_timer_b_once_the_invite_is_proceeding():
+    from core.sip import Headers, Request
+    from service.sip_txn import ClientTransactions
+    now = [0]
+    txns = ClientTransactions(lambda: now[0], t1=500)
+    req = Request("INVITE", "sip:b@x", Headers([
+        ("Via", "SIP/2.0/TLS x;branch=z9hG4bKra"), ("CSeq", "1 INVITE")]))
+    t = txns.start(req, None, answer_by=90_000)
+    assert t.expires_at == 32_000                  # Timer B while 'Calling'
+    now[0] = 1_000
+    txns.proceed(t)
+    assert t.expires_at == 90_000
+    txns.proceed(t)                                # a second 1xx changes nothing
+    assert t.expires_at == 90_000
+    now[0] = 89_999
+    assert txns.tick() == []
+    now[0] = 90_000
+    assert txns.tick() == [t] and t.cancelled and not t.done

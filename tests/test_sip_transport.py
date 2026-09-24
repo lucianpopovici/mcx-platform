@@ -1463,3 +1463,55 @@ def test_a_cancelled_leg_that_rings_again_stays_out_of_the_call(core, rt, world,
     core.on_bytes(answer(reqs[U[2]], 180, tag="r2"), world[U[2]])
     leg = [l for l in core.calls["cr1"].legs.values() if l.uri == U[2]][0]
     assert leg.state == "failed" and len(world[U[2]].requests("CANCEL")) == 1
+
+
+# -- the ring limit is the call type's (SIP-OP-15, PLT-ICD-001 2.7) ------------------
+
+
+def test_the_core_takes_each_call_types_ring_limit_from_the_profile(core, rt):
+    assert core._no_answer_s == {ct.id: ct.no_answer_s
+                                 for ct in rt.loaded.profile.call_types}
+
+
+def _ringing_private_call(core, world, cid):
+    core.on_bytes(invite(cid, U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    return req
+
+
+def test_a_short_ring_limit_cancels_early(core, world, clock):
+    core._no_answer_s["private"] = 5
+    _ringing_private_call(core, world, "nl1")
+    clock.now += 4999
+    core.tick()
+    assert world[U[1]].requests("CANCEL") == []
+    clock.now += 1
+    core.tick()
+    assert len(world[U[1]].requests("CANCEL")) == 1
+    assert world[U[0]].codes()[-1] == 480
+
+
+def test_a_long_ring_limit_outlasts_timer_b(core, rt, world, clock):
+    """In 'Proceeding' Timer B does not run (RFC 3261 17.1.1.2), so a call
+    type may let members ring longer than 64*T1."""
+    core._no_answer_s["private"] = 60
+    _ringing_private_call(core, world, "nl2")
+    clock.now += 59_999
+    core.tick()
+    assert world[U[1]].requests("CANCEL") == []
+    assert rt.store.has_session("nl2")
+    clock.now += 1
+    core.tick()
+    assert len(world[U[1]].requests("CANCEL")) == 1
+
+
+def test_a_member_that_never_rings_still_meets_timer_b(core, world, clock):
+    """In 'Calling' (no provisional) Timer B still ends the INVITE at 64*T1,
+    however long the call type lets members ring."""
+    core._no_answer_s["private"] = 60
+    core.on_bytes(invite("nl3", U[0], U[1], "private"), world[U[0]])
+    clock.now += 64 * 500
+    core.tick()
+    assert world[U[0]].codes() == [100, 480]
+    assert world[U[1]].requests("CANCEL") == []

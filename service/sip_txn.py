@@ -179,6 +179,10 @@ class ClientTxn:
     # the final response it provokes (9.1, last paragraph).
     proceeding: bool = False
     cancelled: bool = False
+    # The call type's no-answer limit (profile `no_answer_s`), as an
+    # absolute time: the deadline once the INVITE is 'Proceeding', where
+    # Timer B no longer runs (17.1.1.2). None: Timer B's deadline stays.
+    answer_by: Optional[int] = None
 
 
 class ClientTransactions:
@@ -189,11 +193,12 @@ class ClientTransactions:
     def __len__(self) -> int:
         return len(self._txns)
 
-    def start(self, request: Request, flow: Any, user: Any = None) -> ClientTxn:
+    def start(self, request: Request, flow: Any, user: Any = None,
+              answer_by: Optional[int] = None) -> ClientTxn:
         txn = ClientTxn(branch=top_branch(request.headers), method=request.method,
                         request_text=request.render(), flow=flow,
                         expires_at=self._now() + 64 * self._t1, user=user,
-                        request=request)
+                        request=request, answer_by=answer_by)
         self._txns[(txn.branch, txn.method)] = txn
         return txn
 
@@ -207,7 +212,12 @@ class ClientTransactions:
         txn.expires_at = self._now() + 64 * self._t1
 
     def proceed(self, txn: ClientTxn) -> None:
+        """The first provisional: Timer B stops (17.1.1.2) and the
+        no-answer limit, if one was given, becomes the deadline. The limit
+        is absolute, so a further provisional changes nothing."""
         txn.proceeding = True
+        if txn.answer_by is not None and not txn.cancelled:
+            txn.expires_at = txn.answer_by
 
     def cancelling(self, txn: ClientTxn) -> None:
         """A CANCEL was sent for this INVITE: wait 64*T1 for the 487 (or a
@@ -229,7 +239,7 @@ class ClientTransactions:
 
         An INVITE that is ringing ('Proceeding') is not ended here. RFC 3261
         17.1.1.2 runs Timer B in 'Calling' only; in 'Proceeding' the deadline
-        is the core's own no-answer limit (PLT-VP-R1 SIP-OP-15), and what
+        is the call type's no-answer limit (PLT-VP-R1 SIP-OP-15), and what
         the core owes a ringing callee is a CANCEL, whose 487 -- or a 2xx
         that crossed it -- must still find this transaction to be ACKed. It
         is returned with `cancelled` set and `done` unset, and lives 64*T1

@@ -52,6 +52,7 @@ call_types:
     # communication for emergency group call". Ad hoc group calls exist
     # from Rel-18; emergency is <adhoc-emergency-ind> (TS 24.379 6.2.8.1.21).
     mc_signature: {session_type: adhoc, emergency: true}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: broadcast
     urgency: railway-emergency
@@ -72,6 +73,7 @@ call_types:
     # SRS 21.4.4 lists only ad hoc group procedures (communication and
     # emergency alert); no prearranged group call occurs anywhere in the SRS. Shunting itself is not covered by the SRS (SHUNT-OP-01).
     mc_signature: {session_type: adhoc}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: on-demand
     urgency: operational
@@ -92,6 +94,7 @@ call_types:
     label: Driver to controller call
     # SRS 21.4.4: private call.
     mc_signature: {session_type: private}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: on-demand
     urgency: operational
@@ -112,6 +115,7 @@ call_types:
     label: ETCS data session
     # MCData IP connectivity (SRS 21.4.4), not an MCPTT session.
     mc_signature: null
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [data]
     session_model: pre-established
     urgency: operational

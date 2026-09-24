@@ -376,11 +376,12 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
         if not c.keys(p, item, allowed=(
                 "id", "label", "media", "session_model", "urgency", "application",
                 "auto_answer", "acknowledgement_required", "recording_required",
-                "max_participants", "initiator_roles", "floor", "mc_signature"),
+                "max_participants", "initiator_roles", "floor", "mc_signature",
+                "no_answer_s"),
                 required=("id", "label", "media", "session_model", "urgency",
                           "auto_answer", "acknowledgement_required",
                           "recording_required", "initiator_roles", "floor",
-                          "mc_signature")):
+                          "mc_signature", "no_answer_s")):
             continue
         ident = c.typed(p, item, "id", str, "")
         if ident in seen:
@@ -422,6 +423,16 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                       "must be at least 1; use null for unlimited")
                 maxp = None
 
+        # PLT-ICD-001 2.7: required, a whole number of seconds, at least 1.
+        # No upper bound: how long a member may ring is the service's call.
+        no_answer = item.get("no_answer_s")
+        if isinstance(no_answer, bool) or not isinstance(no_answer, int):
+            if "no_answer_s" in item:
+                c.add(f"{p}.no_answer_s", "bad-type", "expected an integer (seconds)")
+            no_answer = 0
+        elif no_answer < 1:
+            c.add(f"{p}.no_answer_s", "bad-value", "must be at least 1 second")
+
         out.append(model.CallType(
             id=ident,
             label=c.typed(p, item, "label", str, "") or "",
@@ -439,6 +450,7 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
             initiator_roles=tuple(parsed_roles),
             floor=_floor(c, f"{p}.floor", item.get("floor")),
             mc_signature=_mc_signature(c, f"{p}.mc_signature", item.get("mc_signature")),
+            no_answer_s=no_answer,
         ))
 
     # A signature must name at most one call type, or the core would have to

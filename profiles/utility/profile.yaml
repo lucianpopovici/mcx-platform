@@ -35,6 +35,7 @@ call_types:
     label: Field crew call
     # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
     mc_signature: {session_type: prearranged}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: on-demand
     urgency: routine
@@ -58,6 +59,7 @@ call_types:
     # how to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
     # request it.
     mc_signature: null
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: on-demand
     urgency: safety-critical
@@ -78,6 +80,7 @@ call_types:
     label: Grid telemetry session
     # MCData, not an MCPTT session.
     mc_signature: null
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [data]
     session_model: pre-established
     urgency: fault

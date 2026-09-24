@@ -220,6 +220,9 @@ class SipCore:
         self.media = media
         self._codecs = {c.payload_type: c.name
                         for c in runtime.loaded.profile.media.codecs}
+        # How long an invited member may ring, per call type (SIP-OP-15).
+        self._no_answer_s = {ct.id: ct.no_answer_s
+                             for ct in runtime.loaded.profile.call_types}
         self.local_uri = local_uri
         self.clock = clock
         self.adapter = Adapter(local_uri, runtime.config.release,
@@ -478,7 +481,10 @@ class SipCore:
         leg.invite_cseq = leg.cseq = ctx.cseq
         req = self.adapter.render(sig, ctx, call.sr)
         req = self._with_branch(req)
-        leg.txn = self.client.start(req, flow, user=leg)
+        secs = self._no_answer_s.get(call.sr.call_type)
+        leg.txn = self.client.start(
+            req, flow, user=leg,
+            answer_by=self.clock() + secs * 1000 if secs else None)
         call.legs[leg.call_id] = leg
         self._dialogs[leg.call_id] = call
         flow.send(req.render())
