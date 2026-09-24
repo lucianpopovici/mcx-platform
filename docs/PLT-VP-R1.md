@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.5 (draft)
+**Version:** 0.6 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -203,6 +203,26 @@ suite depends on that: VP1-FC-010..014 run in ENV-UNIT.
 | VP1-FC-014 | Deny when queueing disabled | Request while floor held, queueing disabled | Deny returned; no queue entry created |
 | VP1-FC-020 | Timers taken from profile | Load two profiles differing only in floor timer values | Observed timing follows each profile; transition sequence identical in both |
 | VP1-FC-021 | Transitions recorded | Complete a call with contention | Every transition recorded with trigger, timestamp and resulting state; sequence reconstructible from the audit trail alone |
+
+#### 6.1 VP1-FC-002 — PASSED 2026-09-24
+
+VP-OP-02 (decided 2026-09-21, confirmed 2026-09-24) accepts
+specification-derived flows in place of third-party captures. On that basis
+the evidence is:
+
+- every field id, field length and message subtype read from TS 24.380
+  across all eight releases, nine of them corrected (PLT-CONF-AUDIT CA-03,
+  CA-11)
+- the comparator's per-message shapes rebuilt from the TS 24.380 message
+  content tables, which also found a sender defect (CA-13)
+- `tests/test_media_e2e.py::test_full_call_trace_has_no_deviation`: a group
+  call with contention, floor control over real UDP sockets, and every
+  captured datagram decoded by `tools/trace_compare.py`, with no deviation.
+  The comparator imports nothing from `core/rtcp.py`, and
+  `tests/test_media.py` pins that.
+
+What this does not show, and was accepted by that decision: that another
+implementation's encoder produces bytes this decoder accepts.
 
 ---
 
@@ -494,7 +514,7 @@ not by relaxing its pass criterion.
 | DATA-OP-01 | **From PLT-CONF-AUDIT v1.0 (4.25).** TS 24.282 defines MCData as three services, each with its own feature tag and ICSI (`.sds`, `.fd`, `.ipconn`), and TS 24.481 clause 7.2.8 requires a group document's "enabler" to name one of them. The platform can only announce data calls generically, because a call type cannot say which MCData service it is. A profile schema key and an ICD revision. | PLT-SIG completeness |
 | BER-OP-02 | **From PLT-CONF-AUDIT v1.0 (4.23).** No profile requests 5QI 69, and the platform has no signalling-bearer concept: bearer decisions cover voice and data user-plane media only. TS 23.280 clause 5 calls for QCI 69 on SIP-1. Whether the platform should request a signalling bearer at all is an open design question, not a defect. | PLT-BER completeness |
 | FC-OP-06 | **From PLT-CONF-AUDIT v0.7 (4.19).** The platform never sends a Floor Indicator field, whose bitmap (TS 24.380 table 8.2.3.15-2) carries "Emergency call", "Imminent peril call", "Broadcast group call" and "Queueing supported". The specification does not require the field, so this is conformant — but a platform whose purpose is priority and emergency handling signals none of it in the floor layer. A receiving client cannot tell an emergency floor grant from a routine one. | PLT-FC completeness |
-| FC-OP-05 | **From PLT-CONF-AUDIT v0.7 (4.19).** The Message Sequence Number counter is per endpoint. Clause 8.2.3.10 says the field binds "a number of Floor Taken" messages together, which may mean one value shared across the set sent for a single floor event rather than a per-receiver counter. No receiver can observe the difference, so it is recorded rather than guessed at. | VP1-FC-002 |
+| FC-OP-05 | **From PLT-CONF-AUDIT v0.7 (4.19).** The Message Sequence Number counter is per endpoint. Clause 8.2.3.10 says the field binds "a number of Floor Taken" messages together, which may mean one value shared across the set sent for a single floor event rather than a per-receiver counter. No receiver can observe the difference, so it is recorded rather than guessed at. It does not block VP1-FC-002: under either reading every message is well-formed and every receiver sees the same thing. | none (recorded ambiguity) |
 | FC-OP-04 | **CLOSED in PLT-CONF-AUDIT v0.7 (4.16-4.18).** `SHAPE` is rewritten from the message content tables, and the investigation found a platform defect behind the tool defect: the Message Sequence Number was being sent on four messages that do not define it, and the comparator required it there. Originally recorded as: **From PLT-CONF-AUDIT v0.6 (CA-13).** `SHAPE` in `tools/trace_compare.py` has never been checked against the message content tables (TS 24.380 clauses 8.2.4-8.2.17) and is demonstrably incomplete: table 8.2.9-1 permits a Floor Taken to carry Floor Indicator, Audio SSRC, Functional Alias, List of Granted Users, Location and List of Locations, none of which `SHAPE` listed. The comparator therefore reports conformant traffic as deviating, so a clean run is weaker evidence than it appears. Fields this platform can encode have been added; the rest need the full extraction. | VP1-FC-002 (the only remaining blocker) |
 | REL-OP-01 | **CLOSED in PLT-CONF-AUDIT v0.8 (4.20).** TS 24.379 was read across all seven published releases. Warning code 179 is Rel-17+ and was being emitted at older releases; the adapter now drops the number and keeps the phrase. Every other signalling constant the platform emits is stable from Rel-13, so release selection covers both layers. Originally recorded as: **From PLT-CONF-AUDIT v0.5 (CA-12).** Release selection covers the TS 24.380 floor control layer only, because that is where release dependence has been established from the specifications. TS 24.379 has **not** been examined for it at all — feature tags, header constructions, warning codes and MIME types may each have release boundaries, and the warning-code table demonstrably grew between Rel-17 and Rel-20 (18 new codes). A deployment configured `MCX_RELEASE=17` is therefore Rel-17 on the media plane and unexamined on the signalling plane. This must be stated to anyone relying on the parameter for interoperability. | PLT-REL-009, VP1-SIG-001 |
 | SIP-OP-08 | **From PLT-CONF-AUDIT v0.3 (4.8).** TS 24.379 spells the automatic Answer-Mode value `"Auto"` in clause 11.1.1.2.1.1 and `"Automatic"` in clause 11.1.1.2.2.1 (pre-established session), in Rel-17 and Rel-20 alike. A conformant receiver must accept both. This platform emits `"Auto"` and does not implement pre-established sessions, so nothing is wrong today; the parser needs to tolerate both before that path is built. | PLT-SIG-003 |
@@ -506,7 +526,7 @@ not by relaxing its pass criterion.
 | FC-OP-08 | **Open, low consequence.** The trace comparator treats a Floor Revoke sent to the holder as ending the holder's permission, because T3 expiry is invisible on the wire. A server granting someone else during the grace would therefore not be flagged, and a trace without timestamps cannot tell that from audio cut-in (T3 = 0). Tightening it needs timestamps in the trace, or a check that each hand-over tells the old holder who holds the floor now (6.3.5.5.9, 6.3.5.6.7). | VP1-FC-002 evidence strength |
 | FC-OP-09 | **Open, not implemented.** 'U: not permitted but sends media' (6.3.5.7): a talker still sending after the grace is dropped silently, where the specification re-revokes it with cause #3. Audio cut-in (T3 = 0, 6.3.4.5.1) and floor-control-server-initiated revoke from another client (6.3.4.4.16, Rel-19+) are also absent. | PLT-FC completeness |
 | FC-OP-10 | **Open, for 3GPP CT1.** Two inconsistencies in TS 24.380: 6.3.4.4.16 (Rel-19, Rel-20) revokes with "#8 Revoked by another MCPTT client", which table 8.2.10.2 lists as #7, with no #8; and 6.3.4.3.2's opening condition ("if no MCPTT client negotiated support of queueing") makes its own item 3, grant from the queue, unreachable when read literally. The platform follows the cause table and the evident intent. | none (recorded) |
-| FC-OP-03 | **NARROWED in PLT-CONF-AUDIT v1.8.** The claim that these are "reconstructed from memory, not checked against TS 24.380" has been false since v0.6: the subtypes, field ids, field lengths, reject causes and timer defaults were all read from TS 24.380 across all eight published releases (CA-03, CA-05, CA-11, CA-13), and nine of them were wrong and were corrected. What remains unverified is narrower and unchanged by that work: **no third-party capture has ever been decoded.** The byte-level layout is self-consistent — `core/rtcp.py` and `tools/trace_compare.py` agree — and both now agree with the specification's field tables, but agreement with a table is not the same as interoperating with another implementation's encoder. VP1-FC-002 stays OPEN on that, and on that alone. (This entry used to say VP-OP-02 was "still undecided". It was decided on 2026-09-21: specification-derived flows accepted in place of golden captures. Whether that decision closes VP1-FC-002 has not been recorded, and it is the owner's call.) |
+| FC-OP-03 | **CLOSED 2026-09-24.** The constants were read from TS 24.380 across all eight releases and corrected (CA-03, CA-05, CA-11, CA-13). The remaining gap, that no third-party capture has been decoded, is accepted by VP-OP-02: specification-derived flows in place of golden captures, decided 2026-09-21 and confirmed 2026-09-24. VP1-FC-002 passes (§6.1). The floor-timer behaviour this row used to defer to VP1-FC-010/020 (FC-OP-01/02) was fixed separately and is CLOSED (PLT-CONF-AUDIT CA-21, 4.37). | closed |
 | FC-OP-04 | Floor control is carried on a separate `m=application <port> udp MCPTT` stream, one UDP port per participant, not multiplexed with voice RTCP. The SDP attributes for that stream, and the ack-required indication in the subtype, are not implemented and unverified. | VP1-FC-001/002 |
 | FC-OP-05 | IF-PRI has no participant-specific input: a participant's floor priority is obtained by calling `evaluate` again with that participant as initiator. With the in-tree tables every participant of a session therefore has the same floor priority, so priority ordering is only exercised with an injected priority source. | PLT-FC-005 |
 | MED-OP-01 | The `media.codecs` section is new in the profile schema (PLT-MED-001) and its values (AMR-WB 97, PCMU 0) are PLACEHOLDERS: the codec set per profile is still OP-06 / VP-OP-03. Enforcement is real; the pass criterion for VP1-MED-001 is not settled. The ICD is not affected (no hook changed) but every in-tree profile changed. | VP1-MED-001 |
@@ -529,6 +549,7 @@ not by relaxing its pass criterion.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
+| 0.6 | 2026-09-24 | VP-OP-02 confirmed: VP1-FC-002 passes on specification-derived evidence (§6.1), and FC-OP-03 is closed. FC-OP-01 and FC-OP-02 are re-filed against the behaviour cases (VP1-FC-010, VP1-FC-020), with their stale "TS 24.380 not available" reasons corrected. FC-OP-05 is marked non-blocking. |
 | 0.5 | 2026-09-24 | VP-OP-01 decided: a B2BUA counts, so VP1-SIG-001 passes against Kamailio and Asterisk, with SIP-OP-12 and SIP-OP-02 carried alongside the verdict. SIP-OP-10 decided: keep 503. Corrected this plan's earlier claim that the 503-to-500 rewrite defeats PLT-PRI-008; it does not. FC-OP-03 no longer calls VP-OP-02 undecided. |
 | 0.4 | 2026-09-24 | REL-OP-02 closed by decision: `MCX_STRICT_RELEASE` (true refuses, false warns), required with no default. |
 | 0.3 | 2026-09-24 | §7.1.1 corrected. The first runs' MC body was the platform's own invented format, copied into the user agent; after PLT-CONF-AUDIT CA-20a the agent writes annex F.1 bodies and Kamailio passes an added body check. SIP-OP-11 split into 20a (closed) and 20b (open) with corrected clauses; SIP-OP-12 widened to both directions. PRF-OP-01, REL-OP-02 and ADHOC-OP-01 opened. |

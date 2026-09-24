@@ -206,14 +206,11 @@ reasons are specific, not general:
   (B2BUA; counting a B2BUA was decided in VP-OP-01). Two caveats go with it:
   through a B2BUA, originating calls fail and terminating calls lose their MC
   body (SIP-OP-12), and the keylog-decrypted capture is still owed (SIP-OP-02).
-- **VP1-FC-002** cannot close: no third-party capture has ever been decoded
-  (FC-OP-03, narrowed 2026-09-22). The constants themselves have been read from
-  TS 24.380 across all eight releases and corrected; what is missing is any
-  evidence that another implementation's encoder agrees with this one. The
-  comparator shares this repository's assumptions, so it cannot supply it.
+- **VP1-FC-002** PASSED on 2026-09-24 on specification-derived evidence, which
+  VP-OP-02 accepts in place of third-party captures (PLT-VP-R1 §6.1, FC-OP-03).
   The floor-timer questions FC-OP-01/02 were a separate, narrower gap and were
-  CLOSED on 2026-09-24 (PLT-CONF-AUDIT CA-21): T1/T2/T3/T8/T20 and C20 now do
-  what TS 24.380 6.3.4 says, driven by `MEDIA_RECEIVED` from the media plane.
+  also CLOSED on 2026-09-24 (PLT-CONF-AUDIT CA-21): T1/T2/T3/T8/T20 and C20 now
+  do what TS 24.380 6.3.4 says, driven by `MEDIA_RECEIVED` from the media plane.
   The profiles' timer values were written for the old behaviour and are the
   owner's call (PRF-OP-02).
 - **VP1-DOC-001**'s "schema-valid" clause: CLOSED (SVC-OP-01, 2026-09-22).
