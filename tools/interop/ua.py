@@ -24,6 +24,23 @@ import uuid
 from typing import List, Optional
 
 ICSI = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt"
+MCINFO = "application/vnd.3gpp.mcptt-info+xml"
+
+
+def body_part(msg: str, content_type: str) -> Optional[str]:
+    """One part of a message's multipart body, by content type."""
+    ctype = header(msg, "Content-Type") or ""
+    m = re.search(r'boundary="?([^";]+)"?', ctype)
+    body = msg.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in msg else ""
+    if not m:
+        return body if ctype.split(";")[0].strip() == content_type else None
+    for chunk in body.split("--" + m.group(1))[1:]:
+        if chunk.startswith("--"):
+            break
+        head, _, content = chunk.lstrip("\r\n").partition("\r\n\r\n")
+        if re.search(rf"(?im)^Content-Type:\s*{re.escape(content_type)}\s*$", head):
+            return content
+    return None
 
 
 def header(msg: str, name: str) -> Optional[str]:
@@ -178,12 +195,33 @@ class UA:
         ])
         return self.wait(r"^SIP/2\.0 [2-6]\d\d", call_id=cid)
 
-    def invite(self, ruri: str, call_type: str, target: Optional[str],
-               media_port: int) -> dict:
+    def invite(self, ruri: str, session_type: str, target: Optional[str],
+               media_port: int, emergency: bool = False) -> dict:
+        """A conformant INVITE (TS 24.379 10.1.1.2.1.1 / 11.1.1.2.1.1): the
+        Request-URI is the participating function's identity, and what is
+        wanted is in an application/vnd.3gpp.mcptt-info+xml part of a
+        multipart/mixed body, written here from annex F.1 as plain text.
+
+        The first version of this agent sent <mcptt-call_type> appended to
+        the SDP -- copied from the platform's own tests, not from the
+        specification, so on the one point that mattered most this agent was
+        not independent at all (PLT-CONF-AUDIT CA-20)."""
         cid = f"call-{uuid.uuid4().hex[:10]}"
-        mc = f"<mcptt-call_type>{call_type}</mcptt-call_type>"
+        params = f"<session-type>{session_type}</session-type>"
         if target:
-            mc += f"<mcptt-target>{target}</mcptt-target>"
+            params += (f'<mcptt-request-uri type="Normal"><mcpttURI>{target}'
+                       f"</mcpttURI></mcptt-request-uri>")
+        if emergency and session_type != "adhoc":
+            params += ('<emergency-ind type="Normal"><mcpttBoolean>true'
+                       "</mcpttBoolean></emergency-ind>")
+        if emergency and session_type == "adhoc":
+            params += "<anyExt><adhoc-emergency-ind>true</adhoc-emergency-ind></anyExt>"
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+               '<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">'
+               f"<mcptt-Params>{params}</mcptt-Params></mcpttinfo>")
+        boundary = "ua" + uuid.uuid4().hex[:12]
+        body = (f"--{boundary}\nContent-Type: application/sdp\n\n{self.sdp(media_port)}"
+                f"--{boundary}\nContent-Type: {MCINFO}\n\n{xml}\n--{boundary}--\n")
         sent = self.send([
             f"INVITE {ruri} SIP/2.0", self._via(),
             f"From: <{self.aor}>;tag={self.tag}", f"To: <{ruri}>",
@@ -191,8 +229,8 @@ class UA:
             f"Contact: {self.contact}", f"P-Asserted-Identity: <{self.aor}>",
             "Accept-Contact: *;+g.3gpp.mcptt;require;explicit",
             f'Accept-Contact: *;+g.3gpp.icsi-ref="{ICSI}";require;explicit',
-            "Content-Type: multipart/mixed;boundary=b",
-        ], self.sdp(media_port) + mc)
+            f"Content-Type: multipart/mixed;boundary={boundary}",
+        ], body)
         return {"call_id": cid, "ruri": ruri, "request": sent}
 
     # -- dialogs ------------------------------------------------------------------

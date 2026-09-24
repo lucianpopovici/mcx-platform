@@ -752,3 +752,38 @@ def test_arp_outside_1_to_15_is_refused(mutate, arp):
     raw = mutate()
     raw["bearer"]["rules"][0]["decision"]["arp_level"] = arp
     expect_defects(raw, path_contains="arp_level")
+
+
+# --------------------------------------------------------------------------
+# mc_signature (PLT-ICD-001 2.6, PLT-CONF-AUDIT CA-20)
+# --------------------------------------------------------------------------
+
+
+def test_every_call_type_must_state_its_mcptt_signature(mutate):
+    """Required, and null is an answer. An absent key would let a profile say
+    nothing about whether a native client can request a call type."""
+    raw = mutate()
+    del raw["call_types"][0]["mc_signature"]
+    expect_defects(raw, path_contains="call_types[0]")
+
+
+def test_two_call_types_may_not_claim_one_signature(mutate):
+    """The core would have to guess which one a client meant."""
+    raw = mutate()
+    sigs = [c["mc_signature"] for c in raw["call_types"]]
+    first = next(i for i, s in enumerate(sigs) if s)
+    other = next(i for i, s in enumerate(sigs) if i != first)
+    raw["call_types"][other]["mc_signature"] = dict(sigs[first])
+    expect_defects(raw, codes=["ambiguous-signature"], path_contains="call_types")
+
+
+@pytest.mark.parametrize("sig, path", [
+    ({"session_type": "conference"}, "session_type"),        # not a TS 24.379 value
+    ({"emergency": True}, "mc_signature"),                   # session_type missing
+    ({"session_type": "private", "emergency": "yes"}, "emergency"),
+    ({"session_type": "private", "priority": 1}, "mc_signature"),
+])
+def test_a_malformed_signature_is_refused(mutate, sig, path):
+    raw = mutate()
+    raw["call_types"][0]["mc_signature"] = sig
+    expect_defects(raw, path_contains=path)

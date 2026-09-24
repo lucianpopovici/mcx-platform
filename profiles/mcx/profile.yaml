@@ -30,6 +30,8 @@ applications:
 call_types:
   - id: private
     label: Private call
+    # TS 24.379 11.1.1.2.1.1: <session-type> private.
+    mc_signature: {session_type: private}
     media: [voice]
     session_model: on-demand
     urgency: normal
@@ -47,6 +49,8 @@ call_types:
 
   - id: prearranged-group
     label: Prearranged group call
+    # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
+    mc_signature: {session_type: prearranged}
     media: [voice]
     session_model: on-demand
     urgency: normal
@@ -64,6 +68,8 @@ call_types:
 
   - id: emergency-group
     label: Emergency group call
+    # TS 24.379 6.2.8.1.1 item 1: prearranged, with <emergency-ind> true.
+    mc_signature: {session_type: prearranged, emergency: true}
     media: [voice]
     session_model: on-demand
     urgency: emergency
@@ -81,6 +87,8 @@ call_types:
 
   - id: imminent-peril-group
     label: Imminent peril group call
+    # TS 24.379 6.2.8.1.9: prearranged, with <imminentperil-ind> true.
+    mc_signature: {session_type: prearranged, imminent_peril: true}
     media: [voice]
     session_model: on-demand
     urgency: imminent-peril
@@ -98,6 +106,8 @@ call_types:
 
   - id: sds
     label: Short data service
+    # MCData (TS 24.282), not an MCPTT session: no MCPTT signature.
+    mc_signature: null
     media: [data]
     session_model: on-demand
     urgency: normal
@@ -114,6 +124,12 @@ call_types:
 
   - id: coordination-group
     label: Multi-agency coordination call
+    # TS 24.379 cannot tell this apart from prearranged-group: both are
+    # prearranged voice group calls, and 'coordination' is an application
+    # the MCPTT info body has no element for. Until the profile decides how
+    # to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
+    # request it.
+    mc_signature: null
     media: [voice]
     session_model: on-demand
     urgency: elevated

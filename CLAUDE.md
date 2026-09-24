@@ -11,7 +11,7 @@ public-safety deployment or a railway FRMCS deployment, from one codebase and on
 image, with the profile chosen at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 592 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 615 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -40,7 +40,7 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (565+ tests)
+python3 -m pytest tests/ -q                   # must stay green (600+ tests)
 python3 tools/check_boundary.py --root .      # must stay 20/20
 # run it -- every one of these is required and none has a default
 MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
@@ -70,6 +70,7 @@ core/session.py     the establishment sequence (PLT-ICD-001 §8.1)
 core/qos.py         TS 23.501 standardised 5QI table; 3GPP, never profile
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
+core/mcinfo.py      TS 24.379 annex F.1 MCPTT info body and multipart; no call types
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
 service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only SIP socket)
 service/media.py    RTP relay gated by the floor + floor control over UDP; MediaSession is pure, UdpMediaPlane owns the sockets
@@ -135,9 +136,25 @@ deployed process does, run `tools/interop/run.py`. And if you add a
 capability to `Platform`, add the environment variable that lets the process
 state it.
 
-**`service/` has not been through the conformance audit.** `core/` was read
-clause by clause; `service/sip_core.py` builds its own messages and was not
-(PLT-CONF-AUDIT CA-20).
+**The audit read constants, not the code around them.** Every declared
+protocol constant in `core/` was checked. The string literals inside the
+message builders and parsers were not, and that is where the worst defect was:
+the platform read and wrote an MCPTT info body in a format that does not exist
+(PLT-CONF-AUDIT CA-20). `service/sip_core.py` has had only the parts a finding
+led to. Treat any message-building code you touch as unaudited.
+
+**Write message bodies from the schema, never from this repository.**
+`docs/3GPP/schemas/` holds the annex F.1 schema extracted verbatim
+(`tools/spec/extract_xsd.py`), and `tests/test_mcinfo.py` validates against
+it. Test fixtures (`tests/mcpttinfo_fixture.py`) and the interop user agent
+spell the body out literally from the specification. The interop agent once
+copied its body from the platform's tests, and so shared the platform's
+invention on the one point that mattered most.
+
+**A native MCPTT request becomes a call type only through a declared
+signature** (`mc_signature` on each call type, PLT-ICD-001 §2.6). Nothing is
+read from the request that TS 24.379 does not define; `application` and
+`urgency` come from the call type's declaration.
 
 **Before you add or change a protocol constant**, read it from the documents in
 `docs/3GPP/` — the `.docx` originals, not the PDFs. Automated extraction of a
@@ -151,7 +168,11 @@ caught only by mutation testing (PLT-CONF-AUDIT 4.10).
 
 **There is no single release baseline any more, and that is deliberate.** The
 3GPP release is a deployment parameter (`MCX_RELEASE`), independent of the
-profile: any profile runs at any supported release. Release numbers live in
+profile. Any profile STARTS at any supported release, but not every call type
+exists at every release. The FRMCS profile's group calls are ad hoc, which
+TS 24.379 has only from Rel-18. Startup reports what a release cannot carry
+(REL-OP-02), and the conformance matrix being green does not mean every call
+type is reachable. Release numbers live in
 `core/release.py` and nowhere else — `VP1-BND-022` fails a build that compares
 a release to a literal anywhere else.
 

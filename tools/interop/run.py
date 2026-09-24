@@ -39,7 +39,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
 import pki  # noqa: E402
-from ua import UA, first_line, header, headers  # noqa: E402
+from ua import MCINFO, UA, body_part, first_line, header, headers  # noqa: E402
 
 DOMAIN = "mcptt.example"
 U1, U2 = f"sip:u1@{DOMAIN}", f"sip:u2@{DOMAIN}"
@@ -279,7 +279,7 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                      "tag=mcx-" in to, f"To: {to}")
 
     # 2. Group call: u1 originates, the platform invites u2 through the core.
-    inv = u1.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41000)
+    inv = u1.invite(AS_URI, "prearranged", "grp:alpha", media_port=41000)
     try:
         incoming = u2.wait(r"^INVITE ", timeout=10)
     except TimeoutError as exc:
@@ -293,6 +293,13 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                  and any("icsi-ref" in a and "3gpp-service.ims.icsi.mcptt" in a
                          for a in accept),
                  " | ".join(accept) or "(none)")
+    xml = body_part(incoming, MCINFO) or ""
+    report.check("INVITE to callee carries the MCPTT info body (TS 24.379 6.3.2.2.3 item 8)",
+                 "<session-type>prearranged</session-type>" in xml
+                 and "<mcpttURI>grp:alpha</mcpttURI>" in xml
+                 and f"<mcpttURI>{U1}</mcpttURI>" in xml,
+                 "session-type, calling group and calling user present" if xml else
+                 f"no {MCINFO} part; Content-Type {header(incoming, 'Content-Type')}")
     report.observe("INVITE to callee: Record-Route as received",
                    " | ".join(headers(incoming, "Record-Route")) or "(none)")
     report.observe("INVITE to callee: Contact", header(incoming, "Contact") or "(none)")
@@ -351,7 +358,7 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
         report.observe("callee receives the platform's BYE", "none within 5 s")
 
     # 4. A refusal, as it arrives through the core.
-    bad = u1.invite(AS_URI, "prearranged-group", "grp:nobody", media_port=41004)
+    bad = u1.invite(AS_URI, "prearranged", "grp:nobody", media_port=41004)
     try:
         r = u1.wait(r"^SIP/2\.0 [3-6]\d\d", timeout=10, call_id=bad["call_id"])
         report.observe("unknown group, through the core",
@@ -396,7 +403,7 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
     # -- terminating: platform -> B2BUA -> callee ---------------------------
     direct = UA(U1, "127.0.0.1", platform_port, ca); uas.append(direct)
     r = direct.register()          # u1's flow is now this direct connection
-    inv = direct.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41020)
+    inv = direct.invite(AS_URI, "prearranged", "grp:alpha", media_port=41020)
     try:
         incoming = u2.wait(r"^INVITE ", timeout=10)
     except TimeoutError as exc:
@@ -406,6 +413,9 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
     if incoming:
         report.check("terminating: the callee receives an INVITE through the B2BUA",
                      True, first_line(incoming))
+        report.observe("terminating: MCPTT info body after the B2BUA",
+                       "present" if body_part(incoming, MCINFO) else
+                       f"absent -- Content-Type {header(incoming, 'Content-Type')}")
         report.observe("terminating: INVITE as the B2BUA re-originated it",
                        f"Accept-Contact: {' | '.join(headers(incoming, 'Accept-Contact')) or '(none)'}; "
                        f"Contact: {header(incoming, 'Contact')}; "
@@ -447,7 +457,7 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
     time.sleep(1.5)
 
     # -- originating: UE -> B2BUA -> platform --------------------------------
-    orig = u1.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41030)
+    orig = u1.invite(AS_URI, "prearranged", "grp:alpha", media_port=41030)
     try:
         r = u1.wait(r"^SIP/2\.0 [2-6]\d\d", timeout=15, call_id=orig["call_id"],
                     method="INVITE")
@@ -480,7 +490,7 @@ def refusal_comparison(core: str, work: Path, core_port: int, platform_port: int
             a = UA(U1, "127.0.0.1", target_port, str(work / "pki")); uas.append(a)
             b = UA(U2, "127.0.0.1", target_port, str(work / "pki")); uas.append(b)
             a.register(); b.register()
-            i = a.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41010)
+            i = a.invite(AS_URI, "prearranged", "grp:alpha", media_port=41010)
             r = a.wait(r"^SIP/2\.0 [3-6]\d\d", timeout=10, call_id=i["call_id"])
             results[label] = f"{first_line(r)} / Warning: {header(r, 'Warning') or '(none)'}"
         for label, text in results.items():

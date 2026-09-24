@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.3 (draft)
-**Date:** 2026-09-19
+**Version:** 0.4 (draft)
+**Date:** 2026-09-24
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -93,6 +93,34 @@ be handled gracefully: the core fails the session and records the violation
 | ICD-GEN-040 | Every invocation shall be recorded with interface ID, session correlation ID, elapsed time and outcome (PLT-OAM-002). |
 | ICD-GEN-041 | Returned decisions shall be recorded in full. A decision absent from the audit trail cannot be relied on in a safety case. |
 | ICD-GEN-042 | Hooks shall not log. Observability is the core's responsibility, so that one correlation scheme covers all interfaces. |
+
+### 2.6 Call-type signatures (declared data, not a hook)
+
+A native MCPTT client does not name a profile call type. It sends a TS 24.379
+annex F.1 body: a `<session-type>` (`prearranged`, `chat`, `private`,
+`first-to-answer`, `ambient-listening`, `adhoc`) and indications
+(`<emergency-ind>`, `<imminentperil-ind>`, `<broadcast-ind>`, and from Rel-18
+`<adhoc-emergency-ind>` for ad hoc calls). Turning that into a call type is
+profile knowledge, so the profile declares it as data, and the core looks it
+up. Adopted 2026-09-24 (PLT-CONF-AUDIT CA-20) in place of a hook operation,
+because data can be checked at load time and code cannot.
+
+Each `call_types[]` entry carries a **required** `mc_signature`:
+
+```yaml
+mc_signature: {session_type: prearranged, emergency: true}   # or
+mc_signature: null     # no native MCPTT client can request this call type
+```
+
+| ID | Rule |
+|---|---|
+| ICD-SIG-001 | `mc_signature` is required on every call type. `null` states that the call type cannot be requested by a native MCPTT client. An absent key is a load error, so that no profile is silent on the question. |
+| ICD-SIG-002 | `session_type` is one of the six annex F.1 values; `emergency`, `imminent_peril` and `broadcast` are booleans defaulting to false. |
+| ICD-SIG-003 | No two call types in a profile may declare the same signature (`ambiguous-signature`). The core does not guess which one a client meant. |
+| ICD-SIG-004 | The core selects the call type whose signature equals the request's exactly, and only if the configured release has that session type (`core/release.py`). Otherwise `call_type` is `""` and IF-SES refuses. |
+| ICD-SIG-005 | The core renders the same signature into the INVITE it sends each invited member, together with `<mcptt-request-uri>`, `<mcptt-calling-user-id>` and `<mcptt-calling-group-id>` (TS 24.379 6.3.2.2.3 item 8, 10.1.1.4.1.1 item 4). |
+| ICD-SIG-006 | At startup the core reports call types declared `null` and call types whose signature the configured release cannot carry, in the log and in the health document. It does not refuse to start (REL-OP-02). |
+| ICD-SIG-007 | `SessionRequest.application` and `urgency` are never taken from a native request, because TS 24.379 has no element for either. They come from the call type's declaration. |
 
 ---
 
@@ -489,6 +517,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.4 | 2026-09-24 | §2.6 added: call-type signatures declared in the profile (ICD-SIG-001 to 007). Before this, the core read call type, target, application and urgency from `<mcptt-call_type>`, `<mcptt-target>`, `<mcptt-application>` and `<mcptt-urgency>`, elements that do not exist in TS 24.379 (PLT-CONF-AUDIT CA-20). All three in-tree profiles updated in the same change set. |
 | 0.3 | 2026-09-19 | Added IF-ICX (interconnection with partner MC systems) as a sixth hook, with `ResolutionKind.PARTNER`, `partner-unavailable` and `partner-not-permitted`. Scope mapping is label-keyed, ceiling-capped and default-deny; a partner never introduces a scope and is always locally pre-emptible. |
 | 0.2 | 2026-09-19 | §8.1 step 2 made conditional on `ResolutionKind.EXTERNAL`; step 8 branches between local fan-out and gateway routing; `EXTERNAL` added to §3.2 POST-1; `gateway-unavailable` added to §9; ICD-OP-06 and ICD-OP-07 opened. Fixes the defect that made IF-IWF unreachable. |
 | 0.1 | 2026-09-19 | Initial draft |

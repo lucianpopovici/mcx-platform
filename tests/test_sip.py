@@ -195,13 +195,31 @@ def test_auto_answer_renders_answer_mode():
     assert not manual.headers.has("Priv-Answer-Mode")
 
 
-def test_invite_asserts_the_initiator_identity():
-    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
+def test_invite_asserts_the_participating_function_not_the_caller():
+    """TS 24.379 6.3.2.2.6.2 item 7. This test used to assert the opposite --
+    that the INVITE carried the caller's identity -- and so pinned the defect
+    (PLT-CONF-AUDIT CA-20). The caller goes in <mcptt-calling-user-id>."""
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19,
+                      _declared(("x", ("private",))))
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="t", call_type="x", media=(MediaKind.VOICE,))
     msg = adapter.render(Signal(SignalType.INVITE, target="sip:u1@x"), ctx, req)
+    assert msg.headers.get("P-Asserted-Identity") == "<sip:server@mcptt.example>"
+    assert "<mcpttURI>sip:u0@mcptt.example</mcpttURI>" in msg.body
+
+
+def test_without_an_mcptt_body_the_caller_is_still_asserted():
+    """A gateway leg, or a call type declared with no signature, carries no
+    MCPTT info body, so P-Asserted-Identity is the only place the caller can
+    travel. The first CA-20 fix moved it for these too (found by review)."""
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
+    ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
+    req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
+                         target="t", call_type="undeclared", media=(MediaKind.VOICE,))
+    msg = adapter.render(Signal(SignalType.INVITE, target="sip:gw@x"), ctx, req)
     assert msg.headers.get("P-Asserted-Identity") == "<sip:u0@mcptt.example>"
+    assert msg.headers.get("Content-Type") == "application/sdp"
 
 
 # --------------------------------------------------------------------------
@@ -362,12 +380,43 @@ def test_parse_invite_builds_a_session_request():
     assert parsed.request_id == "c1"
 
 
-def test_parse_invite_reads_call_type_from_mc_info():
-    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
-    body = "<mcptt-call_type>prearranged-group</mcptt-call_type>"
-    msg = well_formed(body=body, content_type="multipart/mixed")
-    parsed = adapter.parse_invite(msg)
-    assert parsed.call_type == "prearranged-group"
+def _declared(*pairs):
+    """Call types as the adapter sees them: an id and a signature, nothing else."""
+    from types import SimpleNamespace
+    from core.mcinfo import Signature
+    return [SimpleNamespace(id=i, mc_signature=Signature(*sig)) for i, sig in pairs]
+
+
+def test_parse_invite_selects_the_call_type_declaring_the_signature():
+    """TS 24.379 annex F.1 body in, the declaring call type out (PLT-ICD-001 2.6).
+    The body is literal text, not rendered by the module under test."""
+    from tests import mcpttinfo_fixture as mcf
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19, _declared(
+        ("grp", ("prearranged",)), ("emg", ("prearranged", True)), ("p2p", ("private",))))
+    sdp = build_offer([AMR_WB])
+    for xml, want in (
+            (mcf.mcinfo_xml("prearranged", "sip:g@x"), "grp"),
+            (mcf.mcinfo_xml("prearranged", "sip:g@x", emergency=True), "emg"),
+            (mcf.mcinfo_xml("private", "sip:u9@x"), "p2p"),
+            (mcf.mcinfo_xml("chat", "sip:g@x"), ""),               # declared by nobody
+            (mcf.mcinfo_xml("prearranged", "sip:g@x", imminent_peril=True), "")):
+        parsed = adapter.parse_invite(well_formed(body=mcf.multipart(sdp, xml),
+                                                  content_type=mcf.CONTENT_TYPE))
+        assert parsed.call_type == want, xml
+    assert parsed.target == "sip:g@x"      # from <mcptt-request-uri>, not the R-URI
+
+
+def test_ad_hoc_does_not_exist_before_rel_18():
+    """An ad hoc request at Rel-17 selects nothing, even where a call type
+    declares it: TS 24.379 has no ad hoc group call before Rel-18."""
+    from tests import mcpttinfo_fixture as mcf
+    body = mcf.multipart(build_offer([AMR_WB]),
+                         mcf.mcinfo_xml("adhoc", "sip:g@x", adhoc_emergency=True))
+    for release, want in ((Release.REL_17, ""), (Release.REL_18, "rec")):
+        adapter = Adapter("sip:server@mcptt.example", release,
+                          _declared(("rec", ("adhoc", True))))
+        parsed = adapter.parse_invite(well_formed(body=body, content_type=mcf.CONTENT_TYPE))
+        assert parsed.call_type == want, release
 
 
 def test_parse_invite_leaves_unknown_call_type_empty_for_policy_to_refuse():

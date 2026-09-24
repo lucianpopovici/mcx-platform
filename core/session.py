@@ -321,6 +321,8 @@ class SessionManager:
                 if member == request.initiator:
                     continue
                 signals.append(Signal(SignalType.INVITE, target=member, detail={
+                    # For <mcptt-calling-group-id> (TS 24.379 10.1.1.4.1.1 item 4b).
+                    "group_id": resolution.group_id,
                     "auto_answer": decision.auto_answer,
                     "acknowledgement_required":
                         decision.acknowledgement_required}))

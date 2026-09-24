@@ -30,6 +30,7 @@ from profiles.common.tables import BackingStoreUnavailable, ResolutionFailure  #
 from service.config import SipConfig  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
 from service.sip_core import SipCore, dialog_target  # noqa: E402
+from tests import mcpttinfo_fixture as mcf  # noqa: E402
 from service.sip_tls import TlsListener  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
@@ -201,14 +202,16 @@ def register(core, uri, flow, n=1, expires=3600):
                       extra=[f"Contact: <{uri}>;expires={expires}"]), flow)
 
 
-def mc_body(call_type, target=None):
-    t = f"<mcptt-target>{target}</mcptt-target>" if target else ""
-    return SDP + f"<mcptt-call_type>{call_type}</mcptt-call_type>{t}"
-
-
 def invite(call_id, frm, to, call_type, **kw):
-    return msg("INVITE", to, call_id, 1, frm, to, body=mc_body(call_type),
-               ctype="multipart/mixed;boundary=b", **kw)
+    """A conformant client's INVITE (TS 24.379 10.1.1.2.1.1, 11.1.1.2.1.1):
+    addressed to the participating function's own identity, with the target
+    in <mcptt-request-uri> of a real multipart body. `to` is that target.
+
+    This used to append <mcptt-call_type> to the SDP under a multipart
+    Content-Type with no boundary lines -- a format of the platform's own
+    invention that no client produces (PLT-CONF-AUDIT CA-20)."""
+    return msg("INVITE", LOCAL, call_id, 1, frm, LOCAL,
+               body=mcf.body_for(call_type, to, SDP), ctype=mcf.CONTENT_TYPE, **kw)
 
 
 def answer(req: Request, code=200, body="", tag="callee", extra=()):
@@ -404,7 +407,83 @@ def test_mc_feature_tags_and_headers_are_on_the_wire(core, world):
     wire = world[U[1]].sent[0]                 # the exact bytes sent
     assert "Accept-Contact: *;+g.3gpp.mcptt;require;explicit" in wire
     assert "+g.3gpp.mcptt" in wire.split("Contact: ")[1].split("\r\n")[0]
-    assert f"P-Asserted-Identity: <{U[0]}>" in wire
+    # TS 24.379 6.3.2.2.6.2 item 7: the participating function asserts ITS
+    # OWN identity towards the terminating client. This test used to pin the
+    # caller's identity here, which is the defect it now guards against.
+    assert f"P-Asserted-Identity: <{LOCAL}>" in wire
+    assert f"P-Asserted-Identity: <{U[0]}>" not in wire
+
+
+# ============================================================ the MCPTT info body (CA-20)
+#
+# Literal expectations throughout; nothing below reads the renderer's constants.
+
+def test_invite_to_the_callee_carries_the_mcptt_info_body(core, world):
+    """6.3.2.2.3 item 8, 6.3.2.2.9, 10.1.1.4.1.1 item 4: the terminating client
+    learns what kind of call it is, who is calling and which group, from the
+    MCPTT info body -- which the platform did not send at all."""
+    core.on_bytes(invite("g1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    (req,) = world[U[1]].requests("INVITE")
+    assert (req.headers.get("Content-Type") or "").startswith("multipart/mixed;boundary=")
+    xml = mcf.mcinfo_of(req)
+    assert xml is not None, "no application/vnd.3gpp.mcptt-info+xml part"
+    assert '<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">' in xml
+    assert "<session-type>prearranged</session-type>" in xml
+    assert ('<mcptt-request-uri type="Normal"><mcpttURI>sip:u1@mcptt.example'
+            "</mcpttURI></mcptt-request-uri>") in xml
+    assert ('<mcptt-calling-user-id type="Normal"><mcpttURI>sip:u0@mcptt.example'
+            "</mcpttURI></mcptt-calling-user-id>") in xml
+    assert ('<mcptt-calling-group-id type="Normal"><mcpttURI>grp:alpha'
+            "</mcpttURI></mcptt-calling-group-id>") in xml
+    assert ('<emergency-ind type="Normal"><mcpttBoolean>true</mcpttBoolean>'
+            "</emergency-ind>") in xml
+    assert mcf.sdp_of(req).startswith("v=0")
+
+
+def test_a_conformant_client_request_selects_the_declared_call_type(rt, core, world):
+    """The inbound half: a body in the annex F.1 format, and nothing else,
+    selects the mcx call type that declares its signature."""
+    for cid, ct in (("s1", "prearranged-group"), ("s2", "emergency-group"),
+                    ("s3", "imminent-peril-group")):
+        core.on_bytes(invite(cid, U[0], "grp:alpha", ct), world[U[0]])
+        recs = {r["correlation_id"]: r for r in rt.store.sessions()}
+        assert recs[cid]["call_type"] == ct, (ct, recs[cid])
+
+
+def test_the_invented_format_is_no_longer_understood(rt, core, world):
+    """The format this platform used to read. A body carrying it has no
+    <mcpttinfo>, so no call type is selected and the session policy refuses."""
+    invented = SDP + "<mcptt-call_type>prearranged-group</mcptt-call_type>"
+    core.on_bytes(msg("INVITE", LOCAL, "inv1", 1, U[0], LOCAL, body=invented,
+                      ctype="application/sdp"), world[U[0]])
+    assert world[U[0]].codes()[-1] >= 400
+    assert not rt.store.has_session("inv1")
+
+
+@pytest.mark.parametrize("ctype, body", [
+    ("multipart/mixed;boundary=b", SDP + "<mcpttinfo/>"),       # no delimiter lines
+    (mcf.CONTENT_TYPE, mcf.multipart(SDP, "<mcpttinfo><unclosed>")),
+    (mcf.CONTENT_TYPE, mcf.multipart(SDP, '<!DOCTYPE x [<!ENTITY a "b">]><mcpttinfo/>')),
+])
+def test_a_malformed_body_is_refused_as_bad_request(rt, core, world, ctype, body):
+    """VP1-SIG-004: refused with 400, and no session state left behind."""
+    core.on_bytes(msg("INVITE", LOCAL, "bad1", 1, U[0], LOCAL, body=body, ctype=ctype),
+                  world[U[0]])
+    assert world[U[0]].codes()[-1] == 400
+    assert not rt.store.has_session("bad1")
+
+
+def test_the_floor_control_stream_is_not_data_media(core, world, rt):
+    """TS 24.380 clause 14: every MCPTT voice offer carries
+    "m=application <port> udp MCPTT". It is the floor control channel, and
+    counting it as DATA made every real voice call look like voice + data."""
+    offer = SDP + "m=application 20032 udp MCPTT\r\na=fmtp:MCPTT mc_queueing\r\n"
+    core.on_bytes(msg("INVITE", LOCAL, "fc1", 1, U[0], LOCAL,
+                      body=mcf.multipart(offer, mcf.mcinfo_xml("private", U[1])),
+                      ctype=mcf.CONTENT_TYPE), world[U[0]])
+    (req,) = world[U[1]].requests("INVITE")
+    accept = " ".join(req.headers.get_all("Accept-Contact"))
+    assert "+g.3gpp.mcdata" not in accept
 
 
 # ============================================================ VP1-SIG-005

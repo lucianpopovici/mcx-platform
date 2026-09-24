@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Extracted verbatim by tools/spec/extract_xsd.py from 24379-k00.docx
+     (sha256 e28936d66b365d72...), targetNamespace urn:3gpp:ns:mcpttInfo:1.0. Do not edit:
+     re-extract. -->
+<xs:schema
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  targetNamespace="urn:3gpp:ns:mcpttInfo:1.0"
+  xmlns:mcpttinfo="urn:3gpp:ns:mcpttInfo:1.0"
+  elementFormDefault="qualified"
+  attributeFormDefault="unqualified"
+  xmlns:xenc="http://www.w3.org/2001/04/xmlenc#"
+  xmlns:mgktp="urn:3gpp:ns:mcpttGKTP:1.0">
+
+  <xs:import namespace="http://www.w3.org/2001/04/xmlenc#"/>
+  <xs:import namespace="urn:3gpp:ns:mcpttGKTP:1.0"/>
+
+  <!-- root XML element -->
+  <xs:element name="mcpttinfo" type="mcpttinfo:mcpttinfo-Type" id="info"/>
+
+  <xs:complexType name="mcpttinfo-Type">
+    <xs:sequence>
+      <xs:element name="mcptt-Params" type="mcpttinfo:mcptt-ParamsType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="anyExt" type="mcpttinfo:anyExtType" minOccurs="0"/>
+    </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType> 
+
+  <xs:complexType name="mcptt-ParamsType">
+    <xs:sequence>
+      <xs:element name="mcptt-access-token" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="session-type" type="xs:string" minOccurs="0"/>
+      <xs:element name="mcptt-request-uri" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="mcptt-calling-user-id" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="mcptt-called-party-id" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="mcptt-calling-group-id" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="required" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="emergency-ind" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="alert-ind" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="imminentperil-ind" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="broadcast-ind" type="xs:boolean" minOccurs="0"/>
+      <xs:element name="mc-org" type="xs:string" minOccurs="0"/>
+      <xs:element name="floor-state" type="xs:string" minOccurs="0"/>
+      <xs:element name="associated-group-id" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="originated-by" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="MKFC-GKTPs" type="mgktp:singleTypeGKTPsType" minOccurs="0"/>
+      <xs:element name="mcptt-client-id" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="alert-ind-rcvd" type="mcpttinfo:contentType" minOccurs="0"/>
+      <xs:element name="gw-mcptt-usage" type="xs:boolean" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="anyExt" type="mcpttinfo:anyExtType" minOccurs="0"/>
+    </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <xs:simpleType name="protectionType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="Normal"/>
+       <xs:enumeration value="Encrypted"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="contentType">
+    <xs:choice>
+      <xs:element name="mcpttURI" type="xs:anyURI"/>
+      <xs:element name="mcpttString" type="xs:string"/>
+      <xs:element name="mcpttBoolean" type="xs:boolean"/>
+      <xs:any namespace="##other" processContents="lax"/>
+      <xs:element name="anyExt" type="mcpttinfo:anyExtType" minOccurs="0"/>
+    </xs:choice>
+    <xs:attribute name="type" type="mcpttinfo:protectionType"/>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <xs:complexType name="anyExtType">
+    <xs:sequence>
+      <xs:any namespace="##any" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- anyEXT elements – begin -->
+
+  <xs:element name="ambient-listening-type" type="mcpttinfo:ambientListeningType"/>
+  <xs:simpleType name="ambientListeningType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="remote-init"/>
+       <xs:enumeration value="local-init"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="release-reason" type="mcpttinfo:releaseReasonType"/>
+  <xs:simpleType name="releaseReasonType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="private-call-expiry"/>
+       <xs:enumeration value="administrator-action"/>
+       <xs:enumeration value="not selected for call"/>
+       <xs:enumeration value="call-request-for-listened-to-client"/>
+       <xs:enumeration value="call-request-initiated-by-listened-to-client"/>
+       <xs:enumeration value="authentication of the MIKEY-SAKE I_MESSAGE failed"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="request-type" type="mcpttinfo:requestTypeType"/>
+  <xs:simpleType name="requestTypeType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="private-call-call-back-request"/>
+       <xs:enumeration value="private-call-call-back-cancel-request"/>
+       <xs:enumeration value="group-selection-change-request"/>
+       <xs:enumeration value="remotely-initiated-group-call-request"/>
+       <xs:enumeration value="remotely-initiated-private-call-request"/>
+       <xs:enumeration value="transfer-private-call-request"/>
+       <xs:enumeration value="functional-alias-status-determination"/>
+       <xs:enumeration value="forward-private-call-request"/>
+       <xs:enumeration value="forward-private-call-settings-request"/>
+       <xs:enumeration value="forward-private-call-settings-response"/>
+       <xs:enumeration value="fa-group-binding-req"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- The request-type and response-type elements uses the enumeration as values, which cant be extended for new values to be added. Hence the new req-type and resp-type elements are defined and going forward all the new values are added to these element -->
+  <xs:element name="req-type" type="mcpttinfo:contentType"/>
+  <xs:element name="resp-type" type="mcpttinfo:contentType"/>
+
+  <xs:element name="response-type" type="mcpttinfo:responseTypeType"/>
+  <xs:simpleType name="responseTypeType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="private-call-call-back-response"/>
+       <xs:enumeration value="private-call-call-back-cancel-response"/>
+       <xs:enumeration value="group-selection-change-response"/>
+       <xs:enumeration value="remotely-initiated-group-call-response"/>
+       <xs:enumeration value="remotely-initiated-private-call-response"/>
+       <xs:enumeration value="transfer-private-call-response"/>
+       <xs:enumeration value="forward-private-call-response"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="urgency-ind">
+    <xs:simpleType>
+      <xs:restriction base="xs:string">
+         <xs:enumeration value="low"/>
+         <xs:enumeration value="normal"/>
+         <xs:enumeration value="high"/>
+      </xs:restriction>
+    </xs:simpleType>
+  </xs:element>
+
+  <xs:element name="time-of-request" type="xs:dateTime"/>
+
+  <xs:element name="selected-group-change-outcome" type="mcpttinfo:selectedGroupChangeOutcomeType"/>
+  <xs:simpleType name="selectedGroupChangeOutcomeType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="success"/>
+       <xs:enumeration value="fail"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="affiliation-required" type="xs:boolean"/>
+
+  <xs:element name="remotely-initiated-call-outcome" type="mcpttinfo:remotelyInitiatedCallOutcomeType"/>
+  <xs:simpleType name="remotelyInitiatedCallOutcomeType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="success"/>
+       <xs:enumeration value="fail"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="notify-remote-user" type="xs:boolean"/>
+
+  <xs:element name="functional-alias-URI" type="mcpttinfo:contentType"/>
+
+  <xs:element name="user-requested-priority" type="xs:nonNegativeInteger"/>
+  <xs:element name="used-priority" type="xs:nonNegativeInteger"/>
+  <xs:element name="emergency-alert-area-ind" type="xs:boolean"/>
+
+  <xs:element name="group-geo-area-ind" type="xs:boolean"/>
+
+  <xs:element name="non-acknowledged-user" type="mcpttinfo:contentType"/>
+
+  <xs:element name="call-to-functional-alias-ind" type="xs:boolean"/>
+
+  <xs:element name="emergency-ind-rcvd" type="mcpttinfo:contentType"/>
+
+  <xs:element name="call-transfer-ind" type="xs:boolean"/>
+
+  <xs:element name="multiple-devices-ind" type="mcpttinfo:contentType"/>
+
+  <xs:element name="transfer-call-outcome" type="mcpttinfo:transferCallOutcomeType"/>
+
+  <xs:simpleType name="transferCallOutcomeType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="success"/>
+       <xs:enumeration value="fail"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="called-functional-alias-URI" type="mcpttinfo:contentType"/>
+
+  <xs:element name="call-forwarding-ind" type="xs:boolean"/>
+
+  <xs:element name="forwarding-call-outcome" type="mcpttinfo:forwardingCallOutcomeType"/>
+  <xs:simpleType name="forwardingCallOutcomeType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="success"/>
+       <xs:enumeration value="fail"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="forwarding-immediate-list" type="mcpttinfo:mcpttIdListType"/>
+  <xs:complexType name="mcpttIdListType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="entry" type="mcpttinfo:EntryType"/>
+      <xs:element name="anyExt" type="mcpttinfo:anyExtType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:choice>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <xs:element name="forwarding-other-list" type="mcpttinfo:mcpttIdListType"/>
+
+  <xs:complexType name="EntryType">
+    <xs:sequence>
+      <xs:element name="uri-entry" type="xs:anyURI"/>
+      <xs:element name="display-name" type="xs:string" minOccurs="0"/>
+      <xs:element name="anyExt" type="mcpttinfo:anyExtType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <xs:element name="forwarding-reason" type="mcpttinfo:forwardingReasonType"/>
+  <xs:simpleType name="forwardingReasonType">
+    <xs:restriction base="xs:string">
+       <xs:enumeration value="immediate"/>
+       <xs:enumeration value="no-answer"/>
+       <xs:enumeration value="manual-input"/>
+       <xs:enumeration value="migrated"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:element name="PrivateCallKMSURI" type="mcpttinfo:PrivateCallKMSURIEntryType"/>
+    <xs:complexType name="PrivateCallKMSURIEntryType">
+      <xs:sequence>
+      <xs:element name="PrivateCallKMSURI" type="mcpttinfo:EntryType"/>
+      <xs:element name="anyExt" type="mcpttinfo:anyExtType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+      </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <xs:element name="binding-ind" type="xs:boolean"/>
+  <xs:element name="binding-fa-uri" type="xs:anyURI"/>
+  <xs:element name="unbinding-fa-uri" type="xs:anyURI"/>
+  <xs:element name="replaces-header-value" type="xs:string"/>
+  <xs:element name="transfer-announced-ind" type="xs:boolean"/>
+  <xs:element name="forwarding-sequence-number" type="xs:nonNegativeInteger"/>
+  <xs:element name="forwarded-by-mcptt-id" type="xs:anyURI"/>
+  <xs:element name="forwarded-by-functional-alias" type="xs:anyURI"/>
+  <xs:element name="forwarding-target-id" type="xs:anyURI"/>
+  <xs:element name="forwarding-target-is-functional-alias" type="xs:boolean"/>
+
+<!-- These elements can be added under the anyExt element of the mcpttinfo element -->
+<xs:element name="ric-app-level-priority" type="xs:string"/>
+<xs:element name="ric-commencement-mode" type="xs:string"/>
+<xs:element name="remotely-initiated-call-request-ind" type="mcpttinfo:contentType"/>
+<xs:element name="forwarding-target-orig-id" type="xs:anyURI"/>
+<xs:element name="end-to-end-security" type="xs:boolean"/>
+<xs:element name="call-participants-criterias" type="xs:string"/>
+<xs:element name="preconfigured-group-id" type="xs:anyURI"/>
+<xs:element name="adhoc-grp-emg-alert-grp-ind" type="xs:boolean"/>
+<xs:element name="migration-auth-result" type="mcpttinfo:contentType"/>
+<xs:element name="partner-mcptt-id" type="mcpttinfo:contentType"/>
+<xs:element name="selected-user-profile-index" type="mcpttinfo:selected-user-profile-indexType"/>
+<xs:element name="primary-mcptt-id" type="mcpttinfo:contentType"/>
+<xs:element name="adhoc-emergency-ind" type="xs:boolean"/>
+<xs:element name="adhoc-alert-ind" type="xs:boolean"/>
+<xs:element name="adhoc-additional-information" type="xs:string"/>
+<xs:element name="adhoc-emergency-ind-rcvd" type="xs:boolean"/>
+<xs:element name="adhoc-alert-ind-rcvd" type="xs:boolean"/>
+<xs:element name="adhoc-alert-participant-list" type="mcpttinfo:mcpttIdListType"/><xs:element name="adhoc-alert-participant-not-ack-list" type="mcpttinfo:mcpttIdListType"/>
+<xs:element name="location-of-functional-alias-URI" type="mcpttinfo:contentType"/>
+<xs:element name="connected-functional-alias-URI" type="mcpttinfo:contentType"/>
+<!-- anyEXT elements – end -->
+
+  <xs:complexType name="selected-user-profile-indexType">
+    <xs:sequence>
+      <xs:element name="user-profile-index" type="xs:nonNegativeInteger"/>
+      <xs:any namespace="##any" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+</xs:schema>

@@ -276,3 +276,19 @@ def test_the_three_interworking_codes_are_not_in_table_4_4_2_2():
         # ...and the rest of the range 24.379 reserved was never allocated.
         for code in (303, 325, 350):
             assert supports_sip_warning(Release(release), code) is False
+
+
+def test_session_types_and_indications_by_release():
+    """PLT-CONF-AUDIT CA-20. Tabulated from all seven versions of TS 24.379 in
+    docs/3GPP by where each value is first used; spelled out, not imported.
+    Ad hoc group calls begin at Rel-18, with their own emergency indication."""
+    from core.release import supports_mc_indicator, supports_session_type
+    first = {"prearranged": 13, "chat": 13, "private": 13, "first-to-answer": 14,
+             "ambient-listening": 14, "adhoc": 18}
+    for release in RELEASES:
+        for value, introduced in first.items():
+            assert supports_session_type(Release(release), value) is (release >= introduced)
+        for ind in ("emergency-ind", "imminentperil-ind", "broadcast-ind"):
+            assert supports_mc_indicator(Release(release), ind) is True
+        assert supports_mc_indicator(Release(release), "adhoc-emergency-ind") is (release >= 18)
+        assert supports_session_type(Release(release), "conference") is False

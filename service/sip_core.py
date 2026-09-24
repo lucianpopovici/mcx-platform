@@ -35,6 +35,8 @@ from core.sip import (
     parse_message, parse_sdp,
 )
 
+from core.mcinfo import sdp_of
+
 from .media import MediaSession, UdpMediaPlane
 from .runtime import Runtime
 from .sip_txn import (ClientTransactions, ClientTxn, ServerTransactions,
@@ -177,6 +179,16 @@ def dialog_target(remote_target: str, route_set: List[str]) -> Tuple[str, List[s
     return _request_uri_form(first), list(route_set[1:]) + [f"<{remote_target}>"]
 
 
+def _offer_of(invite: Request) -> str:
+    """The SDP part of an INVITE. A conformant MCPTT INVITE's body is
+    multipart/mixed (SDP plus the MCPTT info body); treating the whole body
+    as SDP worked only for the format this platform invented (CA-20)."""
+    try:
+        return sdp_of(invite.headers.get("Content-Type") or "", invite.body)
+    except ValueError as exc:
+        raise SipError(str(exc)) from None
+
+
 def _tag(seed: str) -> str:
     return "mcx-" + hashlib.sha1(seed.encode()).hexdigest()[:10]
 
@@ -201,7 +213,8 @@ class SipCore:
                         for c in runtime.loaded.profile.media.codecs}
         self.local_uri = local_uri
         self.clock = clock
-        self.adapter = Adapter(local_uri, runtime.config.release)
+        self.adapter = Adapter(local_uri, runtime.config.release,
+                               runtime.loaded.profile.call_types)
         self.guard = InboundGuard()
         self.registrations = RegistrationStore(clock)
         self.server = ServerTransactions(clock, t1=t1)
@@ -393,11 +406,12 @@ class SipCore:
         if MediaKind.VOICE not in call.sr.media or session.floor is None:
             return
         try:
-            info = parse_sdp(call.invite.body)
+            offer = _offer_of(call.invite)
+            info = parse_sdp(offer)
         except SipError as exc:
             call.media_error = f"unusable SDP offer: {exc}"
             return
-        pt = negotiate(call.invite.body, tuple(self._codecs))
+        pt = negotiate(offer, tuple(self._codecs))
         if pt is None:
             call.media_error = "no codec in the offer is declared by the profile"
             return
@@ -443,7 +457,7 @@ class SipCore:
             leg.state = "failed"
             call.legs[leg.call_id] = leg
             return
-        sdp = call.invite.body
+        sdp = _offer_of(call.invite)
         if call.media is not None:
             call.media.add(target)
             sdp = self._relay_sdp(call, target)

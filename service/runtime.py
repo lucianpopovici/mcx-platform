@@ -19,6 +19,8 @@ from core.hooks import SessionRequest
 from core.loader import LoadedProfile
 from core.session import (Platform, Refusal, Session, SessionManager, Signal)
 
+from core import mcinfo
+
 from .config import BEARER_STUB, IDMS_STUB, RECORDER_STUB, Config
 from .groups import GroupDirectory, load_groups, load_users
 from .store import SessionStore, SqliteStore
@@ -63,6 +65,11 @@ class Health:
         self._release: Optional[str] = None
         self._lock = threading.Lock()
         self._extra: Callable[[], dict] = lambda: {}
+        self._call_types: dict = {}
+
+    def set_call_types(self, report: dict) -> None:
+        with self._lock:
+            self._call_types = report
 
     def set_extra(self, fn: Callable[[], dict]) -> None:
         self._extra = fn
@@ -96,6 +103,7 @@ class Health:
                                 "hash": self._hash,
                                 "identifier": self._profile},
                     "release": self._release,
+                    "call_types": self._call_types,
                     **self._extra()}
 
 
@@ -229,6 +237,17 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
         raise StartupRefused(
             "groups are configured but the profile's identity resolver has no "
             "provisioning surface to receive them")
+
+    # PLT-ICD-001 2.6: say which call types no conformant client can request,
+    # and why, rather than leave an operator to discover it from refusals.
+    undeclared, blocked = mcinfo.reachability(loaded.profile.call_types,
+                                              config.release)
+    health.set_call_types({
+        "not_requestable_by_mcptt_clients": list(undeclared),
+        "unreachable_at_release": {cid: why for cid, why in blocked}})
+    for cid, why in blocked:
+        log.warning("call type %r cannot be requested by any client at this "
+                    "release: %s", cid, why)
 
     if recovered:
         log.warning("%d session record(s) were established when the previous "

@@ -160,7 +160,7 @@ def test_sdp_round_trip_and_floor_port():
 
 def test_sdp_media_level_address_wins_and_missing_pieces_raise():
     body = ("v=0\r\nc=IN IP4 1.1.1.1\r\nm=audio 4000 RTP/AVP 0\r\n"
-            "c=IN IP4 2.2.2.2\r\n<mcptt-call_type>x</mcptt-call_type>")
+            "c=IN IP4 2.2.2.2\r\nnot an SDP line")
     assert parse_sdp(body).address == "2.2.2.2"
     with pytest.raises(SipError):
         parse_sdp("v=0\r\nc=IN IP4 1.1.1.1\r\n")            # no audio

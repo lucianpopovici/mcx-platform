@@ -547,3 +547,13 @@ def test_a_production_indicator_refuses_every_stub(env):
     assert fail_closed_platform().reserve_qos(None) is False
     assert fail_closed_platform(True, True).recording_available() is True
     assert fail_closed_platform(True, True).reserve_qos(None) is True
+
+
+def test_health_says_which_call_types_no_client_can_request(env):
+    """PLT-ICD-001 2.6. Declared-unrequestable and release-unreachable call
+    types are reported, so the gap is visible before the first refusal."""
+    rt = build_runtime({**env, "MCX_RELEASE": "17"}, _clock())
+    report = rt.health.snapshot()["call_types"]
+    assert set(report) == {"not_requestable_by_mcptt_clients", "unreachable_at_release"}
+    assert "sds" in report["not_requestable_by_mcptt_clients"]
+    assert report["unreachable_at_release"] == {}      # mcx declares no ad hoc call type

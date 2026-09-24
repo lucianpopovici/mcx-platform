@@ -33,6 +33,8 @@ applications:
 call_types:
   - id: crew-call
     label: Field crew call
+    # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
+    mc_signature: {session_type: prearranged}
     media: [voice]
     session_model: on-demand
     urgency: routine
@@ -51,6 +53,11 @@ call_types:
 
   - id: switching-order
     label: Switching order call
+    # TS 24.379 cannot tell this apart from crew-call: both are prearranged
+    # voice group calls with no indication set. Until the profile decides
+    # how to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
+    # request it.
+    mc_signature: null
     media: [voice]
     session_model: on-demand
     urgency: safety-critical
@@ -69,6 +76,8 @@ call_types:
 
   - id: telemetry-session
     label: Grid telemetry session
+    # MCData, not an MCPTT session.
+    mc_signature: null
     media: [data]
     session_model: pre-established
     urgency: fault

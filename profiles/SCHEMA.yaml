@@ -64,6 +64,12 @@ call_types:
     recording_required: bool
     max_participants: int?
     initiator_roles: [string]     # empty = any authorised user
+    mc_signature:                 # REQUIRED; null = not requestable by a native
+                                  # MCPTT client (PLT-ICD-001 2.6)
+      session_type: prearranged|chat|private|first-to-answer|ambient-listening|adhoc
+      emergency: bool?            # default false
+      imminent_peril: bool?       # default false
+      broadcast: bool?            # default false
     floor:
       initial_grant_to_initiator: bool
       queueing_enabled: bool

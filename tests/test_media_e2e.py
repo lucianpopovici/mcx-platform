@@ -26,6 +26,7 @@ from core.session import Platform  # noqa: E402
 from core.sip import build_sdp, parse_sdp  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
 from service.sip_core import SipCore  # noqa: E402
+from tests import mcpttinfo_fixture as mcf  # noqa: E402
 from tests.test_sip_transport import (  # noqa: E402
     Clock, Flow, U, answer, invite, msg, pki, register, sip_env, LOCAL)
 
@@ -109,9 +110,10 @@ def call(tmp_path, pki):
 
 
 def group_invite(ue0, cid="e2e"):
-    body = ue0.sdp() + "<mcptt-call_type>prearranged-group</mcptt-call_type>"
-    return msg("INVITE", "grp:alpha", cid, 1, U[0], "grp:alpha", body=body,
-               ctype="multipart/mixed;boundary=b")
+    """A conformant prearranged group call request (TS 24.379 10.1.1.2.1.1)."""
+    return msg("INVITE", LOCAL, cid, 1, U[0], LOCAL,
+               body=mcf.body_for("prearranged-group", "grp:alpha", ue0.sdp()),
+               ctype=mcf.CONTENT_TYPE)
 
 
 def setup_call(call, answering=(1, 2)):
@@ -120,8 +122,8 @@ def setup_call(call, answering=(1, 2)):
         core.on_bytes(group_invite(ues[U[0]]), flows[U[0]])
         legs = {u: flows[u].requests("INVITE") for u in U[1:]}
         for u, (req,) in legs.items():
-            assert parse_sdp(req.body).payload_types == (PT,)
-            ues[u].learn_relay(req.body)
+            assert parse_sdp(mcf.sdp_of(req)).payload_types == (PT,)
+            ues[u].learn_relay(mcf.sdp_of(req))
         for i in answering:
             u = U[i]
             core.on_bytes(answer(legs[u][0], 200, ues[u].sdp()), flows[u])
@@ -138,7 +140,7 @@ def test_sdp_is_anchored_at_the_platform_and_carries_only_the_negotiated_codec(c
     rt, core, flows, ues, _ = call
     legs = setup_call(call)
     for u in U[1:]:
-        info = parse_sdp(legs[u][0].body)
+        info = parse_sdp(mcf.sdp_of(legs[u][0]))
         assert info.address == core.media.address           # not the caller's
         assert info.audio_port != ues[U[0]].rtp.getsockname()[1]
         assert info.payload_types == (PT,)
@@ -248,11 +250,11 @@ def test_full_call_trace_has_no_deviation(call):
 
 def test_offer_with_no_profile_codec_is_refused_488_and_leaves_nothing(call):
     rt, core, flows, ues, _ = call
-    body = (build_sdp("127.0.0.1", 5000, 5002, [(8, "PCMA/8000")])
-            + "<mcptt-call_type>prearranged-group</mcptt-call_type>")
+    body = mcf.body_for("prearranged-group", "grp:alpha",
+                        build_sdp("127.0.0.1", 5000, 5002, [(8, "PCMA/8000")]))
     with core.lock:
-        core.on_bytes(msg("INVITE", "grp:alpha", "nocodec", 1, U[0], "grp:alpha",
-                          body=body, ctype="multipart/mixed;boundary=b"),
+        core.on_bytes(msg("INVITE", LOCAL, "nocodec", 1, U[0], LOCAL,
+                          body=body, ctype=mcf.CONTENT_TYPE),
                       flows[U[0]])
     assert flows[U[0]].codes() == [100, 488]
     assert rt.store.has_session("nocodec") is False
