@@ -50,6 +50,19 @@ _DENY_CAUSE = {
     fl.DenyReason.NO_SESSION: rtcp.DENY_INTERNAL_ERROR,
 }
 
+# TS 24.380 8.2.10.2; which cause each situation carries is 6.3.4.4.4 (#2)
+# and 6.3.4.4.7 (#4).
+_REVOKE_CAUSE = {
+    fl.RevokeReason.MEDIA_BURST_TOO_LONG: rtcp.REVOKE_MEDIA_BURST_TOO_LONG,
+    fl.RevokeReason.PREEMPTED: rtcp.REVOKE_PREEMPTED,
+    fl.RevokeReason.OTHER: rtcp.REVOKE_OTHER,
+}
+
+# How often, at most, the holder's media is reported to the floor machine
+# after its first packet. Well inside T1's 4 s default, which it keeps alive;
+# a profile with a shorter T1 is reported to at least four times per T1.
+MEDIA_NOTIFY_MS = 250
+
 
 class EndpointIO(Protocol):
     rtp_port: int
@@ -108,6 +121,10 @@ class MediaSession:
             "floor_wrong_release": 0,
             "floor_dropped_source": 0}
         self.closed = False
+        self._media_seen_holder: Optional[str] = None
+        self._media_seen_at = 0
+        self._notify_ms = min(MEDIA_NOTIFY_MS,
+                              floor.policy.timer(fl.T_END_OF_MEDIA) // 4)
 
     # -- endpoints -------------------------------------------------------
 
@@ -151,6 +168,17 @@ class MediaSession:
         if self.floor.holder != uri:
             self.counters["rtp_dropped_not_holder"] += 1
             return False
+        # TS 24.380 6.3.4.4.5 / 6.3.4.5.3: the floor control server learns of
+        # the holder's media from the media distributor -- this is it. The
+        # first packet after a grant goes at once (it starts T2 and stops
+        # T20); after that, at most every MEDIA_NOTIFY_MS, which keeps T1
+        # (4 s by default) alive without an event per packet.
+        now = self._now()
+        if uri != self._media_seen_holder or \
+                now - self._media_seen_at >= self._notify_ms:
+            self._media_seen_holder, self._media_seen_at = uri, now
+            self.apply(self.floor.handle(fl.Event(
+                fl.EventType.MEDIA_RECEIVED, participant=uri)))
         for other in self.endpoints.values():
             if other.uri != uri and other.remote_rtp is not None:
                 other.io.send_rtp(other.remote_rtp, data)
@@ -225,7 +253,10 @@ class MediaSession:
         holder = self.floor.holder
         for a in actions:
             if a.type is A.SEND_GRANTED and a.target:
-                self._send(a.target, self._granted(a.target))
+                # A new grant: the holder's next packet is a "first" packet
+                # again, and must reach the machine at once.
+                self._media_seen_holder = None
+                self._send(a.target, self._granted(a.target, a.duration_ms))
             elif a.type is A.SEND_TAKEN:
                 for uri in self._everyone_but(holder):
                     self._send(uri, self._taken(holder))
@@ -239,13 +270,13 @@ class MediaSession:
                     MsgType.DENY, PLATFORM_SSRC,
                     rtcp.f_reject(cause, a.reason.value if a.reason else "")))
             elif a.type is A.SEND_REVOKE and a.target:
-                # REVOKE_OTHER, not DENY_OTHER: clause 8.2.10.2 is a separate
-                # cause namespace from 8.2.6.2. Both happen to be 255, so this
-                # was invisible on the wire -- and it is exactly the confusion
-                # PLT-CONF-AUDIT 3.3 split the two tables to prevent.
+                # Clause 8.2.10.2 causes, a separate namespace from 8.2.6.2
+                # (PLT-CONF-AUDIT 3.3). Every revoke used to go out as #255;
+                # T2 expiry is #2 and pre-emption #4 (FC-OP-02).
+                reason = a.revoke_reason or fl.RevokeReason.OTHER
                 self._send(a.target, rtcp.message(
                     MsgType.REVOKE, PLATFORM_SSRC,
-                    rtcp.f_reject(rtcp.REVOKE_OTHER, "revoked")))
+                    rtcp.f_reject(_REVOKE_CAUSE[reason], reason.value)))
             elif a.type is A.SEND_QUEUE_POSITION and a.target:
                 self._send(a.target, rtcp.message(
                     MsgType.QUEUE_POSITION_INFO, PLATFORM_SSRC,
@@ -285,8 +316,13 @@ class MediaSession:
         except Exception:  # noqa: BLE001
             return 0
 
-    def _granted(self, uri: str) -> rtcp.FloorMessage:
-        seconds = self.floor.policy.timer(fl.T_STOP_TALKING) // 1000
+    def _granted(self, uri: str, duration_ms: Optional[int] = None) -> rtcp.FloorMessage:
+        # Duration is T2: all of it on a new grant, what remains of it on a
+        # repeated one (6.3.4.4.8 item 1a) -- rounded down, as it always
+        # was, so a talker is never told it has more time than it has.
+        ms = self.floor.policy.timer(fl.T_STOP_TALKING) if duration_ms is None \
+            else duration_ms
+        seconds = ms // 1000
         return rtcp.message(MsgType.GRANTED, PLATFORM_SSRC,
                             rtcp.f_priority(self._safe_priority(uri)),
                             rtcp.f_duration(seconds))

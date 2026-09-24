@@ -190,6 +190,11 @@ def compare(trace: Iterable[Tuple[str, str, bytes]]) -> List[Deviation]:
                 holder, idle_since_grant = uri, False
             elif name == "idle":
                 holder, idle_since_grant = None, True
+            elif name == "revoke" and uri == holder:
+                # The holder's permission ends when the pending-revoke state
+                # does (T3 expiry, TS 24.380 6.3.4.5.5), which is invisible on
+                # the wire; the next Granted may follow without a Floor Idle.
+                idle_since_grant = True
             elif name == "taken":
                 named = f.get("granted-party", b"").decode("utf-8", "replace")
                 if holder is not None and named != holder:
@@ -205,6 +210,10 @@ def compare(trace: Iterable[Tuple[str, str, bytes]]) -> List[Deviation]:
         else:
             if name == "request":
                 pending_requests[uri] = pending_requests.get(uri, 0) + 1
+            elif name == "release" and uri == holder:
+                # With a non-empty queue the server grants the head directly
+                # and sends no Floor Idle (TS 24.380 6.3.4.3.2 item 3).
+                idle_since_grant = True
     return out
 
 

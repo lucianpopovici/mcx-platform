@@ -1,8 +1,8 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.9
-**Date:** 2026-09-22
+**Version:** 2.0
+**Date:** 2026-09-24
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
 
@@ -1432,6 +1432,71 @@ fifteen sets wrong — has no reason to be kinder to code nobody looked at.
 
 ---
 
+### 4.37 CA-21 — the floor timers had the right values and the wrong jobs
+
+CA-05 (4.11) confirmed the timer *defaults* and said nothing about what each
+timer starts, stops and does on expiry. PLT-VP-R1 FC-OP-01 and FC-OP-02 asked
+exactly that. Read against TS 24.380 clauses 6.3.4.3 to 6.3.4.5 and 6.3.5.6
+(V13.14, V17.7, V18.7 and V20.0 agree on every clause used here), the
+machine was wrong in ten places, and one old non-conformance surfaced
+when the others were fixed.
+
+| # | Clause | The specification | The machine did |
+|---|---|---|---|
+| D1 | 6.3.4.4.5 item 1 | T2 (stop talking) starts at the holder's **first RTP packet** | started T2 at the grant |
+| D2 | 6.3.4.4.2 item 2 | T20 (Floor Granted) starts only when a **queued** request is granted | started T20 on every grant |
+| D3 | 6.3.4.4.9, 6.3.4.4.10 | C20 bounds the re-sends; upper limit 3, counting the first | re-sent Floor Granted without limit |
+| D4 | 6.3.4.4.5 item 3 | RTP from the holder stops T20 | nothing reported media to the machine |
+| D5 | 6.3.4.4.4 | T2 expiry **always** revokes, cause #2 | handed the floor to the queue without revoking |
+| D6 | 6.3.4.5.2, 6.3.4.5.5, 6.3.5.6.3 | T3 is the grace period; T8 **re-sends** the Revoke | used T8 as the grace (100 ms in every profile) and never re-sent |
+| D7 | 6.3.4.4.2 item 4, 6.3.4.4.3, 6.3.4.5.6 | T1 (end of RTP media) runs from the grant, restarted by each packet; expiry idles the floor | T1 declared, never driven |
+| D8 | 6.3.4.4.4, 6.3.4.4.7 item 2c | Revoke causes #2 (too long) and #4 (pre-empted) | always #255 |
+| D9 | 6.3.4.3.2 item 3 | With a queue, the head is granted **without** a Floor Idle | sent Floor Idle, then Floor Granted |
+| D10 | 6.3.4.4.7 item 2e | the pre-emptor goes **in front of every** queued request, moved there if already queued, even where queueing was not negotiated | queued it by priority, denied it if already queued, gave it nothing with queueing off |
+| D11 | 6.3.4.4.8 | a holder asking again is sent Floor Granted again, with the T2 that remains | sent Floor Deny |
+
+D11 was masked by D2: the unbounded T20 re-sent every Floor Granted, so a lost
+one was repaired by accident. Fixing D2 alone would have left a client whose
+Floor Granted was lost being told it was denied a floor it held. The
+independent review of this change found it.
+
+**FC-OP-01 (what stops the grant retransmission)** is answered by the
+specification: RTP media from the holder (6.3.4.4.5 item 3). Floor Ack
+handling is "an implementation option" (NOTE in 6.3.5.3.x); the machine keeps
+stopping T20 on a holder's Ack, which is permitted.
+
+**Fixed in** `core/floor.py` (new `MEDIA_RECEIVED` event; `RevokeReason`;
+T1, T3 and C20; `_enter_idle`, `_enter_revoke`, `_pre_empt`) and
+`service/media.py` (the media distributor reports the holder's media to the
+machine, at most every 250 ms or a quarter of T1; revoke causes on the wire;
+a repeated grant's Duration is the remaining T2, rounded down). The trace
+comparator accepts a Floor Granted that follows the holder's Release or a
+Revoke sent to the holder without a Floor Idle in between. Each fix has a
+test that fails on the old code, and 25 mutants were all killed.
+
+**One deliberate deviation.** A pre-emptor arriving when the queue is already
+at its declared depth is **not** inserted: that would break PLT-FC-006, and
+pre-empting without inserting would revoke a talker for nobody. The request
+is treated as ordinary and denied queue-full. Recorded in PLT-VP-R1 FC-OP-07.
+
+**Found in the specification, not the code.**
+
+- 6.3.4.4.16 (Rel-19 and Rel-20 only) revokes with "#8 Revoked by another
+  MCPTT client"; the cause table 8.2.10.2 of the same releases lists that
+  reason as **#7** and defines no #8. `REVOKE_BY_ANOTHER_CLIENT = 7` follows
+  the table. The platform does not implement 6.3.4.4.16.
+- 6.3.4.3.2 opens "if no MCPTT client negotiated support of queueing floor
+  requests", which read literally makes its own item 3 (grant from the
+  queue) unreachable. The machine follows the evident intent.
+
+**Profile consequence.** Every in-tree profile sets `T8: 100`. Written when T8
+was the grace, it now sets the Revoke re-send interval, so a revoked talker
+receives about 30 Revokes during the 3 s default T3. Legal (the count is an
+implementation option) and noisy. The values are the profile owner's to
+choose: PLT-VP-R1 PRF-OP-02.
+
+---
+
 ## 5. NOT verified — the work that remains
 
 CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
@@ -1444,7 +1509,8 @@ ordered by consequence:
 | CA-14 | Per-release narrowing of `SHAPE` | TS 24.380, all releases | **Open, low consequence.** The comparator permits the union across releases; a superset can miss a deviation but cannot invent one. |
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
-| CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-21 | Timer *behaviour* in `core/floor.py` and the media plane | TS 24.380 6.3.4.3-6.3.4.5, 6.3.5.6 | **Closed.** See 4.37. Eleven deviations fixed, one deliberate deviation recorded (FC-OP-07). |
 | CA-07 | MCData and MCVideo feature tags | TS 24.281, TS 24.282 | **Closed.** See 4.25. Both confirmed; DATA-OP-01 opened for the MCData service-specific ICSIs. |
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
 | CA-16 | FRMCS Annex A per-session QoS assignment | UIC FRMCS SRS (AT-7800) Annex A | **Closed** by a human read of the table. See 4.24 — the value this audit derived was wrong. |
@@ -1570,6 +1636,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.0 | 2026-09-24 | CA-21 opened and closed (4.37): the floor timers had the right defaults and the wrong behaviour. T2 started at the grant instead of the first media packet, T20 ran on every grant without limit, T8 did T3's job, T1 was never driven, the revoke causes were always #255, a queued hand-over sent a Floor Idle first, a pre-emptor was not put in front of the queue, and a holder asking again was denied. All fixed against the clause and mutation-tested. Two inconsistencies in TS 24.380 itself recorded. CA-20 (4.36) remains open and unrelated to this change. |
 | 1.9 | 2026-09-24 | CA-20 opened, found by running VP1-SIG-001 rather than by this audit. `service/` builds messages of its own and was never in scope, although v1.8 described the audit as covering every constant the platform puts on the wire; that claim is corrected in §5 and §7. The RFC 3261 §12 dialog-routing part is fixed. The TS 24.379 part is listed in 4.36 (no `isfocus`, no `P-Asserted-Service`, no session timer, a Contact that is not a session identity) and not yet fixed. |
 | 1.8 | 2026-09-22 | CA-09 closed, the last blocked item. TS 29.379 table 4.2.2-1 allocates three interworking warning codes — 300, 301 and 302, all Land Mobile Radio media security — and none of them means an interworking gateway is unreachable, so `gateway-unavailable` correctly carries no code. The behaviour was already right; the recorded reason was a deferral rather than a finding, and a deferral invites the next reader to resolve it by guessing 301. Pinned by two tests, each killing a mutant nothing else in 544 catches — including a coordinated change that updates both existing snapshot guards to match. TS 29.379 independently corroborates five identifiers, the first corroboration in this audit not drawn from the document that defined the constant. New IWF-OP-01 (the two specifications disagree about the lower bound of the reserved range: 24.379 reserves 301-350, 29.379 allocates 300) and IWF-OP-02. The running tally in §5 was found four items out of date and replaced by a count derived from the table. |
 | 1.7 | 2026-09-22 | CA-19: table J-1's bands read by hand. CA-17's fix was incomplete — the priority ordering is carried by three fields and only `level` had been corrected, so ATO still out-ranked shunting on the floor and, more seriously, carried `preemption_vulnerability: false`, meaning nothing could pre-empt an active ATO session, including the REC the appendix's own worked example names. ETCS the same. All three fields now derive from band membership, and FRMCS-OP-02 closes. The band boundaries inferred in CA-17 would have been wrong in four of seven; nothing had been committed from that inference. |

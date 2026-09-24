@@ -26,9 +26,12 @@ from core.floor import (  # noqa: E402
     FloorInvariantViolation,
     FloorState,
     Policy,
+    T_END_OF_MEDIA,
     T_GRANTED_RETRY,
     T_REVOKE,
     T_STOP_TALKING,
+    T_STOP_TALKING_GRACE,
+    RevokeReason,
 )
 
 
@@ -71,6 +74,14 @@ def request(fc, participant, priority=100):
 
 def release(fc, participant):
     return fc.handle(Event(EventType.FLOOR_RELEASE, participant=participant))
+
+
+def media(fc, participant):
+    return fc.handle(Event(EventType.MEDIA_RECEIVED, participant=participant))
+
+
+def expire(fc, timer):
+    return fc.handle(Event(EventType.TIMER_EXPIRY, timer=timer))
 
 
 def kinds(actions):
@@ -287,12 +298,30 @@ def test_vp1_fc_013_queue_positions_reported():
     assert positions == {"p1": 1, "p2": 2}
 
 
-def test_holder_requesting_again_is_denied():
-    fc = machine()
+def test_holder_requesting_again_is_granted_again():
+    """TS 24.380 6.3.4.4.8: a holder that asks again lost its Floor Granted.
+    It is sent again, with the T2 that remains, and the floor stays taken.
+    The machine used to answer with a Deny."""
+    clock = Clock()
+    fc = machine(clock=clock)
     establish(fc, "a", 100)
     actions = request(fc, "a", 100)
-    deny = [x for x in actions if x.type is ActionType.SEND_DENY][0]
-    assert deny.reason is DenyReason.ALREADY_HOLDER
+    assert kinds(actions) == [ActionType.SEND_GRANTED]
+    assert actions[0].target == "a" and actions[0].duration_ms == 30000
+    media(fc, "a")                          # T2 now runs
+    clock.advance(12000)
+    (again,) = request(fc, "a", 100)
+    assert again.duration_ms == 18000
+    assert fc.state is FloorState.TAKEN and fc.holder == "a"
+
+
+def test_holder_requesting_while_revoked_is_denied():
+    fc = machine()
+    establish(fc, "a", 100)
+    fc.handle(Event(EventType.FLOOR_REVOKE, participant="a"))
+    actions = request(fc, "a", 100)
+    assert [x.reason for x in actions if x.type is ActionType.SEND_DENY] == \
+        [DenyReason.ALREADY_HOLDER]
 
 
 # --------------------------------------------------------------------------
@@ -340,7 +369,10 @@ def test_vp1_fc_020_timer_values_follow_the_profile():
     durations = {}
     for name, policy in (("fast", fast), ("slow", slow)):
         fc = FloorControl(policy, clock=Clock())
-        actions = establish(fc, "a", 100)
+        establish(fc, "a", 100)
+        # T2 is started by the holder's first RTP media, not by the grant
+        # (TS 24.380 6.3.4.4.5 item 1).
+        actions = media(fc, "a")
         durations[name] = {a.timer: a.duration_ms for a in actions
                            if a.type is ActionType.START_TIMER}
     assert durations["fast"][T_STOP_TALKING] == 1000
@@ -366,10 +398,11 @@ def test_vp1_fc_020_transition_sequence_identical_across_timer_values():
 
 def test_unknown_timer_name_falls_back_to_specification_default():
     fc = machine(Policy(queueing_enabled=True, max_queue_depth=1, timers_ms={}))
-    actions = establish(fc, "a", 100)
+    establish(fc, "a", 100)
+    actions = media(fc, "a")
     starts = {a.timer: a.duration_ms for a in actions
               if a.type is ActionType.START_TIMER}
-    assert starts[T_STOP_TALKING] > 0
+    assert starts[T_STOP_TALKING] == 30000    # table 11.1.3-1 default
 
 
 # --------------------------------------------------------------------------
@@ -378,23 +411,37 @@ def test_unknown_timer_name_falls_back_to_specification_default():
 
 
 def test_stop_talking_timer_recovers_the_floor():
+    """T2 expiry always revokes with cause #2, even with a queue
+    (TS 24.380 6.3.4.4.4); the queue head is granted when the pending-revoke
+    state ends (6.3.4.5.5 -> 6.3.4.3.2 item 3)."""
     clock = Clock()
     fc = machine(clock=clock)
     establish(fc, "a", 100)
+    media(fc, "a")
     request(fc, "b", 100)
     clock.advance(30000)
-    fc.handle(Event(EventType.TIMER_EXPIRY, timer=T_STOP_TALKING))
+    actions = expire(fc, T_STOP_TALKING)
+    assert fc.state is FloorState.REVOKING and fc.holder == "a"
+    revokes = [a for a in actions if a.type is ActionType.SEND_REVOKE]
+    assert len(revokes) == 1
+    assert revokes[0].revoke_reason is RevokeReason.MEDIA_BURST_TOO_LONG
+    expire(fc, T_STOP_TALKING_GRACE)
     assert fc.holder == "b"                 # queue head promoted
 
 
 def test_revoke_timer_recovers_when_release_is_lost():
+    """A lost Floor Release: T8 re-sends the Revoke (6.3.5.6.3), T3 ends
+    the pending-revoke state (6.3.4.5.5)."""
     clock = Clock()
     fc = machine(clock=clock)
     establish(fc, "a", 100)
     fc.handle(Event(EventType.FLOOR_REVOKE, participant="a"))
     assert fc.state is FloorState.REVOKING
+    clock.advance(1000)
+    expire(fc, T_REVOKE)
+    assert fc.state is FloorState.REVOKING   # T8 re-sends, does not end it
     clock.advance(2000)
-    fc.handle(Event(EventType.TIMER_EXPIRY, timer=T_REVOKE))
+    expire(fc, T_STOP_TALKING_GRACE)
     assert fc.state is FloorState.IDLE and fc.holder is None
 
 
@@ -402,9 +449,10 @@ def test_lone_holder_timeout_revokes_then_goes_idle():
     clock = Clock()
     fc = machine(clock=clock)
     establish(fc, "a", 100)
-    fc.handle(Event(EventType.TIMER_EXPIRY, timer=T_STOP_TALKING))
+    media(fc, "a")
+    expire(fc, T_STOP_TALKING)
     assert fc.state is FloorState.REVOKING
-    fc.handle(Event(EventType.TIMER_EXPIRY, timer=T_REVOKE))
+    expire(fc, T_STOP_TALKING_GRACE)
     assert fc.state is FloorState.IDLE
 
 
@@ -530,25 +578,34 @@ def _ack(fc, participant):
     return fc.handle(Event(EventType.FLOOR_ACK, participant=participant))
 
 
+def _granted_from_queue(fc):
+    """'b' holds the floor through the queue, so T20 runs
+    (TS 24.380 6.3.4.4.2 item 2 -- T20 is started only for a queued grant)."""
+    establish(fc, "a")
+    request(fc, "b")
+    release(fc, "a")
+    assert fc.holder == "b"
+
+
 def test_ack_from_the_holder_stops_t205_only():
     fc = machine()
-    establish(fc, "a")
+    _granted_from_queue(fc)
     assert T_GRANTED_RETRY in fc.running_timers()
-    actions = _ack(fc, "a")
+    actions = _ack(fc, "b")
     assert [(a.type, a.timer) for a in actions] == [
         (ActionType.STOP_TIMER, T_GRANTED_RETRY)]
     assert T_GRANTED_RETRY not in fc.running_timers()
-    assert T_STOP_TALKING in fc.running_timers()      # the talk limit still runs
-    assert fc.holder == "a"
+    assert T_END_OF_MEDIA in fc.running_timers()      # T1 still guards the burst
+    assert fc.holder == "b"
 
 
 def test_ack_from_a_non_holder_or_a_repeat_changes_nothing():
     fc = machine()
-    establish(fc, "a")
-    assert _ack(fc, "b") == ()
-    assert T_GRANTED_RETRY in fc.running_timers()
-    _ack(fc, "a")
+    _granted_from_queue(fc)
     assert _ack(fc, "a") == ()
+    assert T_GRANTED_RETRY in fc.running_timers()
+    _ack(fc, "b")
+    assert _ack(fc, "b") == ()
 
 
 def test_ack_when_idle_is_ignored():
@@ -575,7 +632,9 @@ def test_default_timer_values_match_the_specification_table():
     """
     from core.floor import DEFAULT_TIMERS_MS
     assert dict(DEFAULT_TIMERS_MS) == {
+        "T1": 4000,       # Default value: 4 seconds
         "T2": 30000,      # Default maximum value: 30 seconds
+        "T3": 3000,       # Default value: 3 seconds
         "T20": 1000,      # Default value: 1 second
         "T8": 1000,       # Default value: 1 second
     }
@@ -592,3 +651,220 @@ def test_the_known_timer_set_matches_the_server_procedures_table():
     assert not {"T11", "T12"} & set(FLOOR_TIMERS)
     # off-network participant timers stay rejected (PLT-CONF-AUDIT 3.2)
     assert not {"T201", "T203", "T205", "T206", "T207", "T230"} & set(FLOOR_TIMERS)
+
+
+# -- PLT-VP-R1 FC-OP-02: TS 24.380 6.3.4 timer behaviour --------------------
+
+
+def _starts(actions):
+    return {a.timer for a in actions if a.type is ActionType.START_TIMER}
+
+
+def _stops(actions):
+    return {a.timer for a in actions if a.type is ActionType.STOP_TIMER}
+
+
+def test_a_direct_grant_starts_t1_only():
+    """6.3.4.4.2: T1 at every grant; T20 only for a queued one (item 2);
+    T2 not at all (it waits for media, 6.3.4.4.5 item 1)."""
+    fc = machine()
+    assert _starts(establish(fc, "a")) == {T_END_OF_MEDIA}
+
+
+def test_a_queued_grant_starts_t1_and_t20_and_sends_no_idle():
+    fc = machine()
+    establish(fc, "a")
+    request(fc, "b")
+    actions = release(fc, "a")
+    assert _starts(actions) == {T_END_OF_MEDIA, T_GRANTED_RETRY}
+    assert ActionType.SEND_IDLE not in kinds(actions)       # 6.3.4.3.2 item 3
+    assert fc.holder == "b"
+
+
+def test_first_media_starts_t2_later_media_only_refreshes_t1():
+    clock = Clock()
+    fc = machine(clock=clock)
+    establish(fc, "a")
+    assert _starts(media(fc, "a")) == {T_END_OF_MEDIA, T_STOP_TALKING}
+    t2_started = fc.running_timers()[T_STOP_TALKING]
+    clock.advance(1000)
+    assert _starts(media(fc, "a")) == {T_END_OF_MEDIA}      # T2 keeps running
+    assert fc.running_timers()[T_STOP_TALKING] == t2_started
+
+
+def test_holder_media_stops_t20():
+    fc = machine()
+    establish(fc, "a")
+    request(fc, "b")
+    release(fc, "a")
+    assert T_GRANTED_RETRY in _stops(media(fc, "b"))         # 6.3.4.4.5 item 3
+    assert T_GRANTED_RETRY not in fc.running_timers()
+
+
+def test_media_from_a_non_holder_changes_nothing():
+    fc = machine()
+    establish(fc, "a")
+    before = dict(fc.running_timers())
+    assert media(fc, "b") == ()
+    assert fc.running_timers() == before
+
+
+def test_refresh_only_media_is_not_recorded_but_ignored_media_is():
+    """One history entry per RTP packet would grow without bound during a
+    burst; a refresh of T1 is not a transition. An ignored event still is,
+    so the totality guarantee (every event leaves a trace) holds."""
+    fc = machine()
+    establish(fc, "a")
+    media(fc, "a")                     # starts T2: recorded
+    n = len(fc.history)
+    for _ in range(50):
+        media(fc, "a")
+    assert len(fc.history) == n
+    media(fc, "z")                     # not the holder: ignored, recorded
+    assert len(fc.history) == n + 1
+
+
+def test_t1_expiry_idles_the_floor():
+    fc = machine()
+    establish(fc, "a")
+    actions = expire(fc, T_END_OF_MEDIA)
+    assert fc.state is FloorState.IDLE and ActionType.SEND_IDLE in kinds(actions)
+
+
+def test_t2_expiry_revokes_with_cause_2_even_with_a_queue():
+    fc = machine()
+    establish(fc, "a")
+    media(fc, "a")
+    request(fc, "b")
+    actions = expire(fc, T_STOP_TALKING)
+    assert fc.state is FloorState.REVOKING and fc.holder == "a"
+    assert [a.revoke_reason for a in actions
+            if a.type is ActionType.SEND_REVOKE] == [RevokeReason.MEDIA_BURST_TOO_LONG]
+    assert ActionType.SEND_GRANTED not in kinds(actions)
+    assert _starts(actions) == {T_STOP_TALKING_GRACE, T_REVOKE}
+    assert {T_END_OF_MEDIA, T_STOP_TALKING} <= _stops(actions)   # 6.3.4.4.4
+
+
+def test_t8_resends_the_revoke_with_the_same_cause():
+    fc = machine()
+    establish(fc, "a")
+    media(fc, "a")
+    expire(fc, T_STOP_TALKING)
+    actions = expire(fc, T_REVOKE)
+    assert [a.revoke_reason for a in actions
+            if a.type is ActionType.SEND_REVOKE] == [RevokeReason.MEDIA_BURST_TOO_LONG]
+    assert _starts(actions) == {T_REVOKE}
+    assert fc.state is FloorState.REVOKING
+
+
+def test_media_while_revoking_restarts_t1_and_t1_expiry_idles():
+    """6.3.4.5.3 (RTP restarts T1) and 6.3.4.5.6 (T1 expiry -> idle)."""
+    fc = machine()
+    establish(fc, "a")
+    fc.handle(Event(EventType.FLOOR_REVOKE, participant="a"))
+    assert _starts(media(fc, "a")) == {T_END_OF_MEDIA}
+    expire(fc, T_END_OF_MEDIA)
+    assert fc.state is FloorState.IDLE
+
+
+def test_release_while_revoking_stops_every_timer():
+    fc = machine()
+    establish(fc, "a")
+    media(fc, "a")
+    fc.handle(Event(EventType.FLOOR_REVOKE, participant="a"))
+    release(fc, "a")
+    assert fc.state is FloorState.IDLE and fc.running_timers() == {}
+
+
+def test_t20_is_bounded_by_c20():
+    fc = machine()
+    establish(fc, "a")
+    request(fc, "b")
+    release(fc, "a")
+    resent = 0
+    for _ in range(10):
+        resent += kinds(expire(fc, T_GRANTED_RETRY)).count(ActionType.SEND_GRANTED)
+    assert resent == 2                                   # C20 = 3 incl. the first
+    assert fc.state is FloorState.TAKEN and fc.holder == "b"   # 6.3.4.4.10
+    assert T_GRANTED_RETRY not in fc.running_timers()
+
+
+def test_pre_emption_revokes_with_cause_4():
+    fc = machine()                      # QUEUEING allows override
+    establish(fc, "a", 100)
+    media(fc, "a")
+    actions = request(fc, "b", 200)
+    assert [a.revoke_reason for a in actions
+            if a.type is ActionType.SEND_REVOKE] == [RevokeReason.PREEMPTED]
+    assert {T_END_OF_MEDIA, T_GRANTED_RETRY} <= _stops(actions)  # 6.3.4.4.7 2a/2b
+    release(fc, "a")
+    assert fc.holder == "b"
+
+
+def test_a_pre_emptor_stays_in_front_of_later_higher_priority_requests():
+    """6.3.4.4.7 item 2e: in front of ALL queued requests, until granted --
+    a request arriving during the grace, however high, queues behind it."""
+    fc = machine(Policy(queueing_enabled=True, override_allowed=True,
+                        max_queue_depth=3))
+    establish(fc, "a", 200)
+    request(fc, "c", 150)                   # below the holder: just queued
+    request(fc, "b", 210)                   # pre-empts
+    assert fc.state is FloorState.REVOKING and fc.queue == ("b", "c")
+    request(fc, "d", 900)                   # during the grace
+    assert fc.queue == ("b", "d", "c")
+    release(fc, "a")
+    assert fc.holder == "b"
+
+
+def test_an_already_queued_pre_emptor_is_moved_to_the_front():
+    """The reviewer's scenario: A (3) holds, queue C (3), B (2); B's priority
+    rises to 9 and B asks again. B must be moved in front, not denied
+    ALREADY_QUEUED -- otherwise A is pre-empted in C's favour."""
+    fc = machine(Policy(queueing_enabled=True, override_allowed=True,
+                        max_queue_depth=3))
+    establish(fc, "a", 3)
+    request(fc, "c", 3)
+    request(fc, "b", 2)
+    assert fc.queue == ("c", "b")
+    actions = request(fc, "b", 9)
+    assert ActionType.SEND_DENY not in kinds(actions)
+    assert fc.state is FloorState.REVOKING and fc.queue == ("b", "c")
+    release(fc, "a")
+    assert fc.holder == "b" and fc.queue == ("c",)
+
+
+def test_pre_emption_without_queueing_still_hands_over():
+    """6.3.4.4.7 item 2e applies even where queueing was not negotiated; the
+    machine used to revoke the talker and give the pre-emptor nothing
+    (PLT-VP-R1 FC-OP-07). No Queue Position Info is sent (item 2f)."""
+    fc = machine(Policy(queueing_enabled=False, override_allowed=True,
+                        max_queue_depth=0))
+    establish(fc, "a", 100)
+    actions = request(fc, "b", 200)
+    assert ActionType.SEND_QUEUE_POSITION not in kinds(actions)
+    assert fc.state is FloorState.REVOKING
+    expire(fc, T_STOP_TALKING_GRACE)
+    assert fc.holder == "b" and fc.queue == ()
+    # an ordinary request is still denied, not queued
+    denied = request(fc, "c", 100)
+    assert [a.reason for a in denied if a.type is ActionType.SEND_DENY] == \
+        [DenyReason.QUEUEING_DISABLED]
+
+
+def test_a_full_queue_refuses_a_new_pre_emptor_rather_than_revoking_for_nobody():
+    fc = machine(Policy(queueing_enabled=True, override_allowed=True,
+                        max_queue_depth=1))
+    establish(fc, "a", 100)
+    request(fc, "c", 50)
+    actions = request(fc, "b", 200)
+    assert [a.reason for a in actions if a.type is ActionType.SEND_DENY] == \
+        [DenyReason.QUEUE_FULL]
+    assert fc.state is FloorState.TAKEN and fc.holder == "a"
+
+
+def test_operator_revoke_uses_the_generic_cause():
+    fc = machine()
+    establish(fc, "a")
+    actions = fc.handle(Event(EventType.FLOOR_REVOKE, participant="a"))
+    assert [a.revoke_reason for a in actions
+            if a.type is ActionType.SEND_REVOKE] == [RevokeReason.OTHER]

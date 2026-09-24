@@ -11,7 +11,7 @@ public-safety deployment or a railway FRMCS deployment, from one codebase and on
 image, with the profile chosen at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 567 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 592 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -189,6 +189,11 @@ reasons are specific, not general:
   TS 24.380 across all eight releases and corrected; what is missing is any
   evidence that another implementation's encoder agrees with this one. The
   comparator shares this repository's assumptions, so it cannot supply it.
+  The floor-timer questions FC-OP-01/02 were a separate, narrower gap and were
+  CLOSED on 2026-09-24 (PLT-CONF-AUDIT CA-21): T1/T2/T3/T8/T20 and C20 now do
+  what TS 24.380 6.3.4 says, driven by `MEDIA_RECEIVED` from the media plane.
+  The profiles' timer values were written for the old behaviour and are the
+  owner's call (PRF-OP-02).
 - **VP1-DOC-001**'s "schema-valid" clause: CLOSED (SVC-OP-01, 2026-09-22).
   RFC 4826's `resource-lists.xsd` was the one file the OMA-defined XSD
   validation was skipping on; it is now in `docs/OMA/` and

@@ -50,6 +50,10 @@ class EventType(Enum):
     FLOOR_ACK = "floor-ack"
     PARTICIPANT_LEFT = "participant-left"
     TIMER_EXPIRY = "timer-expiry"
+    # "an indication from the media distributor ... that RTP media packets
+    # are received" (TS 24.380 6.3.4.4.5, 6.3.4.5.3). It starts T2, restarts
+    # T1 and stops T20; without it none of the three can be driven correctly.
+    MEDIA_RECEIVED = "media-received"
 
 
 class ActionType(Enum):
@@ -75,6 +79,16 @@ class DenyReason(Enum):
     LOWER_PRIORITY = "lower-priority"
 
 
+class RevokeReason(Enum):
+    """Why the floor is being revoked. A separate namespace from DenyReason,
+    as TS 24.380 8.2.10.2 is from 8.2.6.2. The media plane maps each to a
+    <Reject Cause>; before FC-OP-02 every revoke went out as #255 "other"."""
+
+    MEDIA_BURST_TOO_LONG = "media-burst-too-long"    # #2, on T2 expiry (6.3.4.4.4)
+    PREEMPTED = "media-burst-pre-empted"             # #4, on pre-emption (6.3.4.4.7)
+    OTHER = "other"                                  # #255
+
+
 # Timer names are TS 24.380 names; values come from the profile.
 # On-network floor control SERVER timers, TS 24.380 clause 6.3. This module is
 # the controlling side, so these are the right family.
@@ -82,19 +96,33 @@ class DenyReason(Enum):
 # The T2xx names used here previously (T203, T205, T206) are OFF-NETWORK
 # PARTICIPANT timers, clause 7.2.3 — the wrong family entirely for a server
 # implementing on-network floor control. Corrected against TS 24.380.
-T_STOP_TALKING = "T2"         # stop talking
-T_STOP_TALKING_GRACE = "T3"   # stop talking grace (declared, not yet driven)
-T_GRANTED_RETRY = "T20"       # floor granted
-T_REVOKE = "T8"               # media revoke
-T_END_OF_MEDIA = "T1"         # end of RTP media (declared, not yet driven)
+#
+# What each timer DOES was checked on 2026-09-24 against the TS 24.380 timer
+# table (start / stop / on expiry) and clauses 6.3.4.4 and 6.3.4.5, which are
+# identical in V13.14, V17.7 and V20.0 (PLT-VP-R1 FC-OP-02). Before that, T8
+# ended the grace period -- which is T3's job -- and nothing re-sent a Revoke.
+T_STOP_TALKING = "T2"         # started by the holder's first RTP media; expiry revokes (#2)
+T_STOP_TALKING_GRACE = "T3"   # started entering pending revoke; expiry -> floor idle
+T_GRANTED_RETRY = "T20"       # started only when a QUEUED request is granted; re-sends Granted
+T_REVOKE = "T8"               # started with each Floor Revoke; expiry re-sends it
+T_END_OF_MEDIA = "T1"         # started at grant, restarted by RTP; expiry -> floor idle
 T_INACTIVITY = "T4"           # inactivity (declared, not yet driven)
 T_FLOOR_IDLE = "T7"           # floor idle (declared, not yet driven)
 
+# Default values from the same table. T2 30 s, T20 1 s, T8 1 s were checked
+# in CA-05; T1 4 s and T3 3 s were added with FC-OP-02.
 DEFAULT_TIMERS_MS: Mapping[str, int] = {
     T_STOP_TALKING: 30000,
     T_GRANTED_RETRY: 1000,   # T20 default 1 s
     T_REVOKE: 1000,          # T8 default 1 s
+    T_END_OF_MEDIA: 4000,    # T1 default 4 s (maximum 6 s)
+    T_STOP_TALKING_GRACE: 3000,   # T3 default 3 s (0 s with audio cut-in)
 }
+
+# Counter C20 (Floor Granted): how many times Floor Granted is sent in all
+# before T20 gives up and the floor simply stays taken (6.3.4.4.10). Default
+# 3. Not yet configurable from the profile, which declares timers only.
+C20_DEFAULT = 3
 
 
 @dataclass(frozen=True)
@@ -111,6 +139,7 @@ class Action:
     type: ActionType
     target: Optional[str] = None        # None means every participant
     reason: Optional[DenyReason] = None
+    revoke_reason: Optional[RevokeReason] = None
     timer: Optional[str] = None
     duration_ms: Optional[int] = None
     queue_position: Optional[int] = None
@@ -136,6 +165,10 @@ class QueueEntry:
     floor_priority: int
     arrival: int          # monotonic sequence, breaks priority ties
     at_ms: int
+    # A pre-emptor: held in front of every other entry (TS 24.380 6.3.4.4.7
+    # item 2e), whatever its priority and even where queueing was not
+    # negotiated, until the revoked talker's grace is over.
+    front: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +226,8 @@ class FloorControl:
         self._history: List[Transition] = []
         self._sequence = 0
         self._arrivals = 0
+        self._c20 = 0                                   # Floor Granted sends so far
+        self._revoke_reason: RevokeReason = RevokeReason.OTHER
 
     # -- observation ----------------------------------------------------
 
@@ -233,7 +268,16 @@ class FloorControl:
             actions = tuple(handler(self, event))
         self._apply_timer_actions(actions)
         self._check_invariants()
-        self._record(before, event, actions)
+        # PLT-FC-011 records every TRANSITION. A media report whose only
+        # effect is to refresh T1 is not one; recording it would add an
+        # entry several times a second for as long as anyone talks.
+        refresh_only = (event.type is EventType.MEDIA_RECEIVED
+                        and self._state is before
+                        and bool(actions)          # an ignored event IS recorded
+                        and all(a.type is ActionType.START_TIMER
+                                and a.timer == T_END_OF_MEDIA for a in actions))
+        if not refresh_only:
+            self._record(before, event, actions)
         return actions
 
     # -- invariants -----------------------------------------------------
@@ -249,13 +293,19 @@ class FloorControl:
                 f"state {self._state.value} must have no floor holder, "
                 f"found {self._holder!r}")
         # PLT-FC-006: the queue never exceeds the declared depth.
-        if len(self._queue) > self._policy.max_queue_depth:
+        if len(self._queue) > self._policy.max_queue_depth and \
+                self._policy.queueing_enabled:
             raise FloorInvariantViolation(
                 f"queue depth {len(self._queue)} exceeds declared maximum "
                 f"{self._policy.max_queue_depth}")
-        if not self._policy.queueing_enabled and self._queue:
+        # With queueing disabled, the one entry allowed is a pre-emptor
+        # waiting out the revoked talker's grace (6.3.4.4.7 item 2e).
+        if not self._policy.queueing_enabled and \
+                any(not e.front for e in self._queue):
             raise FloorInvariantViolation(
-                "queueing is disabled but the queue is not empty")
+                "queueing is disabled but the queue holds an ordinary request")
+        if sum(e.front for e in self._queue) > 1:
+            raise FloorInvariantViolation("more than one pre-emptor queued")
         # A participant appears in the queue at most once.
         seen = [e.participant for e in self._queue]
         if len(seen) != len(set(seen)):
@@ -287,43 +337,88 @@ class FloorControl:
 
     # -- helpers --------------------------------------------------------
 
-    def _grant(self, participant: str, priority: int) -> List[Action]:
+    def _start(self, name: str) -> Action:
+        return Action(ActionType.START_TIMER, timer=name,
+                      duration_ms=self._policy.timer(name))
+
+    @staticmethod
+    def _stop(*names: str) -> List[Action]:
+        return [Action(ActionType.STOP_TIMER, timer=n) for n in names]
+
+    def _grant(self, participant: str, priority: int,
+               from_queue: bool = False) -> List[Action]:
+        """Enter 'G: Floor Taken' (TS 24.380 6.3.4.4.2).
+
+        T1 starts for the new holder (item 4). T2 does NOT start here: it
+        starts with the holder's first RTP media (6.3.4.4.5 item 1), so a
+        talker is not charged for the time before speaking. T20 starts only
+        when the grant serves a QUEUED request (item 2), with C20 at 1; a
+        direct grant is answered by the request it responds to and is not
+        re-sent. The machine used to start T2 and T20 on every grant.
+        """
         self._state = FloorState.TAKEN
         self._holder = participant
         self._holder_priority = priority
         self._queue = [e for e in self._queue if e.participant != participant]
-        return [
+        actions = [
             Action(ActionType.SEND_GRANTED, target=participant),
             Action(ActionType.SEND_TAKEN, target=None),
-            Action(ActionType.START_TIMER, timer=T_STOP_TALKING,
-                   duration_ms=self._policy.timer(T_STOP_TALKING)),
-            Action(ActionType.START_TIMER, timer=T_GRANTED_RETRY,
-                   duration_ms=self._policy.timer(T_GRANTED_RETRY)),
+            self._start(T_END_OF_MEDIA),
         ]
-
-    def _go_idle(self) -> List[Action]:
-        self._state = FloorState.IDLE
-        self._holder = None
-        self._holder_priority = 0
-        return [
-            Action(ActionType.STOP_TIMER, timer=T_STOP_TALKING),
-            Action(ActionType.STOP_TIMER, timer=T_GRANTED_RETRY),
-            Action(ActionType.STOP_TIMER, timer=T_REVOKE),
-            Action(ActionType.SEND_IDLE, target=None),
-        ]
-
-    def _next_from_queue(self) -> List[Action]:
-        """Release the floor, then grant it to the head of the queue if any."""
-        actions = self._go_idle()
-        if not self._queue:
-            return actions
-        head = self._queue[0]
-        self._queue = self._queue[1:]
-        actions += self._grant(head.participant, head.floor_priority)
-        actions += self._queue_position_updates()
+        if from_queue:
+            self._c20 = 1
+            actions.append(self._start(T_GRANTED_RETRY))
         return actions
 
+    def _enter_idle(self) -> List[Action]:
+        """Enter 'G: Floor Idle' (6.3.4.3.2), from a state that had a holder.
+
+        With the queue empty: Floor Idle to everyone. With a queued request:
+        straight to granting the head of the queue (item 3) -- WITHOUT a
+        Floor Idle first. The machine used to broadcast Floor Idle and then
+        grant, one message too many on every hand-over.
+        """
+        self._holder = None
+        self._holder_priority = 0
+        stop = self._stop(T_STOP_TALKING, T_GRANTED_RETRY, T_REVOKE,
+                          T_STOP_TALKING_GRACE, T_END_OF_MEDIA)
+        if not self._queue:
+            self._state = FloorState.IDLE
+            return stop + [Action(ActionType.SEND_IDLE, target=None)]
+        head = self._queue[0]
+        self._queue = self._queue[1:]
+        return (stop + self._grant(head.participant, head.floor_priority,
+                                   from_queue=True)
+                + self._queue_position_updates())
+
+    # The old name, kept for the call sites that read naturally with it.
+    _next_from_queue = _enter_idle
+
+    def _enter_revoke(self, reason: RevokeReason) -> List[Action]:
+        """Enter 'G: pending Floor Revoke' (6.3.4.5.2) and, towards the holder,
+        'U: pending Floor Revoke' (6.3.5.6.2).
+
+        Floor Revoke carries the reason's cause. T3 (stop talking grace)
+        bounds how long the revoked talker may go on; T8 re-sends the Revoke
+        until then. The machine used to start only T8 and end the grace on
+        its expiry, so a talker got T8's 1 s -- 100 ms in the mcx profile --
+        instead of T3's 3 s, and a lost Revoke was never repeated.
+        """
+        self._state = FloorState.REVOKING
+        self._revoke_reason = reason
+        # T1 is stopped on the way in (6.3.4.4.4 item 1, 6.3.4.4.7 item 2a);
+        # media during the grace restarts it (6.3.4.5.3). T2 and T20 have no
+        # procedure in pending revoke (6.3.4.1: discarded), so stopping them
+        # here only keeps them from firing into a state that ignores them.
+        return self._stop(T_STOP_TALKING, T_GRANTED_RETRY, T_END_OF_MEDIA) + [
+            Action(ActionType.SEND_REVOKE, target=self._holder, revoke_reason=reason),
+            self._start(T_STOP_TALKING_GRACE),
+            self._start(T_REVOKE),
+        ]
+
     def _queue_position_updates(self) -> List[Action]:
+        if not self._policy.queueing_enabled:
+            return []        # not negotiated: no Queue Position Info (6.3.4.4.7 2f)
         return [
             Action(ActionType.SEND_QUEUE_POSITION, target=e.participant,
                    queue_position=i + 1)
@@ -348,7 +443,7 @@ class FloorControl:
                                       at_ms=self._now()))
         # Ordered by floor priority, then arrival. Deterministic, and the tie
         # break is first-come so a queue cannot starve an equal-priority peer.
-        self._queue.sort(key=lambda e: (-e.floor_priority, e.arrival))
+        self._queue.sort(key=lambda e: (not e.front, -e.floor_priority, e.arrival))
         return self._queue_position_updates()
 
     # -- transitions ----------------------------------------------------
@@ -373,23 +468,55 @@ class FloorControl:
             return []
         self._participants.add(participant)
         if participant == self._holder:
+            if self._state is FloorState.TAKEN:
+                # 6.3.4.4.8: the holder asking again has lost its Floor
+                # Granted; send it again, with what is left of T2 as the
+                # Duration, and stay in Floor Taken. A Deny here would tell a
+                # client it does not hold a floor that it does.
+                return [Action(ActionType.SEND_GRANTED, target=participant,
+                               duration_ms=self._t2_remaining())]
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.ALREADY_HOLDER)]
         # PLT-FC-005 / PLT-FC-008: override is a policy decision using the floor
         # priority from IF-PRI. Strictly greater, so equal priority never
         # interrupts an active talker.
         if self._policy.override_allowed and \
-                event.floor_priority > self._holder_priority:
-            revoked = self._holder
-            self._state = FloorState.REVOKING
-            pending = self._enqueue(participant, event.floor_priority) \
-                if self._policy.queueing_enabled else []
-            return [
-                Action(ActionType.SEND_REVOKE, target=revoked),
-                Action(ActionType.START_TIMER, timer=T_REVOKE,
-                       duration_ms=self._policy.timer(T_REVOKE)),
-            ] + pending
+                event.floor_priority > self._holder_priority and \
+                self._state is FloorState.TAKEN:
+            return self._pre_empt(participant, event.floor_priority)
         return self._enqueue(participant, event.floor_priority)
+
+    def _pre_empt(self, participant: str, priority: int) -> List[Action]:
+        """6.3.4.4.7 item 2: revoke with #4 (Media Burst pre-empted) and put
+        the pre-emptor in front of every queued request -- inserted, or moved
+        if already queued (item 2e) -- whether or not queueing was
+        negotiated. Queue Position Info only where it was (item 2f).
+
+        One case is refused rather than followed: a queue already at its
+        declared depth, with the pre-emptor not in it. Inserting would break
+        the depth the profile declared (PLT-FC-006); pre-empting without
+        inserting would revoke a talker for nobody, which is what this
+        machine used to do with queueing disabled. The request is then an
+        ordinary one and is denied as queue-full.
+        """
+        queued = any(e.participant == participant for e in self._queue)
+        if not queued and self._policy.queueing_enabled and \
+                len(self._queue) >= self._policy.max_queue_depth:
+            return self._enqueue(participant, priority)
+        self._arrivals += 1
+        self._queue = [QueueEntry(participant=participant, floor_priority=priority,
+                                  arrival=self._arrivals, at_ms=self._now(),
+                                  front=True)] + \
+            [e for e in self._queue if e.participant != participant]
+        return self._enter_revoke(RevokeReason.PREEMPTED) + \
+            self._queue_position_updates()
+
+    def _t2_remaining(self) -> int:
+        deadline = self._running_timers.get(T_STOP_TALKING)
+        if deadline is None:
+            # No media yet, so T2 has not started: all of it remains.
+            return self._policy.timer(T_STOP_TALKING)
+        return max(0, deadline - self._now())
 
     def _on_release(self, event: Event) -> List[Action]:
         if event.participant != self._holder:
@@ -403,18 +530,32 @@ class FloorControl:
     def _on_revoke(self, event: Event) -> List[Action]:
         if self._holder is None:
             return []
-        self._state = FloorState.REVOKING
-        return [
-            Action(ActionType.SEND_REVOKE, target=self._holder),
-            Action(ActionType.START_TIMER, timer=T_REVOKE,
-                   duration_ms=self._policy.timer(T_REVOKE)),
-        ]
+        return self._enter_revoke(RevokeReason.OTHER)
 
     def _on_release_while_revoking(self, event: Event) -> List[Action]:
+        """6.3.4.5.4: stop T1 and T3 (and T8), then Floor Idle, which serves
+        the queue if it has anything in it."""
         if event.participant != self._holder:
             return []
-        return [Action(ActionType.STOP_TIMER, timer=T_REVOKE)] + \
-            self._next_from_queue()
+        return self._enter_idle()
+
+    def _on_media(self, event: Event) -> List[Action]:
+        """RTP media from the holder (6.3.4.4.5; 6.3.4.5.3 while revoking).
+
+        Floor Taken: start T2 if not running, restart T1, stop T20 -- media
+        from the holder is the normative proof the grant arrived. Pending
+        revoke: restart T1 only; the grace period is T3's to end. Media from
+        anyone else changes nothing here (the media plane drops it).
+        """
+        if event.participant != self._holder or self._holder is None:
+            return []
+        actions: List[Action] = [self._start(T_END_OF_MEDIA)]
+        if self._state is FloorState.TAKEN:
+            if T_STOP_TALKING not in self._running_timers:
+                actions.append(self._start(T_STOP_TALKING))
+            if T_GRANTED_RETRY in self._running_timers:
+                actions += self._stop(T_GRANTED_RETRY)
+        return actions
 
     def _on_participant_left(self, event: Event) -> List[Action]:
         self._participants.discard(event.participant)
@@ -428,31 +569,43 @@ class FloorControl:
         name = event.timer
         self._running_timers.pop(name or "", None)
         # PLT-FC-012: a lost release must not leave the session without a floor
-        # holder forever. Both the stop-talking and revoke timers recover it.
+        # holder forever. T1 recovers a silent holder, T3 a revoked one.
         if name == T_STOP_TALKING and self._state is FloorState.TAKEN:
-            if self._queue:
-                return self._next_from_queue()
-            self._state = FloorState.REVOKING
-            return [
-                Action(ActionType.SEND_REVOKE, target=self._holder),
-                Action(ActionType.START_TIMER, timer=T_REVOKE,
-                       duration_ms=self._policy.timer(T_REVOKE)),
-            ]
+            # 6.3.4.4.4: ALWAYS revoke, with #2. The machine used to hand the
+            # floor straight to the queue without revoking, so the talker who
+            # ran over was never told.
+            return self._enter_revoke(RevokeReason.MEDIA_BURST_TOO_LONG)
+        if name == T_END_OF_MEDIA and self._state in (FloorState.TAKEN,
+                                                      FloorState.REVOKING):
+            # 6.3.4.4.3 / 6.3.4.5.6: the holder went silent; the floor is idle.
+            return self._enter_idle()
+        if name == T_STOP_TALKING_GRACE and self._state is FloorState.REVOKING:
+            # 6.3.4.5.5: the grace is over; the floor is idle.
+            return self._enter_idle()
         if name == T_REVOKE and self._state is FloorState.REVOKING:
-            return self._next_from_queue()
+            # 6.3.5.6.3: re-send the Revoke with the same cause, restart T8.
+            # How often is an implementation option; T3 bounds it here.
+            return [Action(ActionType.SEND_REVOKE, target=self._holder,
+                           revoke_reason=self._revoke_reason),
+                    self._start(T_REVOKE)]
         if name == T_GRANTED_RETRY and self._state is FloorState.TAKEN:
-            return [
-                Action(ActionType.SEND_GRANTED, target=self._holder),
-                Action(ActionType.START_TIMER, timer=T_GRANTED_RETRY,
-                       duration_ms=self._policy.timer(T_GRANTED_RETRY)),
-            ]
+            # 6.3.4.4.9 / 6.3.4.4.10: re-send while C20 is below its limit,
+            # then give up and stay in Floor Taken.
+            if self._c20 >= C20_DEFAULT:
+                return []
+            self._c20 += 1
+            return [Action(ActionType.SEND_GRANTED, target=self._holder),
+                    self._start(T_GRANTED_RETRY)]
         return []
 
     def _on_ack(self, event: Event) -> List[Action]:
         """The holder acknowledged its grant: stop retransmitting it.
 
-        Without this the grant timer re-arms for as long as the holder keeps
-        the floor (FC-OP-01). An ack from anyone else changes nothing.
+        FC-OP-01, closed 2026-09-24: TS 24.380 makes Floor Ack handling "an
+        implementation option" (NOTE in 6.3.5.3.5 and throughout 6.3.5).
+        The normative stop for T20 is the holder's RTP media (6.3.4.4.5
+        item 3); stopping it on an ack as well is the option taken here.
+        An ack from anyone else changes nothing.
         """
         if event.participant != self._holder or \
                 T_GRANTED_RETRY not in self._running_timers:
@@ -462,7 +615,8 @@ class FloorControl:
     def _on_session_released(self, event: Event) -> List[Action]:
         actions = [
             Action(ActionType.STOP_TIMER, timer=t)
-            for t in (T_STOP_TALKING, T_GRANTED_RETRY, T_REVOKE)
+            for t in (T_STOP_TALKING, T_GRANTED_RETRY, T_REVOKE,
+                      T_STOP_TALKING_GRACE, T_END_OF_MEDIA)
         ]
         self._state = FloorState.RELEASED
         self._holder = None
@@ -498,6 +652,8 @@ FloorControl._DISPATCH = {
     (FloorState.TAKEN, EventType.FLOOR_RELEASE): FloorControl._on_release,
     (FloorState.TAKEN, EventType.FLOOR_REVOKE): FloorControl._on_revoke,
     (FloorState.TAKEN, EventType.FLOOR_ACK): FloorControl._on_ack,
+    (FloorState.TAKEN, EventType.MEDIA_RECEIVED): FloorControl._on_media,
+    (FloorState.REVOKING, EventType.MEDIA_RECEIVED): FloorControl._on_media,
     (FloorState.TAKEN, EventType.PARTICIPANT_LEFT):
         FloorControl._on_participant_left,
     (FloorState.TAKEN, EventType.TIMER_EXPIRY): FloorControl._on_timer,

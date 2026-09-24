@@ -215,7 +215,9 @@ def test_contention_hands_the_floor_over_and_media_follows(call):
             if m is None:
                 break
             seen[u].append(m.type)
-    assert MsgType.IDLE in seen[U[0]]
+    # queue non-empty: the head is granted directly, no Floor Idle
+    # (TS 24.380 6.3.4.3.2 item 3)
+    assert MsgType.IDLE not in seen[U[0]]
     assert MsgType.GRANTED in seen[U[1]]
     assert MsgType.TAKEN in seen[U[0]] and MsgType.TAKEN in seen[U[2]]
 
@@ -281,7 +283,7 @@ def test_session_end_closes_the_media_session(call):
 
 
 def test_floor_does_not_start_while_callees_are_still_ringing(call):
-    """Otherwise the initiator's T203 would run out before anyone answered."""
+    """Otherwise the initiator's T1 would run out before anyone answered."""
     rt, core, flows, ues, clock = call
     with core.lock:
         core.on_bytes(group_invite(ues[U[0]], "ring"), flows[U[0]])
@@ -293,4 +295,6 @@ def test_floor_does_not_start_while_callees_are_still_ringing(call):
         (req,) = flows[U[1]].requests("INVITE")
         core.on_bytes(answer(req, 200, ues[U[1]].sdp()), flows[U[1]])
         assert floor.state.value == "floor-taken" and floor.holder == U[0]
-        assert set(floor.running_timers()) == {"T2", "T20"}
+        # a direct grant runs T1 only: T2 waits for the first RTP packet and
+        # T20 is for queued grants (TS 24.380 6.3.4.4.2, 6.3.4.4.5)
+        assert set(floor.running_timers()) == {"T1"}

@@ -339,11 +339,16 @@ def test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire():
     to_floor(ms, B, MsgType.QUEUE_POSITION_REQUEST)
     assert ios[B].msgs()[0].queue_info == (1, 100)
     step()
-    to_floor(ms, A, MsgType.RELEASE)                              # idle, B granted
-    assert ios[A].types()[0] is MsgType.IDLE and MsgType.GRANTED in ios[B].types()
+    # A releases with B queued: B is granted directly and no Floor Idle is
+    # sent (TS 24.380 6.3.4.3.2 item 3); A is told who holds the floor.
+    to_floor(ms, A, MsgType.RELEASE)
+    assert ios[A].types() == [MsgType.TAKEN] and ios[B].types() == [MsgType.GRANTED]
     step()
     ms.apply(floor.handle(fl.Event(fl.EventType.FLOOR_REVOKE, participant=B)))
     assert ios[B].types() == [MsgType.REVOKE]
+    step()
+    to_floor(ms, B, MsgType.RELEASE)                              # empty queue: idle
+    assert all(io.types() == [MsgType.IDLE] for io in ios.values())
     step()
     # everything the machine can say has been sent, and every client message
     # type was received and parsed
@@ -529,55 +534,141 @@ def test_priority_hook_failure_denies_without_touching_the_machine():
 # ============================================================ timers (profile-driven)
 
 
-def test_grant_is_retransmitted_on_t205_until_the_holder_acks():
+def granted_from_queue():
+    """B holds the floor through the queue: the only grant T20 guards
+    (TS 24.380 6.3.4.4.2 item 2)."""
+    ms, ios, clock, floor = make()
+    to_floor(ms, B, MsgType.REQUEST)
+    to_floor(ms, A, MsgType.RELEASE)
+    assert floor.holder == B
+    clear(ios)
+    return ms, ios, clock, floor
+
+
+def test_a_direct_grant_is_not_retransmitted():
     ms, ios, clock, _ = make()
     clear(ios)
     clock.now += 100
     ms.tick()
-    assert ios[A].types() == [MsgType.GRANTED]
+    assert ios[A].types() == []
+
+
+def test_grant_is_retransmitted_on_t205_until_the_holder_acks():
+    ms, ios, clock, _ = granted_from_queue()
     clock.now += 100
     ms.tick()
-    assert ios[A].types() == [MsgType.GRANTED, MsgType.GRANTED]
-    to_floor(ms, A, MsgType.ACK, rtcp.f_acked(MsgType.GRANTED))
+    assert ios[B].types() == [MsgType.GRANTED]
+    to_floor(ms, B, MsgType.ACK, rtcp.f_acked(MsgType.GRANTED))
     clear(ios)
     clock.now += 1000
     ms.tick()
-    assert ios[A].types() == []                  # retransmission has stopped
+    assert ios[B].types() == []                  # retransmission has stopped
 
 
-def test_an_ack_from_a_non_holder_does_not_stop_retransmission():
-    ms, ios, clock, _ = make()
-    to_floor(ms, B, MsgType.ACK, rtcp.f_acked(MsgType.TAKEN))
+def test_grant_retransmission_stops_at_c20():
+    """C20 upper limit 3 counts the first Granted (6.3.4.4.2 item 2: C20 is
+    set to 1), so two retransmissions follow and then the floor stays taken
+    (6.3.4.4.10)."""
+    ms, ios, clock, floor = granted_from_queue()
+    for _ in range(6):
+        clock.now += 100
+        ms.tick()
+    assert ios[B].types() == [MsgType.GRANTED, MsgType.GRANTED]
+    assert floor.state is fl.FloorState.TAKEN and floor.holder == B
+
+
+def test_holder_media_stops_grant_retransmission():
+    """RTP from the holder stops T20 (6.3.4.4.5 item 3)."""
+    ms, ios, clock, _ = granted_from_queue()
+    send_rtp(ms, B)
     clear(ios)
     clock.now += 100
     ms.tick()
-    assert ios[A].types() == [MsgType.GRANTED]
+    assert ios[B].types() == []
 
 
-def test_stop_talking_expiry_revokes_and_revoke_timer_recovers_the_floor():
-    ms, ios, clock, floor = make()
-    to_floor(ms, A, MsgType.ACK)
+def test_an_ack_from_a_non_holder_does_not_stop_retransmission():
+    ms, ios, clock, _ = granted_from_queue()
+    to_floor(ms, A, MsgType.ACK, rtcp.f_acked(MsgType.TAKEN))
     clear(ios)
-    clock.now += 4000                            # T203 from the profile
+    clock.now += 100
     ms.tick()
-    assert MsgType.REVOKE in ios[A].types() and floor.state is fl.FloorState.REVOKING
+    assert ios[B].types() == [MsgType.GRANTED]
+
+
+def talk(ms, clock, uri, ms_total, step=250):
+    """Keep RTP flowing from uri for ms_total, ticking timers as it goes,
+    so T1 (end of RTP media) never fires."""
+    for seq in range(1, ms_total // step + 1):
+        clock.now += step
+        send_rtp(ms, uri, seq=seq)
+        ms.tick()
+
+
+def test_stop_talking_expiry_revokes_and_grace_recovers_the_floor():
+    """T2 runs from the first RTP packet (6.3.4.4.5 item 1); its expiry
+    revokes with cause #2 (6.3.4.4.4); T8 re-sends the Revoke while the
+    holder ignores it (6.3.5.6.3); T3 then ends the burst (6.3.4.5.5)."""
+    ms, ios, clock, floor = make(pol=policy(timers_ms={"T2": 4000, "T20": 100,
+                                                       "T8": 100, "T3": 300}))
+    send_rtp(ms, A)
     clear(ios)
-    clock.now += 100                             # T206 from the profile
+    talk(ms, clock, A, 4000)
+    revokes = [m for m in ios[A].msgs() if m.type is MsgType.REVOKE]
+    assert len(revokes) == 1 and floor.state is fl.FloorState.REVOKING
+    assert revokes[0].reject_cause == (rtcp.REVOKE_MEDIA_BURST_TOO_LONG,
+                                       "media-burst-too-long")
+    clear(ios)
+    clock.now += 100                             # T8: the Revoke again
+    ms.tick()
+    assert ios[A].types() == [MsgType.REVOKE] and floor.state is fl.FloorState.REVOKING
+    clock.now += 200                             # T3 grace over
     ms.tick()
     assert floor.state is fl.FloorState.IDLE
     assert all(MsgType.IDLE in io.types() for io in ios.values())
 
 
-def test_timer_durations_are_the_profiles_not_hardcoded():
-    ms, ios, clock, floor = make(pol=policy(timers_ms={"T2": 9000, "T20": 100,
-                                                       "T8": 100}))
-    to_floor(ms, A, MsgType.ACK)
+def test_silence_ends_the_burst_on_t1():
+    """No RTP from the holder for T1 -> floor idle (6.3.4.4.3)."""
+    ms, ios, clock, floor = make(pol=policy(timers_ms={"T1": 500}))
     clear(ios)
-    clock.now += 8999
+    clock.now += 499
     ms.tick()
     assert floor.state is fl.FloorState.TAKEN
     clock.now += 1
     ms.tick()
+    assert floor.state is fl.FloorState.IDLE
+    assert all(io.types() == [MsgType.IDLE] for io in ios.values())
+
+
+def test_a_repeated_request_from_the_holder_is_granted_with_the_t2_left():
+    """TS 24.380 6.3.4.4.8 item 1a: Duration is what remains of T2,
+    in whole seconds, rounded down."""
+    ms, ios, clock, floor = make()               # T2 = 4000 in policy()
+    send_rtp(ms, A)
+    clock.now += 1500
+    clear(ios)
+    to_floor(ms, A, MsgType.REQUEST)
+    (g,) = ios[A].msgs()
+    assert g.type is MsgType.GRANTED and g.duration_s == 2
+    assert floor.holder == A
+
+
+def test_a_short_t1_is_still_kept_alive_by_steady_media():
+    """The media report is throttled; a T1 shorter than the throttle must
+    not idle a holder who never stopped talking."""
+    ms, ios, clock, floor = make(pol=policy(timers_ms={"T1": 200, "T2": 60000}))
+    talk(ms, clock, A, 2000, step=20)
+    assert floor.state is fl.FloorState.TAKEN and floor.holder == A
+
+
+def test_timer_durations_are_the_profiles_not_hardcoded():
+    ms, ios, clock, floor = make(pol=policy(timers_ms={"T2": 9000, "T20": 100,
+                                                       "T8": 100}))
+    send_rtp(ms, A)                              # T2 starts here
+    talk(ms, clock, A, 8750)
+    assert floor.state is fl.FloorState.TAKEN
+    talk(ms, clock, A, 250)
     assert floor.state is fl.FloorState.REVOKING
 
 
@@ -663,6 +754,18 @@ def test_comparator_flags_direction_missing_fields_and_flow_errors():
            out(B, rtcp.message(MsgType.GRANTED, 1, rtcp.f_priority(1),
                                rtcp.f_duration(1)))]
     assert "flow" in {d.code for d in trace_compare.compare(two)}
+    # ...but a Granted straight after the holder's Release, or after the
+    # holder was revoked, is the queued hand-over (TS 24.380 6.3.4.3.2 item 3)
+    rel = ("in", A, FLOOR_CODEC.encode(rtcp.message(MsgType.RELEASE, 1)))
+    assert trace_compare.compare([two[0], rel, two[1]]) == []
+    rev = out(A, rtcp.message(MsgType.REVOKE, 1, rtcp.f_reject(2)))
+    assert trace_compare.compare([two[0], rev, two[1]]) == []
+    # a Release or Revoke concerning someone else does not end A's burst
+    rel_c = ("in", C, FLOOR_CODEC.encode(rtcp.message(MsgType.RELEASE, 1)))
+    rev_c = out(C, rtcp.message(MsgType.REVOKE, 1, rtcp.f_reject(2)))
+    for other in (rel_c, rev_c):
+        assert "flow" in {d.code for d in
+                          trace_compare.compare([two[0], other, two[1]])}
     unasked = [out(A, rtcp.message(MsgType.DENY, 1, rtcp.f_reject(1)))]
     assert "flow" in {d.code for d in trace_compare.compare(unasked)}
     skip = [out(A, rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1))),
@@ -879,5 +982,9 @@ def test_a_floor_revoke_uses_the_revoke_cause_namespace():
     branch = code[code.index("SEND_REVOKE"):]
     end = branch.find("elif ")
     branch = branch[:end] if end > 0 else branch
-    assert "REVOKE_OTHER" in branch, branch
+    assert "_REVOKE_CAUSE[" in branch, branch
     assert "DENY_" not in branch, branch
+    # ...and every revoke reason the machine can give maps into the revoke
+    # table (TS 24.380 8.2.10.2): #2, #4, #255 -- literals, not imports.
+    assert {k.value: v for k, v in media._REVOKE_CAUSE.items()} == {
+        "media-burst-too-long": 2, "media-burst-pre-empted": 4, "other": 255}
