@@ -1,0 +1,91 @@
+; Asterisk as a back-to-back user agent between UEs and the platform.
+;
+; This is NOT a proxy. Every call is terminated here and a new one originated,
+; so the platform sees Asterisk's INVITE, not the UE's. Nothing here knows
+; about MCPTT beyond the one thing any PBX trunk needs: where the far end is.
+
+[global]
+type=global
+user_agent=Asterisk-interop
+endpoint_identifier_order=username
+
+[transport-tls]
+type=transport
+protocol=tls
+bind=127.0.0.1:@@CORE_PORT@@
+cert_file=@@WORK@@/pki/asterisk.crt
+priv_key_file=@@WORK@@/pki/asterisk.key
+ca_list_file=@@WORK@@/pki/ca.crt
+method=tlsv1_2
+verify_client=no
+verify_server=no
+
+; ---- the UEs: register here, identified by the user part of From ----------
+
+[ue](!)
+type=endpoint
+context=from-ues
+disallow=all
+allow=ulaw
+transport=transport-tls
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+[u1](ue)
+aors=u1
+[u1]
+type=aor
+max_contacts=1
+remove_existing=yes
+
+[u2](ue)
+aors=u2
+[u2]
+type=aor
+max_contacts=1
+remove_existing=yes
+
+; ---- the platform: a trunk, identified by the user part of its From ------
+
+[mcptt]
+type=endpoint
+context=from-platform
+disallow=all
+allow=ulaw
+transport=transport-tls
+direct_media=no
+aors=mcptt
+from_domain=@@AS_DOMAIN@@
+outbound_proxy=sip:127.0.0.1:@@PLATFORM_PORT@@\;transport=tls\;lr
+
+[mcptt]
+type=aor
+contact=sip:mcptt@@@AS_DOMAIN@@
+
+; ---- third-party registration: Asterisk registers each UE onward ---------
+; The B2BUA equivalent of IMS third-party REGISTER from the S-CSCF: it gives
+; the platform a flow on which to reach each user.
+
+[reg-u1]
+type=registration
+transport=transport-tls
+server_uri=sip:127.0.0.1:@@PLATFORM_PORT@@\;transport=tls
+client_uri=sip:u1@@@AS_DOMAIN@@
+contact_user=u1
+retry_interval=2
+expiration=3600
+line=yes
+endpoint=mcptt
+
+[reg-u2]
+type=registration
+transport=transport-tls
+server_uri=sip:127.0.0.1:@@PLATFORM_PORT@@\;transport=tls
+client_uri=sip:u2@@@AS_DOMAIN@@
+contact_user=u2
+retry_interval=2
+expiration=3600
+line=yes
+endpoint=mcptt

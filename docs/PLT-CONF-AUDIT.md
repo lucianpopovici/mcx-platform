@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 1.8
+**Version:** 1.9
 **Date:** 2026-09-22
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1385,6 +1385,53 @@ document does not pick up the wrong one and "correct" the code to match.
 
 ---
 
+### 4.36 CA-20 — the layer this audit never read
+
+Every item above was found by reading `core/`. The platform also has a
+`service/` layer, and `service/sip_core.py` builds messages of its own: the
+responses it sends the originator, the INVITE the controlling function sends
+each member, and every ACK and BYE. None of that was in scope, and nobody
+noticed that it was out of scope — v1.8 described the audit as covering
+"every constant the platform puts on the wire".
+
+It came to light the other way round, by running VP1-SIG-001 against
+Kamailio (PLT-VP-R1 §7.1.1). Both ACKs of an answered call were dropped by
+the proxy. The platform's 2xx carried no Record-Route, contrary to RFC 3261
+§12.1.1, and its own ACK and BYE went to the peer's address-of-record with no
+Route header, contrary to §12.2.1.1. TS 24.379 reaches RFC 3261 through its
+instruction to build these messages "according to 3GPP TS 24.229". That part
+is fixed and pinned (SIP-OP-09).
+
+Reading the governing clauses while diagnosing it turned up the rest.
+Checked against TS 24.379 V20.0.0 and **not yet fixed**:
+
+| Clause | Requires | The platform sends |
+|---|---|---|
+| 6.3.3.1.2 item 1 (controlling function's INVITE) | Contact = an MCPTT session identity with `g.3gpp.mcptt`, `isfocus` and `g.3gpp.icsi-ref` | `<sip:mcptt@mcptt.example>` — the server's public service identity, no `isfocus` |
+| 6.3.3.1.2 item 3 | `P-Asserted-Service: urn:urn-7:3gpp-service.ims.icsi.mcptt` | nothing |
+| 6.3.2.1.5.2 items 1–2 (participating function's 200 OK) | `Require: timer`, `Session-Expires` | nothing |
+| 6.3.2.1.5.2 item 3 | Contact with `g.3gpp.mcptt`, `g.3gpp.icsi-ref` and `isfocus` | `<sip:mcptt@mcptt.example>` with no feature tags at all |
+| 6.3.2.1.5.2 items 4–5 | `Supported: tdialog`, `Supported: norefersub` | nothing |
+
+Two more to check against the clauses before calling them defects: the
+controlling function's INVITE puts the platform's own URI in `To` rather
+than the invitee's, and its Via host is `mcptt.example` with no port, which
+works only because every response rides back on the same TLS connection.
+
+Neither Kamailio nor Asterisk refused the platform for any of these, and that
+is not evidence that they are harmless. A generic proxy has no reason to
+inspect MCPTT feature tags. An MCPTT client uses `isfocus` to recognise that
+it is talking to a controlling function, and an MC-aware core would route on
+`P-Asserted-Service`.
+
+The item stays open, with a narrower instruction than the rest of this
+document: read `service/sip_core.py` against TS 24.379 clause by clause, the
+way `core/` was read, rather than fixing only the rows above. The rows above
+were found incidentally, and the prior established in section 5 — eleven of
+fifteen sets wrong — has no reason to be kinder to code nobody looked at.
+
+---
+
 ## 5. NOT verified — the work that remains
 
 CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
@@ -1412,6 +1459,7 @@ ordered by consequence:
 | IWF-OP-01 | TS 24.379 reserves 301-350; TS 29.379 allocates 300 | Both tables | **Open, for 3GPP CT1.** See 4.35. No effect today — there is no receive-side warning parser — but it would be a defect in one. |
 | IWF-OP-02 | `CT_MC_INFO` declared and unused | TS 29.379, throughout | **Open, low consequence.** See 4.35. The spelling is right; nothing builds the body. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
+| CA-20 | Messages built in `service/sip_core.py` — responses, in-dialog requests, the controlling function's INVITE | TS 24.379 clauses 6.3.2.1.5 and 6.3.3.1.2; RFC 3261 §12 | **Open.** See 4.36. Found by VP1-SIG-001, not by this audit, which never read `service/`. The dialog-routing part is fixed (PLT-VP-R1 SIP-OP-09); the TS 24.379 part is listed, not fixed. |
 
 **Confirmed against a specification and pinned by test:** the 14 RTCP field
 IDs, the `MCPT` name, PT=204, the floor control subtypes, the Deny and Revoke
@@ -1423,9 +1471,12 @@ types, and the group document structure and media type.
 **Fifteen of the items in the table above have been checked against a
 primary source, on top of CA-01, CA-02, CA-04 and CA-06 closed in v0.3. Four
 of the fifteen found the code already correct — CA-05, CA-07, CA-09 and
-CA-10. The other eleven found at least one defect.** Every constant the
-platform puts on the wire has now been read from a specification, in every
-release it supports, and every blocked item is unblocked. That is the prior
+CA-10. The other eleven found at least one defect.** Every constant in
+`core/` that the platform puts on the wire has now been read from a
+specification, in every release it supports, and every blocked item is
+unblocked. The qualifier matters: v1.8 said "every constant the platform puts
+on the wire", and it was not true. `service/` builds its own responses and
+in-dialog requests, this audit never read it, and CA-20 is what that cost. That is the prior
 for what remains — not a certainty of defect, but nowhere near a presumption
 of correctness.
 
@@ -1466,10 +1517,10 @@ answer, since an undercount of the clean results is the one nobody checks.
 ## 7. Recommendation
 
 **Every document this audit asked for is now in the repository, and every
-item that was blocked on one is closed.** Every constant the platform puts on
-the wire has been read from a primary specification, in every release the
-platform supports. That was not true of a single one of them when this
-document opened.
+item that was blocked on one is closed.** Every constant in `core/` that the
+platform puts on the wire has been read from a primary specification, in every
+release the platform supports. That was not true of a single one of them when
+this document opened. It is not yet true of `service/` (CA-20).
 
 Most of section 7 as it stood at v1.6 was written when CA-07, CA-08 and CA-09
 were blocked and the FRMCS profile had never been reconciled with the UIC
@@ -1519,6 +1570,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 1.9 | 2026-09-24 | CA-20 opened, found by running VP1-SIG-001 rather than by this audit. `service/` builds messages of its own and was never in scope, although v1.8 described the audit as covering every constant the platform puts on the wire; that claim is corrected in §5 and §7. The RFC 3261 §12 dialog-routing part is fixed. The TS 24.379 part is listed in 4.36 (no `isfocus`, no `P-Asserted-Service`, no session timer, a Contact that is not a session identity) and not yet fixed. |
 | 1.8 | 2026-09-22 | CA-09 closed, the last blocked item. TS 29.379 table 4.2.2-1 allocates three interworking warning codes — 300, 301 and 302, all Land Mobile Radio media security — and none of them means an interworking gateway is unreachable, so `gateway-unavailable` correctly carries no code. The behaviour was already right; the recorded reason was a deferral rather than a finding, and a deferral invites the next reader to resolve it by guessing 301. Pinned by two tests, each killing a mutant nothing else in 544 catches — including a coordinated change that updates both existing snapshot guards to match. TS 29.379 independently corroborates five identifiers, the first corroboration in this audit not drawn from the document that defined the constant. New IWF-OP-01 (the two specifications disagree about the lower bound of the reserved range: 24.379 reserves 301-350, 29.379 allocates 300) and IWF-OP-02. The running tally in §5 was found four items out of date and replaced by a count derived from the table. |
 | 1.7 | 2026-09-22 | CA-19: table J-1's bands read by hand. CA-17's fix was incomplete — the priority ordering is carried by three fields and only `level` had been corrected, so ATO still out-ranked shunting on the floor and, more seriously, carried `preemption_vulnerability: false`, meaning nothing could pre-empt an active ATO session, including the REC the appendix's own worked example names. ETCS the same. All three fields now derive from band membership, and FRMCS-OP-02 closes. The band boundaries inferred in CA-17 would have been wrong in four of seven; nothing had been committed from that inference. |
 | 1.6 | 2026-09-22 | CA-18 closed by a human read of Annex A table A.1-1. Two defects: the railway emergency call carried ARP 1, which the table reserves for FRMCS internal signalling, so it out-ranked the control plane that establishes it; and ATP Regular Data carried ARP 2 rather than 4. The whole table is now pinned, not only the rows that changed. The railway profile's QoS is fully transcribed; what remains unreconciled is structural rather than numeric. |

@@ -10,9 +10,13 @@ A 3GPP mission-critical services platform (MCPTT / MCData) that runs as either a
 public-safety deployment or a railway FRMCS deployment, from one codebase and one
 image, with the profile chosen at deploy time.
 
-**Current state: a thoroughly tested library that has never run as a process.**
-544 tests pass, 20 boundary gates pass, and there is no entry point, no socket,
-and no media path. The three task briefs close exactly that gap.
+**Current state: a process that has completed calls through third-party SIP
+cores.** 567 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+Registration and group-call setup have passed through Kamailio 5.7.4 as a
+proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
+(PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
+process could not establish a call at all, and that nothing in the suite
+could tell: see "the suite tests what it injects" below.
 
 ## The one rule
 
@@ -36,9 +40,15 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (540+ tests)
+python3 -m pytest tests/ -q                   # must stay green (565+ tests)
 python3 tools/check_boundary.py --root .      # must stay 20/20
-MCX_PROFILE=mcx MCX_IDMS=stub MCX_DATA_DIR=/tmp/mcx python3 -m service   # run it
+# run it -- every one of these is required and none has a default
+MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
+  MCX_DATA_DIR=/tmp/mcx python3 -m service
+# VP1-SIG-001: the real process against a third-party SIP core (needs the
+# kamailio / asterisk packages; prints PASS/FAIL/OBSERVED per step)
+python3 tools/interop/run.py --core kamailio
+python3 tools/interop/run.py --core asterisk
 # profile x release: both axes, every combination
 for p in mcx frmcs utility; do for r in 17 19; do
   MCX_PROFILE=$p MCX_RELEASE=$r python3 -m pytest tests/test_conformance.py -q
@@ -116,6 +126,19 @@ Message Sequence Number, so the tool endorsed the defect. When you change one,
 derive the change from the specification, not from the other. `docs/PLT-CONF-AUDIT.md` records
 what was checked, what it was, and what is still unverified.
 
+**The suite tests what it injects.** Every end-to-end test passes
+`platform=Platform()`, which is permissive, and talks to the SIP core with
+nothing in between. So it could not see that the real process refused every
+call (`MCX_RECORDER` / `MCX_BEARER`, SVC-OP-05), nor that no ACK survived a
+record-routing proxy (SIP-OP-09). Before trusting a green run for anything the
+deployed process does, run `tools/interop/run.py`. And if you add a
+capability to `Platform`, add the environment variable that lets the process
+state it.
+
+**`service/` has not been through the conformance audit.** `core/` was read
+clause by clause; `service/sip_core.py` builds its own messages and was not
+(PLT-CONF-AUDIT CA-20).
+
 **Before you add or change a protocol constant**, read it from the documents in
 `docs/3GPP/` — the `.docx` originals, not the PDFs. Automated extraction of a
 PDF table does not fail loudly; it returns a plausible invented table. That
@@ -157,8 +180,10 @@ suppressed or raised.
 All three task briefs have been worked. R1 is still **not** complete, and the
 reasons are specific, not general:
 
-- **VP1-SIG-001** needs two independent SIP cores; none was available, and
-  which two is VP-OP-01. Nothing has run against a third-party core.
+- **VP1-SIG-001** was executed on 2026-09-24. It passes against Kamailio.
+  Asterisk passes the terminating path, but as a B2BUA it cannot carry the
+  MC info body when a UE originates (SIP-OP-12). Whether a B2BUA counts as a
+  "SIP core" is VP-OP-01, a decision rather than a test.
 - **VP1-FC-002** cannot close: no third-party capture has ever been decoded
   (FC-OP-03, narrowed 2026-09-22). The constants themselves have been read from
   TS 24.380 across all eight releases and corrected; what is missing is any

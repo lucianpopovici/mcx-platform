@@ -1,0 +1,102 @@
+#!KAMAILIO
+#
+# Kamailio as a minimal S-CSCF stand-in for VP1-SIG-001.
+#
+# Nothing here knows about MCPTT: no feature-tag matching, no ICSI routing,
+# no MC header handling. It is a registrar and a stateful, record-routing
+# proxy, and the in-dialog handling is the shape of Kamailio's own default
+# configuration, deliberately not relaxed to accommodate the platform.
+#
+# The one platform-specific line is the application-server next hop, which
+# stands in for initial filter criteria / DNS, i.e. deployment topology rather
+# than implementation-specific configuration (the VP1-SIG-001 pass criterion
+# forbids the latter on the PLATFORM side, and this file changes nothing there).
+
+debug=@@DEBUG@@
+log_stderror=yes
+fork=yes
+children=2
+auto_aliases=no
+listen=tls:127.0.0.1:@@CORE_PORT@@
+enable_tls=yes
+tcp_connection_lifetime=300
+
+mpath="@@MODULES@@"
+loadmodule "tm.so"
+loadmodule "tmx.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "pv.so"
+loadmodule "maxfwd.so"
+loadmodule "textops.so"
+loadmodule "siputils.so"
+loadmodule "xlog.so"
+loadmodule "usrloc.so"
+loadmodule "registrar.so"
+loadmodule "tls.so"
+
+modparam("usrloc", "db_mode", 0)
+modparam("registrar", "method_filtering", 0)
+modparam("tls", "config", "@@TLS_CFG@@")
+
+request_route {
+    xlog("L_NOTICE", "kam: $rm $ru to-tag=$tt route=$hdr(Route)\n");
+
+    if (!mf_process_maxfwd_header("10")) {
+        sl_send_reply("483", "Too Many Hops");
+        exit;
+    }
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) { t_relay(); }
+        exit;
+    }
+
+    # --- in-dialog: as in Kamailio's default configuration ------------------
+    if (has_totag()) {
+        if (loose_route()) {
+            # The application server's Contact is in its own domain; in a
+            # deployment DNS resolves that domain to it. This line is that
+            # DNS entry, the in-dialog twin of the initial-request next hop.
+            if ($rd == "@@AS_DOMAIN@@") {
+                $du = "sip:127.0.0.1:@@PLATFORM_PORT@@;transport=tls";
+            }
+            xlog("L_NOTICE", "kam: in-dialog $rm loose-routed to $ru du=$du\n");
+            t_relay();
+            exit;
+        }
+        if (is_method("ACK")) {
+            if (t_check_trans()) { t_relay(); exit; }
+            xlog("L_NOTICE", "kam: in-dialog ACK with no route and no transaction: dropped\n");
+            exit;
+        }
+        xlog("L_NOTICE", "kam: in-dialog $rm with no Route: 404\n");
+        sl_send_reply("404", "Not here");
+        exit;
+    }
+
+    record_route();
+
+    if (is_method("REGISTER")) {
+        # Keep a binding for our own routing, send no reply of our own
+        # (0x01 memory only, 0x02 no reply), and let the application server
+        # be the registrar of record.
+        save("location", "0x03");
+        $du = "sip:127.0.0.1:@@PLATFORM_PORT@@;transport=tls";
+        if (!t_relay()) { sl_reply_error(); }
+        exit;
+    }
+
+    if (is_method("INVITE|OPTIONS|MESSAGE")) {
+        if (registered("location")) {
+            lookup("location");
+            xlog("L_NOTICE", "kam: -> UE $ru\n");
+        } else {
+            xlog("L_NOTICE", "kam: -> AS $ru\n");
+            $du = "sip:127.0.0.1:@@PLATFORM_PORT@@;transport=tls";
+        }
+        if (!t_relay()) { sl_reply_error(); }
+        exit;
+    }
+
+    sl_send_reply("405", "Method Not Allowed");
+}

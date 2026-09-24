@@ -172,7 +172,8 @@ def test_health_reports_the_release_the_process_is_speaking():
 def test_config_refuses_a_deployment_that_did_not_state_a_release():
     """PLT-REL-002, at the configuration boundary rather than the parser."""
     from service.config import Config
-    base = {"MCX_PROFILE": "mcx", "MCX_IDMS": "stub", "MCX_DATA_DIR": "/tmp/x"}
+    base = {"MCX_PROFILE": "mcx", "MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none",
+            "MCX_DATA_DIR": "/tmp/x"}
     with pytest.raises(StartupRefused) as exc:
         Config.from_env(base)
     assert "MCX_RELEASE" in str(exc.value)
@@ -182,7 +183,8 @@ def test_config_refuses_a_deployment_that_did_not_state_a_release():
 def test_the_release_is_independent_of_the_profile():
     """PLT-REL-003. The whole point: these are two axes, not one."""
     from service.config import Config
-    base = {"MCX_IDMS": "stub", "MCX_DATA_DIR": "/tmp/x"}
+    base = {"MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none",
+            "MCX_DATA_DIR": "/tmp/x"}
     seen = set()
     for profile in ("mcx", "frmcs", "utility"):
         for release in ("17", "19"):

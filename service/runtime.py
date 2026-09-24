@@ -19,7 +19,7 @@ from core.hooks import SessionRequest
 from core.loader import LoadedProfile
 from core.session import (Platform, Refusal, Session, SessionManager, Signal)
 
-from .config import IDMS_STUB, Config
+from .config import BEARER_STUB, IDMS_STUB, RECORDER_STUB, Config
 from .groups import GroupDirectory, load_groups, load_users
 from .store import SessionStore, SqliteStore
 
@@ -28,15 +28,28 @@ log = logging.getLogger("mcx.service")
 SignalHandler = Callable[[Session, Tuple[Signal, ...]], None]
 
 
-def fail_closed_platform() -> Platform:
-    """The platform a process with no recorder and no network has.
+def fail_closed_platform(recording: bool = False,
+                         bearer: bool = False) -> Platform:
+    """The platform this process actually has.
 
     Deliberately NOT `Platform()`, whose permissive defaults exist for tests.
-    A session requiring recording refuses (PLT-OAM-008); a QoS reservation is
-    refused because nothing exists yet to grant one (tasks 2 and 3).
+    A QoS reservation is refused because nothing exists yet to grant one.
+
+    `recording` comes from MCX_RECORDER and nowhere else. It defaulted to
+    False with no way to change it, and because every call type in every
+    in-tree profile sets `recording_required: true`, the shipped process
+    refused every call with `recording-unavailable` (PLT-OAM-008 firing on
+    every session rather than on a real outage). The suite did not catch it:
+    its end-to-end tests pass `platform=Platform()`, so they exercised a
+    capability set the process never builds for itself. Found by running
+    VP1-SIG-001 against Kamailio.
+
+    MCX_RECORDER=stub says a recorder exists without one existing, which is
+    what an interoperability run and an integration environment need. It is
+    refused under a production indicator, exactly as the stub IdMS is.
     """
-    return Platform(recording_available=lambda: False,
-                    reserve_qos=lambda decision: False,
+    return Platform(recording_available=lambda: recording,
+                    reserve_qos=lambda decision: bearer,
                     active_sessions=lambda: 0)
 
 
@@ -166,6 +179,19 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
             "the stub identity provider is refused when a production "
             "indicator is set (PLT-IDM-007)")
 
+    # Same rule, same reason: a stub recorder claims a capability the process
+    # does not have, and PLT-OAM-008 exists so that a session which must be
+    # recorded is not established when it cannot be.
+    if config.recorder == RECORDER_STUB and loader.is_production(env):
+        raise StartupRefused(
+            "the stub recorder is refused when a production indicator is set "
+            "(PLT-OAM-008): it reports recording available with no recorder")
+
+    if config.bearer == BEARER_STUB and loader.is_production(env):
+        raise StartupRefused(
+            "the stub bearer reservation is refused when a production "
+            "indicator is set: it grants a reservation the network never made")
+
     health = Health()
     health.set_profile(loaded)
     health.set_release(config.release)
@@ -181,7 +207,9 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     recovered = sum(1 for s in store.sessions() if s.get("state") == "established")
     auditor = Auditor(store, identifier, clock=clock)
     manager = SessionManager(loaded, auditor,
-                             platform=platform or fail_closed_platform(),
+                             platform=platform or fail_closed_platform(
+                                 config.recorder == RECORDER_STUB,
+                                 config.bearer == BEARER_STUB),
                              clock=clock, functions=role_functions(config),
                              defer_floor_start=config.sip is not None)
 

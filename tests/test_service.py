@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 from core.audit import RecordType  # noqa: E402
 from core.errors import StartupRefused  # noqa: E402
 from core.hooks import MediaKind, SessionRequest  # noqa: E402
-from core.session import Platform  # noqa: E402
+from core.session import Platform, SignalType  # noqa: E402
 from service import groups as groups_mod  # noqa: E402
 from service.http import Server  # noqa: E402
 from service.runtime import Health, build_runtime, fail_closed_platform  # noqa: E402
@@ -54,6 +54,7 @@ def env(tmp_path):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
     return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none",
             "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
             "MCX_HTTP_PORT": "0"}
 
@@ -458,3 +459,91 @@ def test_group_document_root_is_group_in_the_oma_namespace():
 
     root = ET.fromstring(render(Group("sip:a@x", "A", ("sip:u@x",))))
     assert root.tag == "{urn:oma:xml:poc:list-service}group"
+
+
+# -- MCX_RECORDER (VP1-SIG-001, found against Kamailio) -----------------------
+
+def _clock():
+    n = [0]
+
+    def tick():
+        n[0] += 1
+        return n[0]
+    return tick
+
+
+def test_a_process_built_from_environment_alone_can_establish_a_call(env):
+    """The test whose absence let the process ship unable to serve.
+
+    Every end-to-end test in this repository injects `platform=Platform()`,
+    the permissive one. None of them built the platform the process builds for
+    itself, so none of them noticed that `fail_closed_platform()` reported
+    recording unavailable with no way to say otherwise, while every call type
+    in every in-tree profile sets `recording_required: true`. The shipped
+    process answered every INVITE with 503 "recording unavailable".
+
+    It was found by running VP1-SIG-001 against Kamailio 5.7.4 — not by any
+    test here, and not by reading the code.
+
+    No `platform=` argument below, deliberately. That is the entire point.
+    """
+    env["MCX_RECORDER"] = "stub"
+    env["MCX_BEARER"] = "stub"
+    rt = build_runtime(env, _clock())
+    session, signals, refusal = rt.establish(req())
+    assert refusal is None, f"a process configured with a recorder refused: {refusal}"
+    assert session is not None
+    assert [s.target for s in signals if s.type is SignalType.INVITE] == [U[1], U[2], U[3]]
+
+
+def test_the_default_process_still_refuses_a_call_that_must_be_recorded(env):
+    """The fail-closed behaviour is the point of MCX_RECORDER=none, and stays.
+
+    PLT-OAM-008: a session that must be recorded is not established when it
+    cannot be. What was wrong was never this refusal, it was that no
+    configuration could lift it.
+    """
+    env["MCX_RECORDER"] = "none"
+    rt = build_runtime(env, _clock())
+    session, _, refusal = rt.establish(req())
+    assert session is None
+    assert refusal is not None and refusal.reason_code == "recording-unavailable"
+
+
+@pytest.mark.parametrize("var, bogus", [("MCX_RECORDER", "magnetic-tape"),
+                                        ("MCX_BEARER", "hope")])
+def test_each_platform_capability_must_be_named_explicitly(env, var, bogus):
+    """Like MCX_IDMS, and for the same reason: a default here is a deployment
+    silently getting a capability claim nobody made. Both of these were
+    previously hard-coded to False with no way to state otherwise, which is
+    the defect, and a default of True would have been a worse one."""
+    without = {k: v for k, v in env.items() if k != var}
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(without, _clock())
+    assert var in str(exc.value)
+
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime({**env, var: bogus}, _clock())
+    assert bogus in str(exc.value)
+
+
+def test_a_production_indicator_refuses_every_stub(env):
+    """Each stub claims a capability nothing provides, and a production system
+    must make none of those claims.
+
+    Note what this test cannot yet isolate: R1 has exactly one known identity
+    provider and it is the stub, so a production indicator is refused at the
+    IdMS check before the recorder or bearer check is reached. The two rules
+    below are therefore unreachable in R1 and are here to be reached in R2,
+    when a real IdMS exists (recorded as SVC-OP-05).
+    """
+    for indicator in ({"MCX_ENV": "production"}, {"MCX_PRODUCTION": "true"}):
+        for stubbed in ({"MCX_RECORDER": "stub"}, {"MCX_BEARER": "stub"}, {}):
+            with pytest.raises(StartupRefused):
+                build_runtime({**env, **stubbed, **indicator}, _clock())
+
+    from service.runtime import fail_closed_platform
+    assert fail_closed_platform().recording_available() is False
+    assert fail_closed_platform().reserve_qos(None) is False
+    assert fail_closed_platform(True, True).recording_available() is True
+    assert fail_closed_platform(True, True).reserve_qos(None) is True

@@ -1,0 +1,15 @@
+[general]
+static=yes
+writeprotect=yes
+
+; A UE calling the platform's public service identity: originate a new call
+; to the platform trunk. The MC info body in the UE's INVITE is not carried --
+; Asterisk has no mechanism to pass an arbitrary multipart body through.
+[from-ues]
+exten => mcptt,1,Dial(PJSIP/mcptt,20)
+ same => n,Hangup()
+
+; The platform inviting a user: ring that user's registered device.
+[from-platform]
+exten => _u.,1,Dial(PJSIP/${EXTEN},20)
+ same => n,Hangup()

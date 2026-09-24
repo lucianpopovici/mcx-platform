@@ -1,0 +1,15 @@
+[directories]
+astetcdir => @@WORK@@/asterisk-etc
+astmoddir => @@MODULES@@
+astvarlibdir => @@WORK@@/asterisk-var
+astdbdir => @@WORK@@/asterisk-var
+astkeydir => @@WORK@@/asterisk-var
+astdatadir => /usr/share/asterisk
+astagidir => /usr/share/asterisk/agi-bin
+astspooldir => @@WORK@@/asterisk-spool
+astrundir => @@WORK@@/asterisk-run
+astlogdir => @@WORK@@/asterisk-log
+astsbindir => /usr/sbin
+
+[options]
+nofork = yes

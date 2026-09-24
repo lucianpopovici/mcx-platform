@@ -18,6 +18,26 @@ DEFAULT_PROFILES_ROOT = Path(__file__).resolve().parents[1] / "profiles"
 IDMS_STUB = "stub"
 KNOWN_IDMS = (IDMS_STUB,)   # R1 has only the stub (PLT-IDM-007); R2 adds OIDC
 
+# Every call type in every in-tree profile sets recording_required: true, and
+# the process had no way to say a recorder exists, so it refused every call
+# with `recording-unavailable`. Found by VP1-SIG-001 against a third-party SIP
+# core; the suite had not caught it because its end-to-end tests inject the
+# permissive `Platform()` instead of the one the process builds for itself.
+# Named explicitly, like MCX_IDMS, with no default: "none" is the fail-closed
+# behaviour stated rather than assumed.
+RECORDER_NONE = "none"
+RECORDER_STUB = "stub"
+KNOWN_RECORDERS = (RECORDER_NONE, RECORDER_STUB)
+
+# The same hole, one capability along: `reserve_qos` was hard-coded False too,
+# so a process given a recorder still refused every call, with
+# `qos-unavailable` instead. Both are capabilities of the network the process
+# is deployed into, and neither could be stated. "stub" grants the reservation
+# without reserving anything, which is what an integration environment has.
+BEARER_NONE = "none"
+BEARER_STUB = "stub"
+KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
+
 
 @dataclass(frozen=True)
 class SipConfig:
@@ -128,6 +148,8 @@ class Config:
     profiles_root: Path
     data_dir: Path
     idms: str
+    recorder: str
+    bearer: str
     host: str
     port: int
     groups_file: Optional[Path]
@@ -165,6 +187,30 @@ class Config:
                 f"MCX_IDMS={idms!r} is not a known identity provider "
                 f"(known: {', '.join(KNOWN_IDMS)})")
 
+        recorder = (env.get("MCX_RECORDER") or "").strip().lower()
+        if not recorder:
+            raise StartupRefused(
+                "MCX_RECORDER is not set: name the recorder explicitly "
+                f"(known: {', '.join(KNOWN_RECORDERS)}); there is no default. "
+                "Every call type in every in-tree profile requires recording, "
+                "so a process that does not name one refuses every call")
+        if recorder not in KNOWN_RECORDERS:
+            raise StartupRefused(
+                f"MCX_RECORDER={recorder!r} is not a known recorder "
+                f"(known: {', '.join(KNOWN_RECORDERS)})")
+
+        bearer = (env.get("MCX_BEARER") or "").strip().lower()
+        if not bearer:
+            raise StartupRefused(
+                "MCX_BEARER is not set: name the bearer reservation source "
+                f"explicitly (known: {', '.join(KNOWN_BEARERS)}); there is no "
+                "default, and a process that cannot reserve refuses every "
+                "session whose decision asks for one")
+        if bearer not in KNOWN_BEARERS:
+            raise StartupRefused(
+                f"MCX_BEARER={bearer!r} is not a known bearer reservation "
+                f"source (known: {', '.join(KNOWN_BEARERS)})")
+
         try:
             port = int(env.get("MCX_HTTP_PORT") or "8080")
         except ValueError as exc:
@@ -181,6 +227,8 @@ class Config:
                                or DEFAULT_PROFILES_ROOT),
             data_dir=Path(data_dir),
             idms=idms,
+            recorder=recorder,
+            bearer=bearer,
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,

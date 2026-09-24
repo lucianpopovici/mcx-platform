@@ -29,7 +29,7 @@ from core.sip import (ReceivedResponse, Request, SipError, parse_message,  # noq
 from profiles.common.tables import BackingStoreUnavailable, ResolutionFailure  # noqa: E402
 from service.config import SipConfig  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
-from service.sip_core import SipCore  # noqa: E402
+from service.sip_core import SipCore, dialog_target  # noqa: E402
 from service.sip_tls import TlsListener  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
@@ -143,6 +143,7 @@ def sip_env(tmp_path, pki, **over):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
     env = {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none",
            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
            "MCX_HTTP_PORT": "0",
            "MCX_SIP_LISTEN": "127.0.0.1:0", "MCX_SIP_URI": LOCAL,
@@ -210,7 +211,7 @@ def invite(call_id, frm, to, call_type, **kw):
                ctype="multipart/mixed;boundary=b", **kw)
 
 
-def answer(req: Request, code=200, body="", tag="callee"):
+def answer(req: Request, code=200, body="", tag="callee", extra=()):
     """A callee's response to an INVITE the core sent it."""
     lines = [f"SIP/2.0 {code} X"]
     for v in req.headers.get_all("Via"):
@@ -219,6 +220,7 @@ def answer(req: Request, code=200, body="", tag="callee"):
     lines.append(f"To: {req.headers.get('To')};tag={tag}")
     lines.append(f"Call-ID: {req.headers.get('Call-ID')}")
     lines.append(f"CSeq: {req.headers.get('CSeq')}")
+    lines.extend(extra)
     if body:
         lines.append("Content-Type: application/sdp")
     lines.append(f"Content-Length: {len(body)}")
@@ -834,3 +836,124 @@ def test_process_refuses_to_start_with_incomplete_sip_configuration(tmp_path, pk
     finally:
         proc.stdout.close()
         proc.stderr.close()
+
+
+# ============================================================ dialogs through a proxy
+#
+# Every test above talks to the core with nothing in between, so none of them
+# could tell a request sent to the peer's address-of-record from one sent the
+# RFC 3261 section 12 way. Against Kamailio (VP1-SIG-001) the difference was
+# the whole call: both ACKs of an answered call were dropped by the proxy,
+# because the 200 OK carried no Record-Route and the platform's own ACK and
+# BYE went to the AoR with no Route header. These tests put a proxy's
+# Record-Route and a real Contact on the wire, which is all it takes.
+
+P1 = "<sip:p1.example;transport=tls;lr>"
+P2 = "<sip:p2.example;transport=tls;lr;ftag=abc>"
+CALLEE_CONTACT = "<sip:u1@192.0.2.7:5071;transport=tls>"
+CALLER_CONTACT = "<sip:u0@192.0.2.9:5073;transport=tls>"
+
+
+def _proxied_private_call(core, world, cid="rr1"):
+    """u0 calls u1 through two record-routing proxies, both directions."""
+    core.on_bytes(invite(cid, U[0], U[1], "private",
+                         extra=[f"Record-Route: {P2}, {P1}",
+                                f"Contact: {CALLER_CONTACT}"]), world[U[0]])
+    (req,) = world[U[1]].requests("INVITE")
+    # The leg's proxies record-route the other way round.
+    core.on_bytes(answer(req, 200, SDP, extra=[f"Record-Route: {P1}",
+                                               f"Record-Route: {P2}",
+                                               f"Contact: {CALLEE_CONTACT}"]),
+                  world[U[1]])
+    return req
+
+
+def test_2xx_to_the_initiator_copies_record_route_in_order(core, world):
+    """RFC 3261 12.1.1. One comma-joined header must come back as two values,
+    in the order received -- not reversed, which is the UAC's job."""
+    _proxied_private_call(core, world)
+    (ok,) = [m for m in world[U[0]].messages()
+             if isinstance(m, ReceivedResponse) and m.code == 200]
+    from service.sip_core import _header_values
+    assert _header_values(ok.headers.get_all("Record-Route")) == [P2, P1]
+
+
+def test_ack_on_a_leg_goes_to_the_contact_through_the_reversed_route_set(core, world):
+    """RFC 3261 12.1.2 and 12.2.1.1. The Request-URI keeps ;transport=tls --
+    the first fix stripped URI parameters and lost it, with ;lr."""
+    _proxied_private_call(core, world)
+    (ack,) = world[U[1]].requests("ACK")
+    assert ack.uri == "sip:u1@192.0.2.7:5071;transport=tls"
+    assert list(ack.headers.get_all("Route")) == [P2, P1]
+
+
+def test_bye_to_the_initiator_follows_the_invite_route_set(core, world):
+    """The callee hangs up; the platform's BYE to the initiator goes to the
+    initiator's Contact with the INVITE's Record-Route, unreversed."""
+    req = _proxied_private_call(core, world)
+    core.on_bytes(msg("BYE", LOCAL, req.headers.get("Call-ID"), 2, U[1], LOCAL,
+                      to_tag="callee"), world[U[1]])
+    (bye,) = world[U[0]].requests("BYE")
+    assert bye.uri == "sip:u0@192.0.2.9:5073;transport=tls"
+    assert list(bye.headers.get_all("Route")) == [P2, P1]
+
+
+def test_bye_on_a_leg_follows_that_legs_route_set(core, world):
+    _proxied_private_call(core, world)
+    core.on_bytes(msg("BYE", LOCAL, "rr1", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    (bye,) = world[U[1]].requests("BYE")
+    assert bye.uri == "sip:u1@192.0.2.7:5071;transport=tls"
+    assert list(bye.headers.get_all("Route")) == [P2, P1]
+
+
+def test_without_a_proxy_nothing_changes(core, world):
+    """No Record-Route and no Contact: the Request-URI falls back to the AoR
+    and no Route header is invented. Every other test in this file is this case."""
+    _answered_call(core, world, cid="plain")
+    (ack,) = world[U[1]].requests("ACK")
+    assert ack.uri == U[1] and not ack.headers.get_all("Route")
+
+
+@pytest.mark.parametrize("routes, ruri, route_headers", [
+    ([], "sip:t@h;transport=tls", []),
+    (["<sip:p;lr>"], "sip:t@h;transport=tls", ["<sip:p;lr>"]),
+    (["<sip:p;lr=on>"], "sip:t@h;transport=tls", ["<sip:p;lr=on>"]),
+    # ;lrx is not ;lr
+    (["<sip:p;lrx>", "<sip:q;lr>"], "sip:p;lrx", ["<sip:q;lr>", "<sip:t@h;transport=tls>"]),
+    # strict router: it takes the Request-URI, the target goes last
+    (["<sip:p;transport=tls>", "<sip:q;lr>"], "sip:p;transport=tls",
+     ["<sip:q;lr>", "<sip:t@h;transport=tls>"]),
+])
+def test_dialog_target_loose_and_strict_routing(routes, ruri, route_headers):
+    """RFC 3261 12.2.1.1, both branches."""
+    assert dialog_target("sip:t@h;transport=tls", routes) == (ruri, route_headers)
+
+
+# Found by an independent review of the routing change: each input below was
+# handled wrongly by its first version.
+@pytest.mark.parametrize("raw, values", [
+    (['"a\\", b" <sip:p1;lr>, <sip:p2;lr>'], ['"a\\", b" <sip:p1;lr>', "<sip:p2;lr>"]),
+    (['"x, <y>" <sip:p1;lr>', "<sip:p2;lr>"], ['"x, <y>" <sip:p1;lr>', "<sip:p2;lr>"]),
+])
+def test_header_values_respect_quoted_pairs(raw, values):
+    from service.sip_core import _header_values
+    assert _header_values(raw) == values
+
+
+@pytest.mark.parametrize("value, uri", [
+    ('"a<b" <sip:x@h;transport=tls>', "sip:x@h;transport=tls"),
+    ('"a\\"<b" <sip:x@h;transport=tls>;expires=3', "sip:x@h;transport=tls"),
+    ("sip:x@h;transport=tls", "sip:x@h"),      # addr-spec: header params
+])
+def test_addr_uri_ignores_angle_brackets_in_display_names(value, uri):
+    from service.sip_core import _addr_uri
+    assert _addr_uri(value) == uri
+
+
+@pytest.mark.parametrize("routes, ruri", [
+    (["<sip:p;lr?x=1>"], "sip:t@h;transport=tls"),                 # loose, headers after
+    (["<sip:u;lr;x@p;transport=tls>"], "sip:u;lr;x@p;transport=tls"),  # ;lr in the user part is not ;lr
+    (["<sip:p;maddr=192.0.2.1;method=INVITE?X=y>"], "sip:p;maddr=192.0.2.1"),  # strict: strip
+])
+def test_dialog_target_edge_cases(routes, ruri):
+    assert dialog_target("sip:t@h;transport=tls", routes)[0] == ruri

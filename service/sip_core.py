@@ -58,6 +58,9 @@ class Leg:
     state: str = "inviting"          # inviting | ringing | confirmed | failed
     to_tag: str = ""
     cseq: int = 1
+    # RFC 3261 12.1.2, from the 2xx: where in-dialog requests on this leg go.
+    remote_target: str = ""
+    route_set: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -77,6 +80,101 @@ class Call:
     media: Optional[MediaSession] = None
     payload_type: Optional[int] = None
     media_error: Optional[str] = None
+    # RFC 3261 12.1.1, from the INVITE: where requests toward the initiator go.
+    remote_target: str = ""
+    route_set: List[str] = field(default_factory=list)
+
+
+def _header_values(values) -> List[str]:
+    """Split header field values on the commas that separate them, never on
+    commas inside <...> or "..." (RFC 3261 7.3.1). Record-Route may arrive
+    as several header lines, one comma-joined line, or both."""
+    out: List[str] = []
+    for raw in values:
+        depth, quoted, escaped, start = 0, False, False, 0
+        for i, ch in enumerate(raw):
+            if escaped:                      # quoted-pair, RFC 3261 25.1
+                escaped = False
+            elif quoted and ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quoted = not quoted
+            elif not quoted and ch == "<":
+                depth += 1
+            elif not quoted and ch == ">":
+                depth -= 1
+            elif ch == "," and not quoted and depth == 0:
+                if raw[start:i].strip():
+                    out.append(raw[start:i].strip())
+                start = i + 1
+        if raw[start:].strip():
+            out.append(raw[start:].strip())
+    return out
+
+
+def _addr_uri(value: str) -> str:
+    """The URI of a name-addr WITH its URI parameters (RFC 3261 20.10).
+
+    `_uri` below strips everything after the first ';', which is right for
+    an address-of-record and wrong for a Contact or a Record-Route: the ';lr'
+    that says a proxy loose-routes and the ';transport=tls' that says how to
+    reach a UE are URI parameters. The first dialog-routing fix used `_uri`
+    here, so every route looked strict and every remote target lost its
+    transport, and Kamailio delivered neither ACK nor BYE to the callee.
+    """
+    text = value or ""
+    quoted, escaped = False, False
+    for i, ch in enumerate(text):        # the first '<' outside a display name
+        if escaped:
+            escaped = False
+        elif quoted and ch == "\\":
+            escaped = True
+        elif ch == '"':
+            quoted = not quoted
+        elif ch == "<" and not quoted:
+            end = text.find(">", i)
+            if end > i:
+                return text[i + 1:end].strip()
+    # addr-spec with no <>: parameters after ';' are header parameters.
+    return text.split(";")[0].strip()
+
+
+def _uri_params(uri: str) -> str:
+    """The parameter part of a SIP URI: after the host, before any ?headers.
+    Searching the whole URI would find ';lr' in a user part (sip:a;lr@h)."""
+    uri = uri.split("?", 1)[0]
+    hostpart = uri.rsplit("@", 1)[-1]
+    return hostpart[hostpart.find(";"):] if ";" in hostpart else ""
+
+
+def _request_uri_form(uri: str) -> str:
+    """RFC 3261 12.2.1.1 / 19.1.1: a route URI used as a Request-URI loses the
+    parameters a Request-URI may not carry -- method and any ?headers."""
+    uri = uri.split("?", 1)[0]
+    return re.sub(r";method=[^;]*", "", uri, flags=re.I)
+
+
+def dialog_target(remote_target: str, route_set: List[str]) -> Tuple[str, List[str]]:
+    """Request-URI and Route header values for a request within a dialog,
+    RFC 3261 12.2.1.1.
+
+    Loose routing (first route carries ;lr): the Request-URI is the remote
+    target and every route is sent as a Route header. Strict routing: the
+    Request-URI is the first route's URI, and the remote target is appended
+    as the last Route. With no route set, the Request-URI is the remote target.
+
+    Before this, the platform sent every in-dialog request to the peer's
+    address-of-record with no Route at all. That works when nothing sits
+    between the platform and the peer, which is true of every test in this
+    repository and of no IMS deployment: run against Kamailio (VP1-SIG-001),
+    both ACKs of an answered call were dropped by the proxy.
+    """
+    if not route_set:
+        return remote_target, []
+    first = _addr_uri(route_set[0])
+    if re.search(r";lr(?:[;=]|$)", _uri_params(first), re.I):
+        return remote_target, list(route_set)
+    return _request_uri_form(first), list(route_set[1:]) + [f"<{remote_target}>"]
 
 
 def _tag(seed: str) -> str:
@@ -188,6 +286,13 @@ class SipCore:
             if name == "To" and resp.status.code > 100 and "tag=" not in value:
                 value += f";tag={_tag(req.headers.get('Call-ID') or '')}"
             h.add(name, value)
+        # RFC 3261 12.1.1: a UAS copies every Record-Route value, in order,
+        # into each response that can create a dialog. Without it the
+        # initiator has no route set, and its ACK and BYE reach the proxy
+        # with no Route header -- which Kamailio, correctly, dropped.
+        if req.method == "INVITE" and 100 < resp.status.code < 300:
+            for v in _header_values(req.headers.get_all("Record-Route")):
+                h.add("Record-Route", v)
         for n, v in resp.headers.items():
             if n.lower() not in _ECHOED and n.lower() != "max-forwards":
                 h.add(n, v)
@@ -236,7 +341,9 @@ class SipCore:
     def _invite(self, req: Request, txn: ServerTxn, flow: Any) -> None:
         sr = self.adapter.parse_invite(req)
         call = Call(cid=sr.request_id, invite=req, sr=sr, txn=txn, flow=flow,
-                    initiator=sr.initiator)
+                    initiator=sr.initiator,
+                    remote_target=_addr_uri(req.headers.get("Contact") or "") or sr.initiator,
+                    route_set=_header_values(req.headers.get_all("Record-Route")))
         self._provisional(txn, Response(Status.TRYING))
         self._pending[call.cid] = call
         try:
@@ -388,6 +495,9 @@ class SipCore:
         to = resp.headers.get("To") or ""
         m = re.search(r"tag=([^;>\s]+)", to)
         leg.to_tag = m.group(1) if m else ""
+        leg.remote_target = _addr_uri(resp.headers.get("Contact") or "") or leg.uri
+        leg.route_set = list(reversed(
+            _header_values(resp.headers.get_all("Record-Route"))))
         leg.state = "confirmed"
         self._send_ack(call, leg)
         body = resp.body
@@ -428,7 +538,10 @@ class SipCore:
             ("To", f"<{leg.uri}>;tag={leg.to_tag}"),
             ("Call-ID", leg.call_id), ("CSeq", f"{leg.cseq} ACK"),
             ("Max-Forwards", "70")])
-        leg.flow.send(Request("ACK", leg.uri, h).render())
+        ruri, routes = dialog_target(leg.remote_target or leg.uri, leg.route_set)
+        for r in routes:
+            h.add("Route", r)
+        leg.flow.send(Request("ACK", ruri, h).render())
 
     def _maybe_fail(self, call: Call, code: int) -> None:
         if call.answered or any(l.state in ("inviting", "ringing", "confirmed")
@@ -505,7 +618,10 @@ class SipCore:
                 ("To", call.invite.headers.get("From") or f"<{target}>"),
                 ("Call-ID", call.cid),
                 ("CSeq", f"{call.cseq_out} BYE"), ("Max-Forwards", "70")])
-            call.flow.send(Request("BYE", target, h).render())
+            ruri, routes = dialog_target(call.remote_target or target, call.route_set)
+            for r in routes:
+                h.add("Route", r)
+            call.flow.send(Request("BYE", ruri, h).render())
             return
         for leg in call.legs.values():
             if leg.uri == target and leg.state == "confirmed" and leg.flow:
@@ -517,7 +633,11 @@ class SipCore:
                 headers = Headers(req.headers.items())
                 headers.set("To", f"<{leg.uri}>;tag={leg.to_tag}")
                 headers.set("From", f"<{self.local_uri}>;tag={leg.call_id}-l")
-                req = Request(req.method, req.uri, headers, req.body)
+                ruri, routes = dialog_target(leg.remote_target or leg.uri,
+                                             leg.route_set)
+                for r in routes:
+                    headers.add("Route", r)
+                req = Request(req.method, ruri, headers, req.body)
                 leg.txn = self.client.start(req, leg.flow, user=leg)
                 leg.flow.send(req.render())
 
