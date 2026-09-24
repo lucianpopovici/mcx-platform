@@ -82,6 +82,11 @@ class ServerTransactions:
         """The transaction a retransmitted request belongs to, if any."""
         return self._txns.get((top_branch(request.headers), request.method))
 
+    def find(self, branch: str, method: str) -> Optional[ServerTxn]:
+        """RFC 3261 9.2: a CANCEL names the INVITE it cancels by that
+        INVITE's top Via branch."""
+        return self._txns.get((branch, method))
+
     def create(self, request: Request, flow: Any) -> ServerTxn:
         cseq, _ = cseq_of(request.headers)
         txn = ServerTxn(key=(top_branch(request.headers), request.method),
@@ -168,6 +173,12 @@ class ClientTxn:
     # 64*T1 (Timer M), so a retransmitted 2xx, or a 2xx from another fork,
     # reaches the UAC core instead of being dropped as unmatched.
     accepted: bool = False
+    # RFC 3261 17.1.1.2: a provisional response moves an INVITE client
+    # transaction to 'Proceeding'. A CANCEL may only be sent from there
+    # (9.1), and once it is, the transaction waits at most 64*T1 more for
+    # the final response it provokes (9.1, last paragraph).
+    proceeding: bool = False
+    cancelled: bool = False
 
 
 class ClientTransactions:
@@ -195,6 +206,18 @@ class ClientTransactions:
         txn.accepted = True
         txn.expires_at = self._now() + 64 * self._t1
 
+    def proceed(self, txn: ClientTxn) -> None:
+        txn.proceeding = True
+
+    def cancelling(self, txn: ClientTxn) -> None:
+        """A CANCEL was sent for this INVITE: wait 64*T1 for the 487 (or a
+        2xx that crossed the CANCEL), then give up (RFC 3261 9.1)."""
+        txn.cancelled = True
+        txn.expires_at = self._now() + 64 * self._t1
+
+    def find(self, branch: str, method: str) -> Optional[ClientTxn]:
+        return self._txns.get((branch, method))
+
     def finish(self, txn: ClientTxn) -> None:
         txn.done = True
         self._txns.pop((txn.branch, txn.method), None)
@@ -202,9 +225,21 @@ class ClientTransactions:
     def tick(self) -> List[ClientTxn]:
         """Transactions whose timer fired: Timer B/F (no final response
         arrived), or Timer M for an accepted INVITE (`accepted` is set; that
-        one is not a failure)."""
+        one is not a failure).
+
+        An INVITE that is ringing ('Proceeding') is not ended here. RFC 3261
+        17.1.1.2 runs Timer B in 'Calling' only; in 'Proceeding' the deadline
+        is the core's own no-answer limit (PLT-VP-R1 SIP-OP-15), and what
+        the core owes a ringing callee is a CANCEL, whose 487 -- or a 2xx
+        that crossed it -- must still find this transaction to be ACKed. It
+        is returned with `cancelled` set and `done` unset, and lives 64*T1
+        longer (9.1)."""
         now = self._now()
         expired = [t for t in self._txns.values() if now >= t.expires_at]
         for t in expired:
-            self.finish(t)
+            if t.method == "INVITE" and t.proceeding and not t.accepted \
+                    and not t.cancelled:
+                self.cancelling(t)
+            else:
+                self.finish(t)
         return expired

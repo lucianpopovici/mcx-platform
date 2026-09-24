@@ -130,6 +130,7 @@ class Status(Enum):
     CALL_DOES_NOT_EXIST = (481, "Call/Transaction Does Not Exist")
     LOOP_DETECTED = (482, "Loop Detected")
     BUSY_HERE = (486, "Busy Here")
+    REQUEST_TERMINATED = (487, "Request Terminated")
     NOT_ACCEPTABLE_HERE = (488, "Not Acceptable Here")
     SERVER_ERROR = (500, "Server Internal Error")
     NOT_IMPLEMENTED = (501, "Not Implemented")

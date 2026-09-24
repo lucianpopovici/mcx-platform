@@ -251,7 +251,7 @@ class Report:
         return all(v != "FAIL" for v, _, _ in self.steps)
 
 
-def drain(ua: UA, pattern: str, seconds: float, call_id: str) -> List[str]:
+def drain(ua: UA, pattern: str, seconds: float, call_id: Optional[str]) -> List[str]:
     """Everything matching `pattern` on `call_id` that arrives within `seconds`."""
     got, end = [], time.time() + seconds
     while time.time() < end:
@@ -357,7 +357,11 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
     except TimeoutError:
         report.observe("callee receives the platform's BYE", "none within 5 s")
 
-    # 4. A refusal, as it arrives through the core.
+    # 4. SIP-OP-14: the originator CANCELs while the callee rings.
+    cancelled_call(core, u1, u2, report,
+                   f"hop by hop, by {core} -- the 487 is the platform's")
+
+    # 5. A refusal, as it arrives through the core.
     bad = u1.invite(AS_URI, "prearranged", "grp:nobody", media_port=41004)
     try:
         r = u1.wait(r"^SIP/2\.0 [3-6]\d\d", timeout=10, call_id=bad["call_id"])
@@ -365,6 +369,72 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                        f"{first_line(r)} / Warning: {header(r, 'Warning') or '(none)'}")
     except TimeoutError:
         report.observe("unknown group, through the core", "no final response in 10 s")
+
+
+def cancelled_call(core: str, caller: UA, callee: UA, report: Report,
+                   caller_path: str) -> None:
+    """SIP-OP-14. The caller's CANCEL must be answered 200, its INVITE 487
+    (RFC 3261 9.2), and the callee -- still ringing -- must be CANCELled in
+    turn (9.1) and have its 487 ACKed (17.1.1.3). Every hop is the core's to
+    carry: a proxy relays CANCEL statefully; a B2BUA mirrors it per leg."""
+    drain(callee, r"^INVITE ", 0.3, call_id=None)      # nothing stale may answer
+    inv = caller.invite(AS_URI, "private", callee.aor, media_port=41006)
+    try:
+        incoming = callee.wait(r"^INVITE ", timeout=10)
+    except TimeoutError as exc:
+        report.check("SIP-OP-14: the private call reaches the callee", False, str(exc))
+        return
+    callee.respond(incoming, 180, "Ringing")
+    try:
+        caller.wait(r"^SIP/2\.0 1\d\d", timeout=5, call_id=inv["call_id"], method="INVITE")
+    except TimeoutError:
+        # 9.1: a CANCEL MUST NOT be sent before a provisional response.
+        report.check("SIP-OP-14: the originator sees a provisional response", False,
+                     "none within 5 s; no CANCEL may be sent")
+        return
+    caller.cancel(inv)
+    try:
+        ok = caller.wait(r"^SIP/2\.0 \d\d\d", timeout=5, call_id=inv["call_id"],
+                         method="CANCEL")
+        report.check(f"SIP-OP-14: the originator's CANCEL is answered ({caller_path})",
+                     first_line(ok).startswith("SIP/2.0 200"), first_line(ok))
+    except TimeoutError:
+        report.check(f"SIP-OP-14: the originator's CANCEL is answered ({caller_path})",
+                     False, "no response within 5 s")
+    try:
+        final = caller.wait(r"^SIP/2\.0 [2-6]\d\d", timeout=10, call_id=inv["call_id"],
+                            method="INVITE")
+        report.check("SIP-OP-14: the cancelled INVITE ends with 487",
+                     first_line(final).startswith("SIP/2.0 487"), first_line(final))
+        if first_line(final).startswith("SIP/2.0 2"):
+            # a 2xx that crossed the CANCEL: accept it and hang up (9.1)
+            d = caller.dialog_as_uac(inv, final)
+            caller.in_dialog(d, "ACK", cseq=1)
+            caller.in_dialog(d, "BYE")
+        else:
+            caller.ack_failure(inv, final)
+    except TimeoutError:
+        report.check("SIP-OP-14: the cancelled INVITE ends with 487", False,
+                     "no final response within 10 s")
+    leg = header(incoming, "Call-ID")
+    try:
+        cancel = callee.wait(r"^CANCEL ", timeout=10, call_id=leg)
+        report.check("SIP-OP-14: the ringing callee receives a CANCEL", True,
+                     first_line(cancel))
+    except TimeoutError:
+        report.check("SIP-OP-14: the ringing callee receives a CANCEL", False,
+                     "none within 10 s -- the callee is left ringing")
+        return
+    callee.respond(cancel, 200, "OK")
+    callee.respond(incoming, 487, "Request Terminated")
+    try:
+        ack = callee.wait(r"^ACK ", timeout=5, call_id=leg)
+        report.check("SIP-OP-14: the callee's 487 is ACKed", True, first_line(ack))
+    except TimeoutError:
+        report.check("SIP-OP-14: the callee's 487 is ACKed", False, "no ACK within 5 s")
+    late = drain(callee, r"^(BYE|INVITE|CANCEL) ", 1.0, call_id=leg)
+    report.check("SIP-OP-14: nothing further reaches the cancelled callee", not late,
+                 ", ".join(first_line(m) for m in late) or "nothing")
 
 
 def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
@@ -451,6 +521,10 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
                 report.observe("terminating: teardown reaches the callee", first_line(b))
             except TimeoutError:
                 report.observe("terminating: teardown reaches the callee", "no BYE in 6 s")
+    # SIP-OP-14 through the B2BUA: here the originator is attached to the
+    # platform directly, so the 200 to its CANCEL is the platform's own
+    # (through a proxy it is the proxy's hop-by-hop answer).
+    cancelled_call(core, direct, u2, report, "by the platform, originator attached directly")
     direct.close()
     # Put u1's platform registration back on the B2BUA's flow.
     asterisk_cli(work, "pjsip send register reg-u1")

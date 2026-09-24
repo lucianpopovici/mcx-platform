@@ -1195,3 +1195,271 @@ def test_a_non_2xx_after_the_2xx_is_discarded(core, rt, world):
     core.on_bytes(answer(_leg_invite(world), 500, tag="other"), world[U[1]])
     assert len(world[U[1]].requests("ACK")) == 1
     assert rt.manager.session("ra4").state.value != "released"
+
+
+# ============================================================ CANCEL (SIP-OP-14, SIP-OP-15)
+
+
+def _responses(flow, method):
+    return [m for m in flow.messages() if isinstance(m, ReceivedResponse)
+            and m.headers.get("CSeq").split()[1] == method]
+
+
+def _ringing_group_call(core, world, cid):
+    """u1 answers; u2 is ringing (180); u3 has said nothing yet."""
+    core.on_bytes(invite(cid, U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    reqs = {u: _leg_invite(world, u) for u in U[1:]}
+    core.on_bytes(answer(reqs[U[1]], 200, SDP), world[U[1]])
+    core.on_bytes(answer(reqs[U[2]], 180, tag="r2"), world[U[2]])
+    # the initiator ACKs its 200, or the call ends at 64*T1 for that reason
+    ok = [r for r in _responses(world[U[0]], "INVITE") if r.code == 200][0]
+    core.on_bytes(msg("ACK", LOCAL, cid, 1, U[0], LOCAL, branch=f"z9hG4bK{cid}ack",
+                      to_tag=ok.headers.get("To").split("tag=")[1]), world[U[0]])
+    return reqs
+
+
+def test_ending_a_call_cancels_the_legs_still_ringing(core, world):
+    """RFC 3261 9.1: the CANCEL copies the INVITE's Request-URI, Call-ID,
+    To, From and CSeq number, has one Via -- the INVITE's top Via, branch
+    included -- and the INVITE's Route headers."""
+    reqs = _ringing_group_call(core, world, "cx1")
+    core.on_bytes(msg("BYE", LOCAL, "cx1", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    (cancel,) = world[U[2]].requests("CANCEL")
+    inv = reqs[U[2]]
+    assert cancel.uri == inv.uri
+    assert list(cancel.headers.get_all("Via")) == [inv.headers.get_all("Via")[0]]
+    for h in ("From", "To", "Call-ID"):
+        assert cancel.headers.get(h) == inv.headers.get(h)
+    assert "tag=" not in cancel.headers.get("To")
+    assert cancel.headers.get("CSeq") == f"{inv.headers.get('CSeq').split()[0]} CANCEL"
+    assert list(cancel.headers.get_all("Route")) == list(inv.headers.get_all("Route"))
+    # the answered leg is BYEd, not CANCELled
+    assert world[U[1]].requests("CANCEL") == [] and world[U[1]].requests("BYE")
+
+
+def test_a_leg_that_has_not_answered_at_all_is_cancelled_when_it_does(core, world):
+    """9.1: 'If no provisional response has been received, the CANCEL
+    request MUST NOT be sent; rather, the client MUST wait for the arrival
+    of a provisional response before sending the request.'"""
+    reqs = _ringing_group_call(core, world, "cx2")
+    core.on_bytes(msg("BYE", LOCAL, "cx2", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    assert world[U[3]].requests("CANCEL") == []
+    core.on_bytes(answer(reqs[U[3]], 100, tag="r3"), world[U[3]])
+    assert len(world[U[3]].requests("CANCEL")) == 1
+    core.on_bytes(answer(reqs[U[3]], 180, tag="r3"), world[U[3]])
+    assert len(world[U[3]].requests("CANCEL")) == 1          # once only
+
+
+def test_the_487_that_answers_a_cancel_is_acked_and_the_transactions_end(core, world):
+    reqs = _ringing_group_call(core, world, "cx3")
+    core.on_bytes(msg("BYE", LOCAL, "cx3", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    (cancel,) = world[U[2]].requests("CANCEL")
+    core.on_bytes(answer(cancel, 200, tag="r2"), world[U[2]])
+    core.on_bytes(answer(reqs[U[2]], 487, tag="r2"), world[U[2]])
+    (ack,) = world[U[2]].requests("ACK")
+    assert ack.headers.get("CSeq").endswith(" ACK")
+    assert ack.headers.get_all("Via")[0] == reqs[U[2]].headers.get_all("Via")[0]
+    assert world[U[2]].requests("BYE") == []
+    from service.sip_txn import top_branch
+    for method in ("INVITE", "CANCEL"):
+        assert core.client.find(top_branch(reqs[U[2]].headers), method) is None
+
+
+def test_a_2xx_that_crossed_the_cancel_is_acked_and_ended(core, world):
+    reqs = _ringing_group_call(core, world, "cx4")
+    core.on_bytes(msg("BYE", LOCAL, "cx4", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    core.on_bytes(answer(reqs[U[2]], 200, SDP, tag="r2"), world[U[2]])
+    ack, bye = world[U[2]].requests()[-2:]
+    assert (ack.method, bye.method) == ("ACK", "BYE")
+
+
+def test_a_leg_ringing_past_the_limit_is_cancelled_and_cannot_join_late(core, rt, world,
+                                                                       clock):
+    """SIP-OP-15: the call goes on (u1 answered); u2 rings past 64*T1. It is
+    CANCELled rather than forgotten, and a 2xx that crosses the CANCEL is
+    ACKed and BYEd -- the leg does not join, and its 2xx is not dropped
+    unmatched, which is what used to happen."""
+    reqs = _ringing_group_call(core, world, "cx5")
+    clock.now += 64 * 500
+    core.tick()
+    (cancel,) = world[U[2]].requests("CANCEL")
+    assert rt.manager.session("cx5").state.value != "released"
+    # u3 never sent a provisional: Timer B ends it without a CANCEL
+    assert world[U[3]].requests("CANCEL") == []
+    core.on_bytes(answer(reqs[U[2]], 200, SDP, tag="r2"), world[U[2]])
+    ack, bye = world[U[2]].requests()[-2:]
+    assert (ack.method, bye.method) == ("ACK", "BYE")
+    assert U[2] not in core.media._sessions["cx5"].endpoints or \
+        core.media._sessions["cx5"].endpoints[U[2]].remote_rtp is None
+    # and the transaction is gone 64*T1 after the CANCEL
+    clock.now += 64 * 500
+    core.tick()
+    from service.sip_txn import top_branch
+    assert core.client.find(top_branch(reqs[U[2]].headers), "INVITE") is None
+
+
+def test_a_private_call_ringing_past_the_limit_fails_and_cancels(core, rt, world, clock):
+    core.on_bytes(invite("cx6", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    clock.now += 64 * 500
+    core.tick()
+    assert world[U[0]].codes()[-1] == 480
+    (cancel,) = world[U[1]].requests("CANCEL")
+    core.on_bytes(answer(req, 487, tag="r1"), world[U[1]])
+    assert world[U[1]].requests()[-1].method == "ACK"
+    assert_no_session_state(core, rt, "cx6")
+
+
+def test_a_callee_that_never_answered_is_not_cancelled(core, rt, world, clock):
+    """Timer B in 'Calling' (no provisional): nothing to CANCEL."""
+    core.on_bytes(invite("cx7", U[0], U[1], "private"), world[U[0]])
+    clock.now += 64 * 500 + 1
+    core.tick()
+    assert world[U[1]].requests("CANCEL") == []
+    assert world[U[0]].codes() == [100, 480]
+
+
+# -- the initiator's CANCEL (RFC 3261 9.2) ------------------------------------------
+
+
+def _cancel_from_initiator(cid, branch=None):
+    return msg("CANCEL", LOCAL, cid, 1, U[0], LOCAL,
+               branch=branch or f"z9hG4bK{cid}1INVITE")
+
+
+def test_the_initiators_cancel_ends_the_call_with_487(core, rt, world):
+    core.on_bytes(invite("ic1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    core.on_bytes(_cancel_from_initiator("ic1"), world[U[0]])
+    (ok,) = _responses(world[U[0]], "CANCEL")
+    assert ok.code == 200
+    final = [r for r in _responses(world[U[0]], "INVITE") if r.code >= 200]
+    assert [r.code for r in final] == [487]
+    # 9.2: the two To tags SHOULD be the same
+    assert ok.headers.get("To") == final[0].headers.get("To")
+    assert len(world[U[1]].requests("CANCEL")) == 1
+    assert_no_session_state(core, rt, "ic1")
+    # the initiator's ACK for the 487 is absorbed, not answered
+    n = len(world[U[0]].sent)
+    core.on_bytes(msg("ACK", LOCAL, "ic1", 1, U[0], LOCAL,
+                      branch="z9hG4bKic11INVITE",
+                      to_tag=final[0].headers.get("To").split("tag=")[1]),
+                  world[U[0]])
+    assert len(world[U[0]].sent) == n
+
+
+def test_a_cancel_for_no_transaction_is_481(core, world):
+    core.on_bytes(_cancel_from_initiator("ic2", branch="z9hG4bKnothing"), world[U[0]])
+    assert world[U[0]].codes() == [481]
+
+
+def test_a_cancel_after_the_answer_changes_nothing(core, rt, world):
+    _answered_call(core, world, cid="ic3")
+    core.on_bytes(_cancel_from_initiator("ic3"), world[U[0]])
+    assert [r.code for r in _responses(world[U[0]], "CANCEL")] == [200]
+    assert 487 not in world[U[0]].codes()
+    assert rt.manager.session("ic3").state.value != "released"
+    assert world[U[1]].requests("CANCEL") == []
+
+
+def test_a_retransmitted_cancel_gets_the_same_answer(core, rt, world):
+    core.on_bytes(invite("ic4", U[0], U[1], "private"), world[U[0]])
+    core.on_bytes(_cancel_from_initiator("ic4"), world[U[0]])
+    core.on_bytes(_cancel_from_initiator("ic4"), world[U[0]])
+    oks = _responses(world[U[0]], "CANCEL")
+    assert [r.code for r in oks] == [200, 200]
+    assert [r.code for r in _responses(world[U[0]], "INVITE") if r.code >= 200] == [487]
+
+
+def test_options_advertises_cancel(core, world):
+    core.on_bytes(msg("OPTIONS", LOCAL, "op1", 1, U[0], LOCAL), world[U[0]])
+    (resp,) = world[U[0]].messages()
+    assert "CANCEL" in [m.strip() for m in resp.headers.get("Allow").split(",")]
+
+
+def test_the_cancel_carries_the_invites_route(core):
+    """9.1: 'the CANCEL request MUST contain ... the Route header fields of
+    the request being cancelled'. No leg INVITE carries a Route today, so
+    the transaction is driven directly, as for the non-2xx ACK."""
+    from service.sip_core import Leg
+    from core.sip import Headers as H
+    flow = Flow()
+    inv = Request("INVITE", "sip:u1@mcptt.example", H([
+        ("Via", "SIP/2.0/TLS mcptt.example;branch=z9hG4bKrc1"),
+        ("From", f"<{LOCAL}>;tag=a"), ("To", f"<{U[1]}>"),
+        ("Call-ID", "rc1"), ("CSeq", "1 INVITE"),
+        ("Route", "<sip:ob1.example;lr>"), ("Route", "<sip:ob2.example;lr>")]))
+    leg = Leg(uri=U[1], call_id="rc1", flow=flow)
+    leg.txn = core.client.start(inv, flow, user=leg)
+    core.client.proceed(leg.txn)
+    core._send_cancel(leg)
+    (cancel,) = flow.requests("CANCEL")
+    assert list(cancel.headers.get_all("Route")) == ["<sip:ob1.example;lr>",
+                                                     "<sip:ob2.example;lr>"]
+
+
+# -- found by the independent review of SIP-OP-14 ------------------------------------
+
+
+def test_legs_invited_before_an_establishment_fault_are_cancelled(core, world):
+    """A fault part-way through a group call's legs: the initiator gets 500,
+    and a leg already invited is CANCELled as soon as it rings -- not left
+    ringing until the no-answer limit."""
+    orig = core.adapter.render
+    n = [0]
+
+    def render(sig, ctx, req=None):
+        if sig.type.name == "INVITE":
+            n[0] += 1
+            if n[0] == 2:
+                raise RuntimeError("fault on the second leg")
+        return orig(sig, ctx, req)
+    core.adapter.render = render
+    core.on_bytes(invite("ef1", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    assert world[U[0]].codes()[-1] == 500
+    (req,) = world[U[1]].requests("INVITE")
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    assert len(world[U[1]].requests("CANCEL")) == 1
+
+
+def test_the_initiator_hanging_up_an_early_dialog_gets_its_invite_answered(core, rt,
+                                                                           world, clock):
+    """RFC 3261 15.1.2: a BYE on an early dialog; the pending INVITE MUST
+    still be answered, with 487 recommended -- and its transaction ends."""
+    core.on_bytes(invite("eb1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    ringing = [r for r in _responses(world[U[0]], "INVITE") if r.code == 180][0]
+    tag = ringing.headers.get("To").split("tag=")[1]
+    core.on_bytes(msg("BYE", LOCAL, "eb1", 2, U[0], LOCAL, to_tag=tag), world[U[0]])
+    assert [r.code for r in _responses(world[U[0]], "BYE")] == [200]
+    assert [r.code for r in _responses(world[U[0]], "INVITE") if r.code >= 200] == [487]
+    assert len(world[U[1]].requests("CANCEL")) == 1
+    clock.now += 64 * 500
+    core.tick()
+    assert core.server.find("z9hG4bKeb11INVITE", "INVITE") is None
+
+
+@pytest.mark.parametrize("change", [(b"core.example", b"evil.example"),
+                                    (b"Call-ID: sb1", b"Call-ID: other")])
+def test_a_cancel_must_match_more_than_the_branch(core, rt, world, change):
+    """RFC 3261 9.2 -> 17.2.3: branch AND the top Via's sent-by; and the
+    CANCEL's Call-ID is its INVITE's (9.1). Otherwise 481, call untouched."""
+    core.on_bytes(invite("sb1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    core.on_bytes(_cancel_from_initiator("sb1").replace(*change), world[U[2]])
+    assert [r.code for r in _responses(world[U[2]], "CANCEL")] == [481]
+    assert 487 not in world[U[0]].codes()
+    assert world[U[1]].requests("CANCEL") == []
+
+
+def test_a_cancelled_leg_that_rings_again_stays_out_of_the_call(core, rt, world, clock):
+    reqs = _ringing_group_call(core, world, "cr1")
+    clock.now += 64 * 500
+    core.tick()                                     # u2 CANCELled, call goes on
+    core.on_bytes(answer(reqs[U[2]], 180, tag="r2"), world[U[2]])
+    leg = [l for l in core.calls["cr1"].legs.values() if l.uri == U[2]][0]
+    assert leg.state == "failed" and len(world[U[2]].requests("CANCEL")) == 1

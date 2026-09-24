@@ -780,3 +780,27 @@ def test_no_refusal_emits_an_interworking_warning_code():
             assert int(head) < 300, (
                 f"{reason} at Rel-{release} emits MC code {head}, which is in "
                 f"the interworking range TS 29.379 owns")
+
+
+def test_timer_b_on_a_ringing_invite_asks_for_a_cancel_instead_of_ending():
+    """SIP-OP-15: in 'Proceeding' the INVITE is kept for 64*T1 after the
+    CANCEL it now needs (RFC 3261 9.1); in 'Calling' Timer B ends it."""
+    from core.sip import Headers, Request
+    from service.sip_txn import ClientTransactions
+    now = [0]
+    txns = ClientTransactions(lambda: now[0], t1=500)
+
+    def inv(branch):
+        return Request("INVITE", "sip:b@x", Headers([
+            ("Via", f"SIP/2.0/TLS x;branch={branch}"), ("CSeq", "1 INVITE")]))
+    ringing, silent = txns.start(inv("z9hG4bKa"), None), txns.start(inv("z9hG4bKb"), None)
+    txns.proceed(ringing)
+    now[0] = 32_000
+    fired = txns.tick()
+    assert set(map(id, fired)) == {id(ringing), id(silent)}
+    assert silent.done and not ringing.done and ringing.cancelled
+    assert txns.find("z9hG4bKa", "INVITE") is ringing
+    now[0] = 63_999
+    assert txns.tick() == [] and not ringing.done
+    now[0] = 64_000
+    assert txns.tick() == [ringing] and ringing.done

@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.8 (draft)
+**Version:** 0.9 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -294,6 +294,21 @@ Two things go with the verdict and must not be dropped from it:
   pass rests on endpoint transcripts and each core's own logs. That is
   strong evidence, but none of it is a capture of the wire.
 
+**Added 2026-09-24 (SIP-OP-14): a cancelled call, through both cores.** The
+originator CANCELs a private call while the callee rings. Both runs pass five
+checks:
+- the CANCEL is answered 200;
+- the INVITE ends with 487;
+- the ringing callee receives a CANCEL;
+- the callee's 487 is ACKed;
+- nothing further reaches the callee.
+
+Through Kamailio the 200 is the proxy's own hop-by-hop answer, so the
+platform's handling of the inbound CANCEL is shown by the 487. Through
+Asterisk the originator is attached to the platform directly, so the 200 is
+the platform's own. The CANCEL toward the callee is the platform's in both
+runs: Kamailio relays it statefully, and Asterisk mirrors it on its own leg.
+
 ### 7.2 TS-CC — call control (ENV-E2E)
 
 | Case | Title | Pass criterion |
@@ -536,8 +551,8 @@ not by relaxing its pass criterion.
 | SIP-OP-11 | **Split by PLT-CONF-AUDIT CA-20.** 20a is closed: the MCPTT info body, `P-Asserted-Identity` and the floor-control m-line are fixed. 20b is open: `Supported: timer, tdialog, norefersub`, `Require: timer` with `Session-Expires`, and `isfocus` with an MCPTT session identity in Contact (6.3.2.2.3, 6.3.2.1.5.2). Each commits the platform to a behaviour (RFC 4028, 4538, 4488, session-identity routing), so it is feature work, not a header patch. The first version of this row cited 6.3.3.1.2 and `P-Asserted-Service`; that was the wrong clause. | PLT-SIG-001 conformance |
 | SIP-OP-12 | **A deployment constraint, not a platform defect, and it applies in both directions.** A back-to-back user agent re-originates every call with SDP alone. Originating (UE → B2BUA → platform): the MCPTT info body, both Accept-Contact fields and P-Asserted-Identity are lost, so the platform refuses the call (404, Warning 145), and the B2BUA strips the Warning on the way back. Terminating (platform → B2BUA → UE): the call completes, but the callee receives no MCPTT info body and so cannot tell which group is calling or who is. MCPTT clients behind a PBX that does not pass the body through lose MC semantics either way. | VP1-SIG-001, deployment guidance |
 | SIP-OP-13 | **CLOSED 2026-09-24.** The INVITE client transaction toward each callee now enters RFC 6026 'Accepted' on a 2xx and stays matchable for 64·T1 (Timer M), so a retransmitted 2xx is answered with the identical ACK and a 2xx from a second fork is ACKed and then ended with a BYE (RFC 3261 13.2.2.4). A 3xx–6xx is ACKed by the transaction with the INVITE's Request-URI, Call-ID, From, Route and top Via (17.1.1.3); on TLS, Timer D is zero. The independent review found a BYE from that second fork ended the real call, because BYEs on a leg were matched by Call-ID alone; they are now matched by tag (12.2.2), and a BYE for an unknown dialog gets 481. Both interop cores re-run: PASSED. | closed |
-| SIP-OP-14 | **Open — found by the SIP-OP-13 review, older than it.** Ending a call never CANCELs legs that are still ringing (RFC 3261 §9). The callee keeps ringing until it gives up; if it answers after Timer B, the 2xx matches nothing and is not ACKed. | VP1-SIG-001 robustness |
-| SIP-OP-15 | **Open — found by the same review.** Timer B runs while a leg is ringing; RFC 3261 17.1.1.2 runs it in 'Calling' only. A callee that rings for longer than 64·T1 (32 s) is failed with 408. | VP1-SIG-001 robustness |
+| SIP-OP-14 | **CLOSED 2026-09-24.** Every call-ending path now CANCELs the legs still being invited (RFC 3261 9.1): initiator BYE, callee BYE, every leg failing, the missing-ACK timeout, the initiator's CANCEL, and a fault during establishment. The CANCEL copies the INVITE's Request-URI, Call-ID, From, To, CSeq number, top Via and Route. A leg that has sent no provisional yet is CANCELled when its first one arrives, never before (9.1 MUST NOT). A 487 is ACKed by the INVITE transaction. A 2xx that crosses the CANCEL is ACKed and ended with a BYE, and the leg does not join even if the call goes on. The platform also now accepts CANCEL (it answered 501 before): matched to the INVITE by branch, sent-by and Call-ID (9.2, 17.2.3), answered 200, with the INVITE answered 487, and `Allow` lists it. The independent review found two more problems on call-ending paths, both fixed: legs invited before an establishment fault were left ringing, and an initiator's BYE on an early dialog left its INVITE unanswered and its transaction in the table for ever (15.1.2 — it now gets 487). Both interop cores re-run with a cancelled-call scenario: PASSED (§7.1.1). | closed |
+| SIP-OP-15 | **Narrowed 2026-09-24; open, for the service owner.** A ringing leg ('Proceeding') is no longer destroyed when Timer B fires. RFC 3261 17.1.1.2 runs Timer B in 'Calling' only. The platform now treats that moment as its own no-answer limit: it CANCELs the callee and keeps the transaction 64·T1 longer (9.1), so the 487 is ACKed and a crossing 2xx is ACKed and ended rather than dropped. What remains is a choice: the no-answer limit is 64·T1 (32 s) because that is Timer B, not because anyone chose it. Options: keep it, or make it a profile value per call type. Edge case kept as the RFC letter has it: if a call ends while a leg is still in 'Calling', and Timer B then ends that leg, a 2xx arriving after Timer B has no transaction to match, and the callee's own timer ends that dialog. | VP1-SIG-001 robustness |
 | PRF-OP-02 | **CLOSED 2026-09-24 (decided: the specification defaults).** Every floor policy that sets timers now states `T8: 1000` and `T3: 3000`, TS 24.380's defaults, pinned by a test. The T2 talk limits (1–5 s) and T20 (100 ms) are unchanged; C20 stays fixed in the core at 3. Originally: Every in-tree floor policy sets `T8: 100`, written when T8 was (wrongly) the grace period. It now sets the interval at which the Floor Revoke is re-sent, so a revoked talker receives about 30 Revokes during the 3 s default T3; TS 24.380's default T8 is 1 s. No profile sets T3, so a revoked talker's grace went from 100 ms to 3 s. The `T2` values (1-5 s) are maximum talk times, now counted from the first media packet rather than the grant. C20 (default 3) is fixed in the core; the profile schema has no counters. Decide: T8 per profile (1000 suggested), T3 per profile, whether 1-5 s talk limits are intended, and whether C20 should be configurable. | closed |
 | PRF-OP-01 | **Open — for the profile owner.** TS 24.379 cannot tell apart two pairs of call types: mcx `prearranged-group` and `coordination-group`, and utility `crew-call` and `switching-order`. Each pair is the same prearranged voice group call on the wire, and the MCPTT info body has no element for "coordination" or "switching". The second of each pair is declared `mc_signature: null`, so no native client can request it. Options: accept that; let the target group's configuration choose the call type (group data, not the request); or distinguish by something TS 24.379 does carry. | PLT-ICD-001 2.6 |
 | REL-OP-02 | **CLOSED 2026-09-24 — decided: a deployment parameter.** `MCX_STRICT_RELEASE=true` refuses to start when the profile declares call types the configured release cannot carry, and names them in the refusal. `false` starts and warns in the log and the health document. It is required, with no default, like `MCX_RELEASE`, so no deployment accepts unreachable emergency calls without having stated that it does. The case that exists: the FRMCS profile at Rel-17, where ad hoc group calls, including the REC, do not exist. Tested both ways against the real railway profile. | PLT-REL-*, FRMCS deployments |
@@ -552,6 +567,7 @@ not by relaxing its pass criterion.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
+| 0.9 | 2026-09-24 | SIP-OP-14 closed: the legs still being invited are CANCELled on every call-ending path, and the platform accepts CANCEL (it answered 501 before). An initiator's BYE on an early dialog now gets its INVITE a 487 (RFC 3261 15.1.2). SIP-OP-15 narrowed: a ringing leg is CANCELled at the no-answer limit instead of being dropped; whether that limit should stay at 64·T1 is left to the service owner. §7.1.1 gains the cancelled-call interop run through both cores. |
 | 0.8 | 2026-09-24 | SIP-OP-13 closed: 2xx re-ACK, forked 2xx ACK-and-BYE, and non-2xx ACK on the platform's legs toward callees, with BYEs on a leg matched by dialog tag. PRF-OP-02 decided (T8 = 1 s, T3 = 3 s in every profile) and FC-OP-07 accepted as a deviation. SIP-OP-14 (no CANCEL of ringing legs) and SIP-OP-15 (Timer B while ringing) opened. |
 | 0.7 | 2026-09-24 | FC-OP-01 and FC-OP-02 closed by PLT-CONF-AUDIT CA-21: the floor timers' behaviour was read against TS 24.380 and eleven deviations fixed. FC-OP-07 (pre-emption into a full queue, deliberate), FC-OP-08 (comparator strength), FC-OP-09 (unimplemented floor procedures), FC-OP-10 (two TS 24.380 inconsistencies) and PRF-OP-02 (profile timer values written for the old behaviour) opened. |
 | 0.6 | 2026-09-24 | VP-OP-02 confirmed: VP1-FC-002 passes on specification-derived evidence (§6.1), and FC-OP-03 is closed. FC-OP-01 and FC-OP-02 are re-filed against the behaviour cases (VP1-FC-010, VP1-FC-020), with their stale "TS 24.380 not available" reasons corrected. FC-OP-05 is marked non-blocking. |

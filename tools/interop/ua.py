@@ -233,6 +233,27 @@ class UA:
         ], body)
         return {"call_id": cid, "ruri": ruri, "request": sent}
 
+    def cancel(self, invite: dict) -> str:
+        """RFC 3261 9.1, written from the clause: the INVITE's Request-URI,
+        Call-ID, To, From and CSeq number, and its top Via -- the branch is
+        what names the transaction being cancelled."""
+        sent = invite["request"]
+        return self.send([
+            f"CANCEL {invite['ruri']} SIP/2.0", f"Via: {header(sent, 'Via')}",
+            f"From: {header(sent, 'From')}", f"To: {header(sent, 'To')}",
+            f"Call-ID: {invite['call_id']}", "CSeq: 1 CANCEL", "Max-Forwards: 70",
+        ])
+
+    def ack_failure(self, invite: dict, final: str) -> str:
+        """RFC 3261 17.1.1.3: the ACK for a 3xx-6xx belongs to the INVITE's
+        transaction -- same Via branch -- and carries the response's To."""
+        sent = invite["request"]
+        return self.send([
+            f"ACK {invite['ruri']} SIP/2.0", f"Via: {header(sent, 'Via')}",
+            f"From: {header(sent, 'From')}", f"To: {header(final, 'To')}",
+            f"Call-ID: {invite['call_id']}", "CSeq: 1 ACK", "Max-Forwards: 70",
+        ])
+
     # -- dialogs ------------------------------------------------------------------
     def dialog_as_uac(self, invite: dict, final: str) -> Dialog:
         """RFC 3261 §12.1.2."""

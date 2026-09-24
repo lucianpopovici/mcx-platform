@@ -44,7 +44,7 @@ from .sip_txn import (ClientTransactions, ClientTxn, ServerTransactions,
 
 log = logging.getLogger("mcx.sip")
 
-ALLOWED = "INVITE, ACK, BYE, REGISTER, OPTIONS"
+ALLOWED = "INVITE, ACK, BYE, CANCEL, REGISTER, OPTIONS"
 _ECHOED = ("via", "from", "to", "call-id", "cseq")
 _STATUS_BY_CODE = {s.code: s for s in Status}
 _EXPIRES_PARAM = re.compile(r";\s*expires=(\d+)", re.I)
@@ -69,6 +69,9 @@ class Leg:
     # The leg's own dialog is `to_tag`; any other tag is a fork that was
     # ACKed and then ended with a BYE.
     acks: Dict[str, str] = field(default_factory=dict)
+    # RFC 3261 9.1: "" -- not cancelled; "pending" -- owed a CANCEL, which
+    # waits for a provisional response; "sent".
+    cancel: str = ""
 
 
 @dataclass
@@ -275,7 +278,8 @@ class SipCore:
 
         # 3 — dispatch
         handler = {"REGISTER": self._register, "INVITE": self._invite,
-                   "BYE": self._bye, "OPTIONS": self._options}.get(req.method)
+                   "BYE": self._bye, "CANCEL": self._cancel,
+                   "OPTIONS": self._options}.get(req.method)
         if handler is None:
             resp = Response(Status.NOT_IMPLEMENTED,
                             Headers([("Allow", ALLOWED)]))
@@ -369,6 +373,8 @@ class SipCore:
             session, signals, refusal = self.rt.establish(sr)
         except Exception:
             self._pending.pop(call.cid, None)
+            # Legs invited before the fault must not be left ringing.
+            self._cancel_unanswered(call)
             self._undo(call.cid, "establishment fault")
             raise
         finally:
@@ -508,6 +514,22 @@ class SipCore:
             # What the UAC owes the callee does not depend on whether the call
             # still exists: a 3xx-6xx is ACKed by the transaction.
             self._ack_non_2xx(txn, resp)
+        if txn.method == "INVITE" and resp.code < 200:
+            self.client.proceed(txn)
+            if leg.cancel == "pending":
+                # The call ended before this callee said anything; a CANCEL
+                # could not be sent until now (RFC 3261 9.1).
+                self._send_cancel(leg)
+                return
+            if leg.cancel:
+                return            # already CANCELled: its ringing changes nothing
+        if txn.method == "INVITE" and 200 <= resp.code < 300 and leg.cancel:
+            # A 2xx that crossed our CANCEL: the callee answered a call this
+            # leg no longer belongs to. ACK it and end it (9.1, 13.2.2.4) --
+            # it must not join, even if the call itself goes on.
+            self.client.accept(txn)
+            self._end_stray_dialog(leg, resp)
+            return
         call = self._dialogs.get(leg.call_id)
         if call is None or call.ended:
             if txn.method == "INVITE" and 200 <= resp.code < 300:
@@ -655,6 +677,67 @@ class SipCore:
         txn.flow.send(Request("ACK", inv.uri, h).render())
         self.client.finish(txn)
 
+    # -- CANCEL --------------------------------------------------------------
+
+    def _cancel_unanswered(self, call: Call) -> None:
+        """Every leg still being invited when the call ends is CANCELled
+        (RFC 3261 9.1), so no callee is left ringing for a call that is gone.
+        A leg that has sent no provisional response yet cannot be CANCELled
+        yet; it is marked and CANCELled when one arrives."""
+        for leg in call.legs.values():
+            txn = leg.txn
+            if leg.state not in ("inviting", "ringing") or leg.cancel \
+                    or txn is None or txn.done or txn.accepted \
+                    or txn.method != "INVITE":
+                continue
+            if txn.proceeding:
+                self._send_cancel(leg)
+            else:
+                leg.cancel = "pending"
+
+    def _send_cancel(self, leg: Leg) -> None:
+        """RFC 3261 9.1: the INVITE's Request-URI, Call-ID, To, From and
+        CSeq number; one Via, the INVITE's top Via (so the branch names the
+        transaction being cancelled); the INVITE's Route headers. Its own
+        non-INVITE client transaction, which nothing waits on."""
+        txn = leg.txn
+        inv: Request = txn.request                # type: ignore[union-attr]
+        h = Headers([("Via", (inv.headers.get_all("Via") or [""])[0]),
+                     ("From", inv.headers.get("From") or ""),
+                     ("To", inv.headers.get("To") or ""),
+                     ("Call-ID", inv.headers.get("Call-ID") or ""),
+                     ("CSeq", f"{cseq_of(inv.headers)[0]} CANCEL"),
+                     ("Max-Forwards", "70")])
+        for r in inv.headers.get_all("Route"):
+            h.add("Route", r)
+        req = Request("CANCEL", inv.uri, h)
+        leg.cancel = "sent"
+        self.client.cancelling(txn)               # type: ignore[arg-type]
+        self.client.start(req, txn.flow, user=None)   # type: ignore[union-attr]
+        txn.flow.send(req.render())               # type: ignore[union-attr]
+
+    def _cancel(self, req: Request, txn: ServerTxn, flow: Any) -> None:
+        """The initiator CANCELs its INVITE (RFC 3261 9.2). The CANCEL is
+        matched to the INVITE's server transaction by branch and answered
+        200; if the INVITE has no final response yet it is answered 487 and
+        the call is ended as a failed one, which CANCELs the legs still
+        ringing. A CANCEL after the call was answered changes nothing."""
+        invite_txn = self.server.find(top_branch(req.headers), "INVITE")
+        # 17.2.3: the branch, AND the sent-by of the top Via; and a CANCEL
+        # names its INVITE's Call-ID (9.1). A branch alone would let any
+        # peer that learnt it cancel someone else's call.
+        if invite_txn is None \
+                or _sent_by(req.headers) != _sent_by(invite_txn.request.headers) \
+                or req.headers.get("Call-ID") != invite_txn.request.headers.get("Call-ID"):
+            return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
+        self._final(txn, Response(Status.OK))
+        call = self.calls.get(invite_txn.call_id)
+        if call is None or call.txn is not invite_txn or call.answered \
+                or call.ended:
+            return
+        self._fail_call(call, Status.REQUEST_TERMINATED,
+                        "cancelled by the initiator")
+
     def _maybe_fail(self, call: Call, code: int) -> None:
         if call.answered or any(l.state in ("inviting", "ringing", "confirmed")
                                 for l in call.legs.values()):
@@ -672,6 +755,7 @@ class SipCore:
         call.ended = True
         self._final(call.txn, Response(status, Headers(
             [("Warning", f'399 mcx "{reason}"')])))
+        self._cancel_unanswered(call)
         self._undo(call.cid, reason)
 
     def _undo(self, cid: str, reason: str) -> None:
@@ -716,6 +800,12 @@ class SipCore:
             return
         call.ended = True
         call.skip_bye_to = skip
+        self._cancel_unanswered(call)
+        if call.txn.last_code < 200:
+            # The initiator hung up an early dialog: its INVITE is still
+            # pending and MUST be answered; 487 is the recommended answer
+            # (RFC 3261 15.1.2).
+            self._final(call.txn, Response(Status.REQUEST_TERMINATED))
         try:
             self.rt.release(call.cid, cause)
             # A private call's member set is the callee alone, so the
@@ -785,12 +875,24 @@ class SipCore:
             if ctxn.accepted:
                 continue          # Timer M: the 2xx window closed, not a failure
             leg = ctxn.user
+            if leg is not None and ctxn.cancelled and not ctxn.done \
+                    and not leg.cancel:
+                # Rang past the no-answer limit (SIP-OP-15): the callee is
+                # still alerting, so it is CANCELled, not forgotten.
+                self._send_cancel(leg)
             call = self._dialogs.get(leg.call_id) if leg else None
             if call is None or call.ended:
                 continue
             leg.state = "failed"
             if ctxn.method == "INVITE":
                 self._maybe_fail(call, 408)
+
+
+def _sent_by(headers) -> str:
+    """The sent-by (host[:port]) of the top Via, lower-cased."""
+    via = (headers.get_all("Via") or [""])[0]
+    m = re.match(r"\s*SIP\s*/\s*2\.0\s*/\s*\S+\s+([^;,\s]+)", via, re.I)
+    return m.group(1).lower() if m else ""
 
 
 def _uri(value: str) -> str:
