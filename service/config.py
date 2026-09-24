@@ -38,6 +38,14 @@ BEARER_NONE = "none"
 BEARER_STUB = "stub"
 KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 
+# REL-OP-02, decided 2026-09-24: a profile can declare call types the
+# configured 3GPP release cannot carry (the FRMCS profile's ad hoc group calls
+# before Rel-18). MCX_STRICT_RELEASE=true refuses to start in that case;
+# false starts and reports them. Required, like MCX_RELEASE: a default of
+# false would let a deployment accept unreachable emergency calls without
+# anyone having chosen to.
+STRICT_RELEASE_VALUES = {"true": True, "false": False}
+
 
 @dataclass(frozen=True)
 class SipConfig:
@@ -150,6 +158,7 @@ class Config:
     idms: str
     recorder: str
     bearer: str
+    strict_release: bool
     host: str
     port: int
     groups_file: Optional[Path]
@@ -211,6 +220,17 @@ class Config:
                 f"MCX_BEARER={bearer!r} is not a known bearer reservation "
                 f"source (known: {', '.join(KNOWN_BEARERS)})")
 
+        strict = (env.get("MCX_STRICT_RELEASE") or "").strip().lower()
+        if not strict:
+            raise StartupRefused(
+                "MCX_STRICT_RELEASE is not set: state whether the process may "
+                "start when the profile declares call types this release "
+                "cannot carry (true = refuse, false = start and warn); there "
+                "is no default")
+        if strict not in STRICT_RELEASE_VALUES:
+            raise StartupRefused(
+                f"MCX_STRICT_RELEASE={strict!r} must be 'true' or 'false'")
+
         try:
             port = int(env.get("MCX_HTTP_PORT") or "8080")
         except ValueError as exc:
@@ -229,6 +249,7 @@ class Config:
             idms=idms,
             recorder=recorder,
             bearer=bearer,
+            strict_release=STRICT_RELEASE_VALUES[strict],
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,

@@ -54,7 +54,7 @@ def env(tmp_path):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
     return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-            "MCX_RECORDER": "none", "MCX_BEARER": "none",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
             "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
             "MCX_HTTP_PORT": "0"}
 
@@ -554,6 +554,67 @@ def test_health_says_which_call_types_no_client_can_request(env):
     types are reported, so the gap is visible before the first refusal."""
     rt = build_runtime({**env, "MCX_RELEASE": "17"}, _clock())
     report = rt.health.snapshot()["call_types"]
-    assert set(report) == {"not_requestable_by_mcptt_clients", "unreachable_at_release"}
+    assert set(report) == {"strict_release", "not_requestable_by_mcptt_clients",
+                           "unreachable_at_release"}
+    assert report["strict_release"] is False
     assert "sds" in report["not_requestable_by_mcptt_clients"]
     assert report["unreachable_at_release"] == {}      # mcx declares no ad hoc call type
+
+
+
+# -- MCX_STRICT_RELEASE (REL-OP-02, decided 2026-09-24) -------------------------
+
+def _frmcs(env, release, strict):
+    """The railway profile, whose group calls are ad hoc and so exist in
+    TS 24.379 only from Rel-18. No groups file: its members are mcx users."""
+    e = {k: v for k, v in env.items() if k != "MCX_GROUPS_FILE"}
+    e.update({"MCX_PROFILE": "frmcs", "MCX_RELEASE": release,
+              "MCX_STRICT_RELEASE": strict})
+    return e
+
+
+def test_strict_release_refuses_a_release_that_cannot_carry_the_profile(env):
+    """true: the railway profile at Rel-17 does not start, and the refusal
+    names the call types and the reason."""
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(_frmcs(env, "17", "true"), _clock())
+    text = str(exc.value)
+    assert "MCX_STRICT_RELEASE=true" in text
+    assert "rec-broadcast" in text and "shunting-group" in text
+    assert "adhoc" in text
+
+
+def test_non_strict_release_starts_and_reports_what_it_cannot_carry(env, caplog):
+    """false: the same deployment starts, logs a warning per call type, and
+    the health document says which ones and that strictness is off."""
+    with caplog.at_level("WARNING", logger="mcx.service"):
+        rt = build_runtime(_frmcs(env, "17", "false"), _clock())
+    report = rt.health.snapshot()["call_types"]
+    assert report["strict_release"] is False
+    assert set(report["unreachable_at_release"]) == {"rec-broadcast", "shunting-group"}
+    warned = [r.getMessage() for r in caplog.records if "cannot be requested" in r.getMessage()]
+    assert len(warned) == 2 and all("MCX_STRICT_RELEASE=false" in w for w in warned)
+
+
+@pytest.mark.parametrize("release", ["19", "20"])
+def test_strict_release_starts_where_every_call_type_is_carried(env, release):
+    rt = build_runtime(_frmcs(env, release, "true"), _clock())
+    report = rt.health.snapshot()["call_types"]
+    assert report["strict_release"] is True and report["unreachable_at_release"] == {}
+
+
+@pytest.mark.parametrize("value", [None, "", "yes", "1", "TRUE-ish"])
+def test_strict_release_must_be_stated_as_true_or_false(env, value):
+    """Required with no default, like MCX_RELEASE: a silent false would let
+    a deployment accept unreachable emergency calls nobody chose to accept."""
+    e = {k: v for k, v in env.items() if k != "MCX_STRICT_RELEASE"}
+    if value is not None:
+        e["MCX_STRICT_RELEASE"] = value
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, _clock())
+    assert "MCX_STRICT_RELEASE" in str(exc.value)
+
+
+def test_strict_release_values_are_case_insensitive(env):
+    for value in ("TRUE", "False"):
+        build_runtime({**env, "MCX_STRICT_RELEASE": value}, _clock())

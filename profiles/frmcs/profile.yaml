@@ -43,7 +43,8 @@ applications:
 # lists ad hoc group procedures only, and no prearranged group call occurs
 # anywhere in the SRS), and ad hoc group calls do not exist in
 # TS 24.379 before Rel-18. At MCX_RELEASE=17 no client can request them:
-# startup reports rec-broadcast and shunting-group as unreachable.
+# with MCX_STRICT_RELEASE=true this profile refuses to start there; with
+# false it starts and reports rec-broadcast and shunting-group unreachable.
 call_types:
   - id: rec-broadcast
     label: Railway emergency call

@@ -242,12 +242,21 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     # and why, rather than leave an operator to discover it from refusals.
     undeclared, blocked = mcinfo.reachability(loaded.profile.call_types,
                                               config.release)
+    # REL-OP-02: MCX_STRICT_RELEASE decides whether that is fatal.
+    if blocked and config.strict_release:
+        raise StartupRefused(
+            f"MCX_STRICT_RELEASE=true and profile {loaded.profile.identifier()} "
+            f"declares call types {config.release} cannot carry: "
+            + "; ".join(f"{cid} ({why})" for cid, why in blocked)
+            + ". Raise MCX_RELEASE, or set MCX_STRICT_RELEASE=false to start "
+            "without them")
     health.set_call_types({
+        "strict_release": config.strict_release,
         "not_requestable_by_mcptt_clients": list(undeclared),
         "unreachable_at_release": {cid: why for cid, why in blocked}})
     for cid, why in blocked:
         log.warning("call type %r cannot be requested by any client at this "
-                    "release: %s", cid, why)
+                    "release: %s (MCX_STRICT_RELEASE=false)", cid, why)
 
     if recovered:
         log.warning("%d session record(s) were established when the previous "
