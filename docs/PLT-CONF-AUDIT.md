@@ -1500,8 +1500,6 @@ RFC 4488 behaviour; a session identity in the Contact changes where in-dialog
 requests arrive. Each needs the behaviour behind it, so CA-20b is feature work
 with a conformance reason, not a header patch.
 
----
-
 ### 4.37 CA-21 — the floor timers had the right values and the wrong jobs
 
 CA-05 (4.11) confirmed the timer *defaults* and said nothing about what each
