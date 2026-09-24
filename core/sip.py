@@ -209,9 +209,12 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
 # Table 4.4.2-1 defines the MC form with "=/", an ABNF INCREMENTAL ALTERNATIVE:
 # it adds a permitted shape for warn-text, it does not replace RFC 3261's. A
 # warn-text that does not begin with three digits therefore stays legal and
-# cannot be mistaken for a code. This is what keeps PLT-PRI-008's invariant --
-# a policy refusal must be distinguishable from a fault in the trace, and both
-# are 503 for `capacity-exhausted` -- without emitting a false code to buy it.
+# cannot be mistaken for a code. It is what lets a trace tell a policy refusal
+# from a fault when both are 503 (`capacity-exhausted`), without emitting a false
+# code to buy it. That aim is the platform's own and stricter than PLT-PRI-008,
+# which asks only that capacity exhaustion be distinguishable from authorisation
+# failure. It holds at the platform's edge only: a proxy turns a lone 503 into
+# a 500 and drops the Warning, which was accepted (PLT-VP-R1 SIP-OP-10).
 LOCAL_WARNING_TEXTS: Mapping[str, str] = {
     NO_BINDING: "identity has no current holder",
     NO_LOCATION_BINDING: "location required for this identity",

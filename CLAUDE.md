@@ -202,10 +202,10 @@ suppressed or raised.
 All three task briefs have been worked. R1 is still **not** complete, and the
 reasons are specific, not general:
 
-- **VP1-SIG-001** was executed on 2026-09-24. It passes against Kamailio.
-  Asterisk passes the terminating path, but as a B2BUA it cannot carry the
-  MC info body when a UE originates (SIP-OP-12). Whether a B2BUA counts as a
-  "SIP core" is VP-OP-01, a decision rather than a test.
+- **VP1-SIG-001** PASSED on 2026-09-24 against Kamailio (proxy) and Asterisk
+  (B2BUA; counting a B2BUA was decided in VP-OP-01). Two caveats go with it:
+  through a B2BUA, originating calls fail and terminating calls lose their MC
+  body (SIP-OP-12), and the keylog-decrypted capture is still owed (SIP-OP-02).
 - **VP1-FC-002** cannot close: no third-party capture has ever been decoded
   (FC-OP-03, narrowed 2026-09-22). The constants themselves have been read from
   TS 24.380 across all eight releases and corrected; what is missing is any

@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.4 (draft)
+**Version:** 0.5 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -231,7 +231,7 @@ in the run's `transcript.txt`.
 | Core | Role it plays | Registration | Session setup | Verdict |
 |---|---|---|---|---|
 | Kamailio 5.7.4 | Record-routing proxy and registrar (S-CSCF stand-in) | PASS — the UE's REGISTER is relayed and the platform answers it as registrar of record | PASS — INVITE to the callee, 200 OK to the originator, both ACKs delivered through the proxy; teardown works both ways | **Passes** |
-| Asterisk 20.6 | Back-to-back user agent (PBX); registers each user onward to the platform | PASS — UEs register with Asterisk, and Asterisk's onward registrations to the platform succeed | Terminating (platform → Asterisk → UE): PASS, including both ACKs and teardown. Originating (UE → Asterisk → platform): **not possible** — see SIP-OP-12 | **Pending the VP-OP-01 decision** |
+| Asterisk 20.6 | Back-to-back user agent (PBX); registers each user onward to the platform | PASS — UEs register with Asterisk, and Asterisk's onward registrations to the platform succeed | Terminating (platform → Asterisk → UE): PASS, including both ACKs and teardown. Originating (UE → Asterisk → platform): **not possible** — see SIP-OP-12 | **Passes** (a B2BUA counts: VP-OP-01, decided 2026-09-24) |
 
 **What the first runs found, all fixed in the same change set before the
 runs above passed:**
@@ -258,14 +258,21 @@ receives a conformant MCPTT info body naming the caller and the group. It
 passes. Through Asterisk the body is lost in the terminating direction too
 (SIP-OP-12).
 
-**VP1-SIG-001 therefore stays OPEN on one question, which is VP-OP-01 and not
-a test result:** whether a back-to-back user agent counts as a "distinct SIP
-core implementation". Kamailio is one, unambiguously. Asterisk regenerates
-every message, so it cannot carry the MC info body on the originating path
-(SIP-OP-12). If a B2BUA counts, VP1-SIG-001 passes on the terminating path
-and the originating path becomes a documented deployment constraint. If it
-does not, a second proxy is needed; no other proxy is packaged for this
-environment, and reSIProcate `repro` is the independent candidate.
+**VP1-SIG-001: PASSED, 2026-09-24.** VP-OP-01 was decided the same day: a
+back-to-back user agent counts as a distinct SIP core implementation. So the
+two cores are Kamailio 5.7.4 (a proxy) and Asterisk 20.6 (a B2BUA). Both pass
+registration and session setup with the same platform configuration, and
+Asterisk passes on the terminating path.
+
+Two things go with the verdict and must not be dropped from it:
+
+- **Through a B2BUA, originating calls do not work, and terminating calls
+  lose their MC semantics** (SIP-OP-12). This is a deployment constraint
+  that PBX-fronted deployments have to be told about. It is not a platform
+  defect.
+- **The keylog-decrypted packet capture is still owed** (SIP-OP-02). The
+  pass rests on endpoint transcripts and each core's own logs. That is
+  strong evidence, but none of it is a capture of the wire.
 
 ### 7.2 TS-CC — call control (ENV-E2E)
 
@@ -466,7 +473,7 @@ not by relaxing its pass criterion.
 
 | # | Question | Blocks |
 |---|---|---|
-| VP-OP-01 | Which two SIP core implementations satisfy VP1-SIG-001? Interoperability against a single core does not evidence PLT-SIG-001. **Narrowed 2026-09-24 (§7.1.1).** Kamailio 5.7.4 passes as a proxy. Asterisk 20.6 was run as the second core and passes the terminating path; the remaining question is whether a back-to-back user agent counts as a SIP core implementation at all, since by construction it cannot carry the MC info body on the originating path (SIP-OP-12). A decision, not a test. | VP1-SIG-001 |
+| VP-OP-01 | ~~Which two SIP core implementations satisfy VP1-SIG-001?~~ **DECIDED 2026-09-24: a back-to-back user agent counts.** The two are Kamailio 5.7.4 (proxy) and Asterisk 20.6 (B2BUA), and VP1-SIG-001 passes (§7.1.1). The consequence of counting a B2BUA is SIP-OP-12, which travels with the verdict. | closed |
 | VP-OP-02 | ~~Golden captures or specification-derived flows?~~ **DECIDED 2026-09-21: specification-derived accepted.** See PLT-CONF-AUDIT §5. | closed |
 | VP-OP-03 | Confirm the codec set per profile (PLT-SRS OP-06) before VP1-MED-001 can have a pass criterion. | VP1-MED-001 |
 | VP-OP-04 | Is VP1-FC-010 exhaustive over the full state/event product, or over reachable pairs only? Exhaustive is preferable and needs the machine's state space bounded first. | VP1-FC-010 |
@@ -499,13 +506,13 @@ not by relaxing its pass criterion.
 | FC-OP-08 | **Open, low consequence.** The trace comparator treats a Floor Revoke sent to the holder as ending the holder's permission, because T3 expiry is invisible on the wire. A server granting someone else during the grace would therefore not be flagged, and a trace without timestamps cannot tell that from audio cut-in (T3 = 0). Tightening it needs timestamps in the trace, or a check that each hand-over tells the old holder who holds the floor now (6.3.5.5.9, 6.3.5.6.7). | VP1-FC-002 evidence strength |
 | FC-OP-09 | **Open, not implemented.** 'U: not permitted but sends media' (6.3.5.7): a talker still sending after the grace is dropped silently, where the specification re-revokes it with cause #3. Audio cut-in (T3 = 0, 6.3.4.5.1) and floor-control-server-initiated revoke from another client (6.3.4.4.16, Rel-19+) are also absent. | PLT-FC completeness |
 | FC-OP-10 | **Open, for 3GPP CT1.** Two inconsistencies in TS 24.380: 6.3.4.4.16 (Rel-19, Rel-20) revokes with "#8 Revoked by another MCPTT client", which table 8.2.10.2 lists as #7, with no #8; and 6.3.4.3.2's opening condition ("if no MCPTT client negotiated support of queueing") makes its own item 3, grant from the queue, unreachable when read literally. The platform follows the cause table and the evident intent. | none (recorded) |
-| FC-OP-03 | **NARROWED in PLT-CONF-AUDIT v1.8.** The claim that these are "reconstructed from memory, not checked against TS 24.380" has been false since v0.6: the subtypes, field ids, field lengths, reject causes and timer defaults were all read from TS 24.380 across all eight published releases (CA-03, CA-05, CA-11, CA-13), and nine of them were wrong and were corrected. What remains unverified is narrower and unchanged by that work: **no third-party capture has ever been decoded.** The byte-level layout is self-consistent — `core/rtcp.py` and `tools/trace_compare.py` agree — and both now agree with the specification's field tables, but agreement with a table is not the same as interoperating with another implementation's encoder. VP1-FC-002 stays OPEN on that, and on that alone (VP-OP-02, still undecided). |
+| FC-OP-03 | **NARROWED in PLT-CONF-AUDIT v1.8.** The claim that these are "reconstructed from memory, not checked against TS 24.380" has been false since v0.6: the subtypes, field ids, field lengths, reject causes and timer defaults were all read from TS 24.380 across all eight published releases (CA-03, CA-05, CA-11, CA-13), and nine of them were wrong and were corrected. What remains unverified is narrower and unchanged by that work: **no third-party capture has ever been decoded.** The byte-level layout is self-consistent — `core/rtcp.py` and `tools/trace_compare.py` agree — and both now agree with the specification's field tables, but agreement with a table is not the same as interoperating with another implementation's encoder. VP1-FC-002 stays OPEN on that, and on that alone. (This entry used to say VP-OP-02 was "still undecided". It was decided on 2026-09-21: specification-derived flows accepted in place of golden captures. Whether that decision closes VP1-FC-002 has not been recorded, and it is the owner's call.) |
 | FC-OP-04 | Floor control is carried on a separate `m=application <port> udp MCPTT` stream, one UDP port per participant, not multiplexed with voice RTCP. The SDP attributes for that stream, and the ack-required indication in the subtype, are not implemented and unverified. | VP1-FC-001/002 |
 | FC-OP-05 | IF-PRI has no participant-specific input: a participant's floor priority is obtained by calling `evaluate` again with that participant as initiator. With the in-tree tables every participant of a session therefore has the same floor priority, so priority ordering is only exercised with an injected priority source. | PLT-FC-005 |
 | MED-OP-01 | The `media.codecs` section is new in the profile schema (PLT-MED-001) and its values (AMR-WB 97, PCMU 0) are PLACEHOLDERS: the codec set per profile is still OP-06 / VP-OP-03. Enforcement is real; the pass criterion for VP1-MED-001 is not settled. The ICD is not affected (no hook changed) but every in-tree profile changed. | VP1-MED-001 |
 | SVC-OP-05 | **CLOSED, and one part unreachable in R1.** The process could not establish a call in any profile: `fail_closed_platform()` hard-coded `recording_available` and `reserve_qos` to false, and every call type in every in-tree profile sets `recording_required: true`. Added `MCX_RECORDER` and `MCX_BEARER` (`none`\|`stub`), each required with no default and each stub refused under a production indicator. The production refusals cannot be reached in R1: the only known identity provider is the stub, which is refused first. Found by VP1-SIG-001, not by the suite. `test_a_process_built_from_environment_alone_can_establish_a_call` is the test that was missing. | VP1-SIG-001, VP1-CC-005 |
 | SIP-OP-09 | **CLOSED 2026-09-24.** RFC 3261 §12 dialog routing was not implemented. The platform's 2xx carried no Record-Route (§12.1.1), and its ACK and BYE went to the peer's address-of-record with no Route (§12.2.1.1). Behind a record-routing proxy, both ACKs of every answered call were dropped. Fixed with route sets, remote targets and strict-route handling; eight mutants each killed by a dedicated test. | VP1-SIG-001 |
-| SIP-OP-10 | **Open — a design question.** RFC 3261 §16.7 step 5 tells a proxy that received only a 503 to send a 500 upstream, and Kamailio does, regenerating the response. The platform's Warning header is lost with it. `capacity-exhausted` and `recording-unavailable` are both 503, and PLT-PRI-008's rule that a policy refusal stays distinguishable from a fault rests entirely on that Warning. So in any IMS deployment, the distinction does not survive one hop for exactly those two refusals. A 4xx does survive: the 404 with Warning 145 crossed Kamailio intact. The choice of status, or of a carrier other than Warning, is a PLT-SRS decision. | PLT-PRI-008 |
+| SIP-OP-10 | **CLOSED 2026-09-24 — decided: keep 503.** A proxy that receives only a 503 sends a 500 upstream and drops the Warning (RFC 3261 §16.7 step 5), so behind a proxy `capacity-exhausted` and `recording-unavailable` look like an internal fault. Accepted as is. This row first said the behaviour defeated PLT-PRI-008. It does not: PLT-PRI-008 (an R2 requirement) asks only that capacity exhaustion be distinguishable from **authorisation failure**, and a 500 remains distinct from the 403 of an authorisation refusal, which crosses a proxy intact. What is lost past the first proxy is the platform's own, stricter aim of telling a policy refusal from a fault. The platform's audit trail keeps the exact reason code for every refusal whatever the wire shows. | closed |
 | SIP-OP-11 | **Split by PLT-CONF-AUDIT CA-20.** 20a is closed: the MCPTT info body, `P-Asserted-Identity` and the floor-control m-line are fixed. 20b is open: `Supported: timer, tdialog, norefersub`, `Require: timer` with `Session-Expires`, and `isfocus` with an MCPTT session identity in Contact (6.3.2.2.3, 6.3.2.1.5.2). Each commits the platform to a behaviour (RFC 4028, 4538, 4488, session-identity routing), so it is feature work, not a header patch. The first version of this row cited 6.3.3.1.2 and `P-Asserted-Service`; that was the wrong clause. | PLT-SIG-001 conformance |
 | SIP-OP-12 | **A deployment constraint, not a platform defect, and it applies in both directions.** A back-to-back user agent re-originates every call with SDP alone. Originating (UE → B2BUA → platform): the MCPTT info body, both Accept-Contact fields and P-Asserted-Identity are lost, so the platform refuses the call (404, Warning 145), and the B2BUA strips the Warning on the way back. Terminating (platform → B2BUA → UE): the call completes, but the callee receives no MCPTT info body and so cannot tell which group is calling or who is. MCPTT clients behind a PBX that does not pass the body through lose MC semantics either way. | VP1-SIG-001, deployment guidance |
 | SIP-OP-13 | **Open — found by independent review of the SIP-OP-09 fix, older than it.** Two defects in the platform acting as UAC toward callees: (1) after the first 2xx on a leg, its client transaction is finished, so a retransmitted 2xx gets no new ACK (RFC 3261 13.2.2.4), and a second 2xx from a forking proxy gets neither ACK nor BYE; (2) a callee's 3xx–6xx is never ACKed (17.1.1.3). Neither matters with nothing in between. Behind a proxy, both mean retransmissions until the proxy's timers expire. With UDP between the proxy and the callee, a lost ACK makes the callee end an answered call after 64·T1. The per-leg route set and remote target from SIP-OP-09 are what a re-ACK needs. | VP1-SIG-001 robustness |
@@ -522,6 +529,7 @@ not by relaxing its pass criterion.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
+| 0.5 | 2026-09-24 | VP-OP-01 decided: a B2BUA counts, so VP1-SIG-001 passes against Kamailio and Asterisk, with SIP-OP-12 and SIP-OP-02 carried alongside the verdict. SIP-OP-10 decided: keep 503. Corrected this plan's earlier claim that the 503-to-500 rewrite defeats PLT-PRI-008; it does not. FC-OP-03 no longer calls VP-OP-02 undecided. |
 | 0.4 | 2026-09-24 | REL-OP-02 closed by decision: `MCX_STRICT_RELEASE` (true refuses, false warns), required with no default. |
 | 0.3 | 2026-09-24 | §7.1.1 corrected. The first runs' MC body was the platform's own invented format, copied into the user agent; after PLT-CONF-AUDIT CA-20a the agent writes annex F.1 bodies and Kamailio passes an added body check. SIP-OP-11 split into 20a (closed) and 20b (open) with corrected clauses; SIP-OP-12 widened to both directions. PRF-OP-01, REL-OP-02 and ADHOC-OP-01 opened. |
 | 0.2 | 2026-09-24 | VP1-SIG-001 executed against Kamailio 5.7.4 (pass) and Asterisk 20.6 (terminating pass; originating path not possible through a B2BUA), recorded in §7.1.1. SIP-OP-01, SIP-OP-09 and SVC-OP-05 closed; SIP-OP-10 to SIP-OP-13 opened. VP-OP-01 narrowed to one decision. |

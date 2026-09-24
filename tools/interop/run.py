@@ -478,7 +478,8 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
 
 def refusal_comparison(core: str, work: Path, core_port: int, platform_port: int,
                        report: Report, uas: List[UA]) -> None:
-    """The same 503 refusal, directly and through the core (PLT-PRI-008).
+    """The same 503 refusal, directly and through the core (SIP-OP-10: the proxy
+    turns it into a 500 without its Warning; accepted, and PLT-PRI-008 is unaffected).
 
     Runs a fail-closed platform (MCX_RECORDER=none) on the port the core
     already routes to, so the core's configuration is untouched.
