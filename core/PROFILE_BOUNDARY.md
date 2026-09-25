@@ -31,17 +31,32 @@ state machine is wrong, not a reason for a profile hook.
 
 ## Deployment
 
-One image. One profile, selected by config at deploy. The loader validates
+One core, one profile per image. `tools/package.py` builds each release
+image from the shared part (core, service, profile framework) and exactly one
+profile package; the shared part hashes the same in every image, and
+VP1-BND-006 fails the build if it does not, or if code that ships in every
+image names a specific profile. The profile is still selected by config at
+deploy (`MCX_PROFILE`, no default), and an image refuses any profile it does
+not carry. The loader validates
 strictly (unknown keys are errors), freezes the result, and logs name +
 version + content hash; that triple goes on `/healthz` and every audit record,
 because the safety case needs to show which profile was running when.
 
 Loading more than one profile is refused unless `MCX_TEST_MODE=1`. That flag
-exists for the conformance harness and nothing else.
+exists for the conformance harness and nothing else, and only the source tree
+carries more than one profile to load.
+
+Why per-profile images and not one image carrying everything: a delivery
+should contain only what its deployment uses. A public-safety operator does
+not receive railway code, and the FRMCS safety case (PLT-SRS OP-03) is argued
+over the core plus one profile, not over profiles that are merely never
+loaded. What makes this safe is the core hash: without it, per-profile builds
+are where per-profile code drift starts.
 
 ## What the two suites are for
 
-CI runs both profile suites against the same binary. That is the only
+CI runs every profile suite against the same core, the one whose hash every
+release image carries. That is the only
 mechanical detector for railway logic leaking into the core. When a change to
 floor control breaks the FRMCS suite but not the MCX one, the abstraction has
 sprung a leak — fix the seam, not the test.

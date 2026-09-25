@@ -2,7 +2,8 @@
 
 A mission-critical services platform (3GPP MCPTT / MCData) that runs as either a
 generic public-safety deployment or a railway FRMCS deployment — from one
-codebase, one image, and one profile chosen at deploy time.
+codebase: one release image per profile, around a core that is byte-identical
+in every image (`tools/package.py`, VP1-BND-006).
 
 ---
 

@@ -1,8 +1,8 @@
 # Mission-critical services platform — Software Requirements Specification
 
 **Document:** PLT-SRS
-**Version:** 0.2 (draft)
-**Date:** 2026-09-19
+**Version:** 0.3 (draft)
+**Date:** 2026-09-25
 **Status:** Draft for review — not baselined
 
 ---
@@ -14,7 +14,8 @@
 This document specifies the requirements for a mission-critical services platform
 implementing 3GPP MC services (MCPTT, MCData, MCVideo), deployable as either a
 generic mission-critical (MCX) system or a railway FRMCS system, from a single
-codebase and a single deployable image.
+codebase, delivered as one release image per profile around a core that is
+identical in every image.
 
 ### 1.2 Scope
 
@@ -138,7 +139,7 @@ profile-aware core behaviour is a defect in this document.
 
 | ID | Phase | Requirement | V |
 |---|---|---|---|
-| PLT-GEN-001 | R1 | The platform shall be built and distributed as a single deployable image containing all supported profiles. | I |
+| PLT-GEN-001 | R1 | The platform shall be built from a single codebase and distributed as one release image per profile. Each image shall contain the shared core and exactly one profile, and the core shall be byte-identical, by content hash, in every image built from the same revision. | I |
 | PLT-GEN-002 | R1 | The platform shall select exactly one profile at process start, from deployment configuration. | T |
 | PLT-GEN-003 | R1 | The platform shall refuse to start when no profile is configured, when the named profile is absent, or when more than one profile is configured. | T |
 | PLT-GEN-004 | R1 | The platform shall not provide a default profile, and shall not infer a profile from any other configuration value. | I |
@@ -555,7 +556,7 @@ requirements below are written as constraints on what a partner cannot do.
 
 | ID | Phase | Requirement | V |
 |---|---|---|---|
-| PLT-VER-001 | R1 | A conformance suite shall exist per profile, exercising the same binary. | I |
+| PLT-VER-001 | R1 | A conformance suite shall exist per profile, exercising the same core (the same core hash, PLT-GEN-001). | I |
 | PLT-VER-002 | R1 | Both profile suites shall run in continuous integration on every change. | I |
 | PLT-VER-003 | R1 | A change to the core that breaks one profile suite and not the other shall be treated as a boundary defect. | A |
 | PLT-VER-004 | R1 | A CI gate shall reject any profile-specific identifier appearing under `core/`. | T |
@@ -587,5 +588,6 @@ requirements below are written as constraints on what a partner cannot do.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.3 | 2026-09-25 | PLT-GEN-001 revised by decision: one codebase, one release image per profile, the core byte-identical across images (was: a single image carrying every profile). §1.1 and PLT-VER-001 follow. Each delivery now contains only the profile its deployment uses. |
 | 0.2 | 2026-09-19 | Added §14A (PLT-ICX, 26 requirements) for interconnection with partner MC systems, distinct from interworking. R3 exit criterion extended. |
 | 0.1 | 2026-09-19 | Initial draft |
