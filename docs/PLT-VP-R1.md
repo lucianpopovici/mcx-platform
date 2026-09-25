@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.18 (draft)
+**Version:** 0.19 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -53,8 +53,9 @@ may need several cases. Both are recorded in §9.
 
 ### 1.4 Independence
 
-Per PLT-SRS §18, conformance suites run against the same binary for both
-profiles. The FRMCS profile is a stub in R1 (§14 of PLT-SRS is `[PROVISIONAL]`),
+Per PLT-SRS §18, conformance suites run against the same core for every
+profile: the shared part whose hash is identical in every release image
+(VP1-BND-006). The FRMCS profile is a stub in R1 (§14 of PLT-SRS is `[PROVISIONAL]`),
 so its suite verifies **framework** behaviour only — that the core loads,
 validates and operates against a second profile — not railway semantics. That
 is sufficient for the boundary-leak detection PLT-VER-003 depends on, and is the
@@ -138,7 +139,7 @@ Environment: ENV-CI. These run on every change (PLT-VER-002) and block merge.
 | VP1-BND-003 | Hook interfaces are the only crossing | Static analysis of call sites | Every `core/` → profile call is through a §6 interface |
 | VP1-BND-004 | Value objects immutable | Inspect all hook parameter and return types | Every type frozen; no mutable field |
 | VP1-BND-005 | Hooks do not call back | Static analysis of profile packages | No reference from any profile to a core symbol other than the hook types |
-| VP1-BND-006 | Single image, all profiles | Inspect build output | One artefact; both profile packages present; no per-profile build variant |
+| VP1-BND-006 | One core, one profile per image | Build every profile's image with `tools/package.py` and inspect | Each image carries exactly one profile package; the core hash is identical in every image; no shared code names a profile package; no per-profile build file |
 | VP1-BND-007 | No default profile in code or config | Inspect configuration defaults and code paths | No path yields a profile without explicit configuration |
 | VP1-BND-008 | No hot reload mechanism | Inspect for reload handlers, watchers and signal handlers touching the profile | None present |
 | VP1-BND-009 | Core owns the protocol state machines | Inspect floor control, SIP session and document modules | No transition, guard or state parameterised by profile input; timers excepted |
@@ -150,7 +151,7 @@ Environment: ENV-CI. These run on every change (PLT-VER-002) and block merge.
 | VP1-BND-015 | Floor state machine independently testable | Inspect its dependencies | No dependency on SIP, media or network; instantiable in ENV-UNIT |
 | VP1-BND-016 | Time discipline | Inspect configuration, logs and audit records | All timestamps UTC; all durations in milliseconds; no local-time formatting |
 | VP1-BND-020 | Both suites run per change | Inspect CI configuration | Both profile suites execute on every change; neither is skippable by branch or label |
-| VP1-BND-021 | Per-profile suite exists | Inspect the suites | One suite per profile, both targeting the same built artefact |
+| VP1-BND-021 | Per-profile suite exists | Inspect the suites | One suite per profile, all targeting the same core (same core hash, VP1-BND-006) |
 
 ---
 
@@ -491,7 +492,8 @@ R1 verification is complete when all of the following hold:
 1. Every case in §3–§7 has executed with a recorded result.
 2. Every requirement in §9 has at least one passing verification artefact.
 3. The three analyses in §8 are written, reviewed and signed.
-4. Both profile conformance suites pass against the same built artefact.
+4. Every profile conformance suite passes against the same core, and the
+   core hash recorded for each released image matches (VP1-BND-006).
 5. All TS-BND gates pass on the commit under test.
 6. An end-to-end prearranged group call between two clients completes with floor
    arbitration, captured and matched by the trace comparator.
@@ -575,6 +577,7 @@ not by relaxing its pass criterion.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
+| 0.19 | 2026-09-25 | VP1-BND-006 rewritten for per-profile release images (PLT-SRS 0.3, PLT-GEN-001): each image carries exactly one profile and the core hash is identical across images, checked by building every image with `tools/package.py`. VP1-BND-021 and exit criterion 4 now refer to the same core instead of the same artefact. |
 | 0.18 | 2026-09-25 | ADHOC-OP-05 closed: ad hoc refusals in the order of 17.4.2.2 (3A 150, 3B/3C body, 185, 186). |
 | 0.17 | 2026-09-25 | ICD-OP-09 closed by decision: IF-SES `authorise` runs before any target lookup (ICD 0.13). ADHOC-OP-05 opened: the ad hoc authorisation warnings 185 and 186 and the 3B body. |
 | 0.16 | 2026-09-25 | NET-OP-01 closed by decision: the network profile (`MCX_NETWORK_FILE`) holds PLMNs, the cell map and the trusted cores with their own CA, and joins the audit identity (VP1-OAM-001). ICD-OP-10 closed with it. |

@@ -1,6 +1,7 @@
 """Per-profile conformance suite (VP1-BND-021 / PLT-VER-001).
 
-One suite, run once per profile against the SAME built artefact. The profile
+One suite, run once per profile against the SAME core: the shared part whose
+hash is identical in every release image (VP1-BND-006, PLT-GEN-001). The profile
 under test is named by `MCX_PROFILE`; CI runs this file once per profile.
 
 This is the mechanical half of PLT-VER-003. Nothing here asserts behaviour
