@@ -194,19 +194,70 @@ def check_frozen_value_objects(root: Path) -> List[str]:
 # --------------------------------------------------------------------------
 
 
-def check_single_image(root: Path) -> List[str]:
-    """VP1-BND-006 / PLT-GEN-001 — one artefact carrying every profile."""
+def _load_packager(root: Path):
+    import importlib.util
+    path = root / "tools" / "package.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("_mcx_package", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def check_per_profile_images(root: Path) -> List[str]:
+    """VP1-BND-006 / PLT-GEN-001 — one core, one profile per image.
+
+    Builds every in-tree profile's image with tools/package.py and holds the
+    set to three rules:
+
+    1. Each image carries exactly one profile package.
+    2. The shared part (core, service, profile framework) hashes the same in
+       every image. This is what keeps VP1-BND-001 meaningful once there is
+       no single artefact: the core under test is the core in every delivery.
+    3. Code that ships in every image does not name a specific profile, and
+       nothing in the build varies per profile. What varies is data, the
+       profile package, never a build file.
+
+    HEURISTIC for rule 3: it catches a profile package named by import path
+    (`profiles.<name>`) or path segment (`/ "<name>"`), not every way code
+    could depend on one. Rules 1 and 2 are exact.
+    """
+    import tempfile
     violations: List[str] = []
-    packages = sorted(p.parent.name for p in (root / PROFILES).glob("*/profile.yaml"))
-    if len(packages) < 2:
-        violations.append(
-            f"expected at least two profile packages in the image, found {packages}")
-    # A per-profile build variant would mean the image is not profile-agnostic.
-    for pattern in ("Dockerfile.*", "*.Dockerfile", "build-*.sh"):
-        for candidate in root.glob(pattern):
-            if any(name in candidate.name for name in packages):
+    packager = _load_packager(root)
+    if packager is None or not hasattr(packager, "stage"):
+        return ["tools/package.py is missing: there is no way to build a release image"]
+    names = packager.profile_names(root)
+    if not names:
+        return ["no profile packages to build"]
+
+    with tempfile.TemporaryDirectory(prefix="mcx-bnd006-") as tmp:
+        images = {n: packager.stage(n, Path(tmp), root) for n in names}
+        violations += packager.verify(images)
+
+    alt = "|".join(map(re.escape, names))
+    named = re.compile(rf"\bprofiles\.({alt})\b|[/\\]\s*[\"']({alt})[\"']")
+    for rel in packager.shared_files(root):
+        if not rel.endswith(".py"):
+            continue
+        for lineno, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if named.search(line):
                 violations.append(
-                    f"{candidate.relative_to(root)}: per-profile build variant")
+                    f"{rel}:{lineno}: shared code names a profile package, but every "
+                    f"image carries only one: {line.strip()[:90]}")
+
+    for pattern in ("Dockerfile*", "*.Dockerfile", "Containerfile*", "*.Containerfile",
+                    "build-*.sh", "tools/*Containerfile*", "tools/*Dockerfile*"):
+        for candidate in root.glob(pattern):
+            if any(name in candidate.name for name in names):
+                violations.append(
+                    f"{candidate.relative_to(root)}: per-profile build variant; the profile "
+                    "is data given to tools/package.py, not a build file")
     return violations
 
 
@@ -536,7 +587,7 @@ def check_ci_runs_both_suites(root: Path) -> List[str]:
 
 
 def check_per_profile_suite(root: Path) -> List[str]:
-    """VP1-BND-021 / PLT-VER-001 — one suite per profile, same artefact."""
+    """VP1-BND-021 / PLT-VER-001 — one suite per profile, same core (VP1-BND-006)."""
     violations: List[str] = []
     suite = root / TESTS / "test_conformance.py"
     if not suite.is_file():
@@ -642,7 +693,7 @@ CHECKS: Tuple[Tuple[str, str, Callable[[Path], List[str]]], ...] = (
     ("VP1-BND-004", "hook value objects are frozen", check_frozen_value_objects),
     ("VP1-BND-005", "profiles do not reach into core internals",
      check_profile_callbacks),
-    ("VP1-BND-006", "single image carries every profile", check_single_image),
+    ("VP1-BND-006", "one core, one profile per image", check_per_profile_images),
     ("VP1-BND-007", "no default profile", check_no_default_profile),
     ("VP1-BND-008", "no hot reload mechanism", check_no_hot_reload),
     ("VP1-BND-009", "core owns the protocol state machines",
