@@ -22,6 +22,7 @@ Exit status is 0 only if every PASS/FAIL step passed.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -39,7 +40,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
 
 import pki  # noqa: E402
-from ua import UA, first_line, header, headers  # noqa: E402
+from ua import MCINFO, UA, body_part, first_line, header, headers  # noqa: E402
 
 DOMAIN = "mcptt.example"
 U1, U2 = f"sip:u1@{DOMAIN}", f"sip:u2@{DOMAIN}"
@@ -116,7 +117,8 @@ class Proc:
         self.fh.close()
 
 
-def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
+def start_platform(work: Path, port: int, recorder: str = "stub",
+                   trusted: str = "none") -> Proc:
     groups = work / "groups.yaml"
     groups.write_text(
         "groups:\n"
@@ -126,10 +128,16 @@ def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
         f"users: [\"{U1}\", \"{U2}\"]\n")
     data = work / f"data-{recorder}"
     data.mkdir(exist_ok=True)
+    network = work / f"network-{recorder}.yaml"
+    cores = [] if trusted == "none" else [trusted]
+    network.write_text(json.dumps({
+        "name": "interop", "version": "1", "plmns": ["001010"], "cells": [],
+        "sip": {"trusted_cores": cores,
+                "core_ca": str(work / "pki/core-ca.crt") if cores else "none"}}))
     env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
     env.update({
         "MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-        "MCX_RECORDER": recorder, "MCX_BEARER": "stub",
+        "MCX_RECORDER": recorder, "MCX_BEARER": "stub", "MCX_STRICT_RELEASE": "true", "MCX_ADHOC_LIST_MAX": "100",
         "MCX_DATA_DIR": str(data), "MCX_GROUPS_FILE": str(groups),
         "MCX_HTTP_PORT": str(free_port()),
         "MCX_SIP_LISTEN": f"127.0.0.1:{port}", "MCX_SIP_URI": AS_URI,
@@ -138,6 +146,10 @@ def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
         "MCX_SIP_TLS_CA": str(work / "pki/ca.crt"),
         "MCX_SIP_CLIENT_AUTH": "optional",
         "MCX_SIP_ROLES": "participating,controlling",
+        # The core under test authenticates its users; by its certificate's
+        # DNS name and issuer it may assert their identities (ICD-OP-08,
+        # ICD-OP-10). Both are network data.
+        "MCX_NETWORK_FILE": str(network),
         "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0",
     })
     proc = Proc("platform", [sys.executable, "-m", "service"],
@@ -181,7 +193,7 @@ def start_kamailio(work: Path, core_port: int, platform_port: int) -> Proc:
                              ["kamailio", "-f", str(cfg), "-DD", "-E",
                               "-w", str(work), "-P", str(work / "kamailio.pid")]),
                 work / "kamailio.log")
-    wait_tls(core_port, work / "pki/ca.crt")
+    wait_tls(core_port, work / "pki/core-ca.crt")
     return proc
 
 
@@ -220,7 +232,7 @@ def start_asterisk(work: Path, core_port: int, platform_port: int) -> Proc:
     proc = Proc("asterisk", _core_argv("asterisk", work,
                              ["asterisk", "-C", str(_asterisk_conf(work)), "-f", "-n", "-vvv"]),
                 work / "asterisk.log")
-    wait_tls(core_port, work / "pki/ca.crt", timeout=30)
+    wait_tls(core_port, work / "pki/core-ca.crt", timeout=30)
     asterisk_cli(work, "pjsip set logger on")
     return proc
 
@@ -251,7 +263,7 @@ class Report:
         return all(v != "FAIL" for v, _, _ in self.steps)
 
 
-def drain(ua: UA, pattern: str, seconds: float, call_id: str) -> List[str]:
+def drain(ua: UA, pattern: str, seconds: float, call_id: Optional[str]) -> List[str]:
     """Everything matching `pattern` on `call_id` that arrives within `seconds`."""
     got, end = [], time.time() + seconds
     while time.time() < end:
@@ -279,7 +291,7 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                      "tag=mcx-" in to, f"To: {to}")
 
     # 2. Group call: u1 originates, the platform invites u2 through the core.
-    inv = u1.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41000)
+    inv = u1.invite(AS_URI, "prearranged", "grp:alpha", media_port=41000)
     try:
         incoming = u2.wait(r"^INVITE ", timeout=10)
     except TimeoutError as exc:
@@ -293,6 +305,13 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                  and any("icsi-ref" in a and "3gpp-service.ims.icsi.mcptt" in a
                          for a in accept),
                  " | ".join(accept) or "(none)")
+    xml = body_part(incoming, MCINFO) or ""
+    report.check("INVITE to callee carries the MCPTT info body (TS 24.379 6.3.2.2.3 item 8)",
+                 "<session-type>prearranged</session-type>" in xml
+                 and "<mcpttURI>grp:alpha</mcpttURI>" in xml
+                 and f"<mcpttURI>{U1}</mcpttURI>" in xml,
+                 "session-type, calling group and calling user present" if xml else
+                 f"no {MCINFO} part; Content-Type {header(incoming, 'Content-Type')}")
     report.observe("INVITE to callee: Record-Route as received",
                    " | ".join(headers(incoming, "Record-Route")) or "(none)")
     report.observe("INVITE to callee: Contact", header(incoming, "Contact") or "(none)")
@@ -350,14 +369,84 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
     except TimeoutError:
         report.observe("callee receives the platform's BYE", "none within 5 s")
 
-    # 4. A refusal, as it arrives through the core.
-    bad = u1.invite(AS_URI, "prearranged-group", "grp:nobody", media_port=41004)
+    # 4. SIP-OP-14: the originator CANCELs while the callee rings.
+    cancelled_call(core, u1, u2, report,
+                   f"hop by hop, by {core} -- the 487 is the platform's")
+
+    # 5. A refusal, as it arrives through the core.
+    bad = u1.invite(AS_URI, "prearranged", "grp:nobody", media_port=41004)
     try:
         r = u1.wait(r"^SIP/2\.0 [3-6]\d\d", timeout=10, call_id=bad["call_id"])
         report.observe("unknown group, through the core",
                        f"{first_line(r)} / Warning: {header(r, 'Warning') or '(none)'}")
     except TimeoutError:
         report.observe("unknown group, through the core", "no final response in 10 s")
+
+
+def cancelled_call(core: str, caller: UA, callee: UA, report: Report,
+                   caller_path: str) -> None:
+    """SIP-OP-14. The caller's CANCEL must be answered 200, its INVITE 487
+    (RFC 3261 9.2), and the callee -- still ringing -- must be CANCELled in
+    turn (9.1) and have its 487 ACKed (17.1.1.3). Every hop is the core's to
+    carry: a proxy relays CANCEL statefully; a B2BUA mirrors it per leg."""
+    drain(callee, r"^INVITE ", 0.3, call_id=None)      # nothing stale may answer
+    inv = caller.invite(AS_URI, "private", callee.aor, media_port=41006)
+    try:
+        incoming = callee.wait(r"^INVITE ", timeout=10)
+    except TimeoutError as exc:
+        report.check("SIP-OP-14: the private call reaches the callee", False, str(exc))
+        return
+    callee.respond(incoming, 180, "Ringing")
+    try:
+        caller.wait(r"^SIP/2\.0 1\d\d", timeout=5, call_id=inv["call_id"], method="INVITE")
+    except TimeoutError:
+        # 9.1: a CANCEL MUST NOT be sent before a provisional response.
+        report.check("SIP-OP-14: the originator sees a provisional response", False,
+                     "none within 5 s; no CANCEL may be sent")
+        return
+    caller.cancel(inv)
+    try:
+        ok = caller.wait(r"^SIP/2\.0 \d\d\d", timeout=5, call_id=inv["call_id"],
+                         method="CANCEL")
+        report.check(f"SIP-OP-14: the originator's CANCEL is answered ({caller_path})",
+                     first_line(ok).startswith("SIP/2.0 200"), first_line(ok))
+    except TimeoutError:
+        report.check(f"SIP-OP-14: the originator's CANCEL is answered ({caller_path})",
+                     False, "no response within 5 s")
+    try:
+        final = caller.wait(r"^SIP/2\.0 [2-6]\d\d", timeout=10, call_id=inv["call_id"],
+                            method="INVITE")
+        report.check("SIP-OP-14: the cancelled INVITE ends with 487",
+                     first_line(final).startswith("SIP/2.0 487"), first_line(final))
+        if first_line(final).startswith("SIP/2.0 2"):
+            # a 2xx that crossed the CANCEL: accept it and hang up (9.1)
+            d = caller.dialog_as_uac(inv, final)
+            caller.in_dialog(d, "ACK", cseq=1)
+            caller.in_dialog(d, "BYE")
+        else:
+            caller.ack_failure(inv, final)
+    except TimeoutError:
+        report.check("SIP-OP-14: the cancelled INVITE ends with 487", False,
+                     "no final response within 10 s")
+    leg = header(incoming, "Call-ID")
+    try:
+        cancel = callee.wait(r"^CANCEL ", timeout=10, call_id=leg)
+        report.check("SIP-OP-14: the ringing callee receives a CANCEL", True,
+                     first_line(cancel))
+    except TimeoutError:
+        report.check("SIP-OP-14: the ringing callee receives a CANCEL", False,
+                     "none within 10 s -- the callee is left ringing")
+        return
+    callee.respond(cancel, 200, "OK")
+    callee.respond(incoming, 487, "Request Terminated")
+    try:
+        ack = callee.wait(r"^ACK ", timeout=5, call_id=leg)
+        report.check("SIP-OP-14: the callee's 487 is ACKed", True, first_line(ack))
+    except TimeoutError:
+        report.check("SIP-OP-14: the callee's 487 is ACKed", False, "no ACK within 5 s")
+    late = drain(callee, r"^(BYE|INVITE|CANCEL) ", 1.0, call_id=leg)
+    report.check("SIP-OP-14: nothing further reaches the cancelled callee", not late,
+                 ", ".join(first_line(m) for m in late) or "nothing")
 
 
 def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
@@ -396,7 +485,7 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
     # -- terminating: platform -> B2BUA -> callee ---------------------------
     direct = UA(U1, "127.0.0.1", platform_port, ca); uas.append(direct)
     r = direct.register()          # u1's flow is now this direct connection
-    inv = direct.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41020)
+    inv = direct.invite(AS_URI, "prearranged", "grp:alpha", media_port=41020)
     try:
         incoming = u2.wait(r"^INVITE ", timeout=10)
     except TimeoutError as exc:
@@ -406,6 +495,9 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
     if incoming:
         report.check("terminating: the callee receives an INVITE through the B2BUA",
                      True, first_line(incoming))
+        report.observe("terminating: MCPTT info body after the B2BUA",
+                       "present" if body_part(incoming, MCINFO) else
+                       f"absent -- Content-Type {header(incoming, 'Content-Type')}")
         report.observe("terminating: INVITE as the B2BUA re-originated it",
                        f"Accept-Contact: {' | '.join(headers(incoming, 'Accept-Contact')) or '(none)'}; "
                        f"Contact: {header(incoming, 'Contact')}; "
@@ -441,13 +533,17 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
                 report.observe("terminating: teardown reaches the callee", first_line(b))
             except TimeoutError:
                 report.observe("terminating: teardown reaches the callee", "no BYE in 6 s")
+    # SIP-OP-14 through the B2BUA: here the originator is attached to the
+    # platform directly, so the 200 to its CANCEL is the platform's own
+    # (through a proxy it is the proxy's hop-by-hop answer).
+    cancelled_call(core, direct, u2, report, "by the platform, originator attached directly")
     direct.close()
     # Put u1's platform registration back on the B2BUA's flow.
     asterisk_cli(work, "pjsip send register reg-u1")
     time.sleep(1.5)
 
     # -- originating: UE -> B2BUA -> platform --------------------------------
-    orig = u1.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41030)
+    orig = u1.invite(AS_URI, "prearranged", "grp:alpha", media_port=41030)
     try:
         r = u1.wait(r"^SIP/2\.0 [2-6]\d\d", timeout=15, call_id=orig["call_id"],
                     method="INVITE")
@@ -466,21 +562,40 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
         report.observe("originating: did the platform invite the callee?", "no")
 
 
+def identity_check(work: Path, platform_port: int, report: Report,
+                   uas: List[UA]) -> None:
+    """ICD-OP-08, straight to the platform (no core in between, so nobody
+    vouches for the caller): a client holding u2's certificate may register
+    as u2 and not as u1."""
+    ca = str(work / "pki")
+    own = UA(U2, "127.0.0.1", platform_port, ca, name="u2"); uas.append(own)
+    r = own.register()
+    report.check("identity: a client registers as the user its certificate names",
+                 first_line(r).startswith("SIP/2.0 200"), first_line(r))
+    spoof = UA(U1, "127.0.0.1", platform_port, ca, name="u2"); uas.append(spoof)
+    r = spoof.register()
+    report.check("identity: the same certificate cannot register as another user",
+                 first_line(r).startswith("SIP/2.0 403"),
+                 f"{first_line(r)} / Warning: {header(r, 'Warning') or '(none)'}")
+
+
 def refusal_comparison(core: str, work: Path, core_port: int, platform_port: int,
                        report: Report, uas: List[UA]) -> None:
-    """The same 503 refusal, directly and through the core (PLT-PRI-008).
+    """The same 503 refusal, directly and through the core (SIP-OP-10: the proxy
+    turns it into a 500 without its Warning; accepted, and PLT-PRI-008 is unaffected).
 
     Runs a fail-closed platform (MCX_RECORDER=none) on the port the core
     already routes to, so the core's configuration is untouched.
     """
-    platform = start_platform(work, platform_port, recorder="none")
+    platform = start_platform(work, platform_port, recorder="none",
+                              trusted=f"{core}.interop.test")
     try:
         results = {}
         for label, target_port in (("direct", platform_port), (core, core_port)):
             a = UA(U1, "127.0.0.1", target_port, str(work / "pki")); uas.append(a)
             b = UA(U2, "127.0.0.1", target_port, str(work / "pki")); uas.append(b)
             a.register(); b.register()
-            i = a.invite(AS_URI, "prearranged-group", "grp:alpha", media_port=41010)
+            i = a.invite(AS_URI, "prearranged", "grp:alpha", media_port=41010)
             r = a.wait(r"^SIP/2\.0 [3-6]\d\d", timeout=10, call_id=i["call_id"])
             results[label] = f"{first_line(r)} / Warning: {header(r, 'Warning') or '(none)'}"
         for label, text in results.items():
@@ -499,16 +614,19 @@ def main() -> int:
 
     work = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="mcx-interop-"))
     work.mkdir(parents=True, exist_ok=True)
-    pki.make(work / "pki", ("platform", "ua", "kamailio", "asterisk"))
+    pki.make(work / "pki", ("platform", "ua", "kamailio", "asterisk", "u1", "u2"),
+             uris={"u1": [U1], "u2": [U2]}, cores=("kamailio", "asterisk"))
 
     report, uas, procs = Report(), [], []
     platform_port, core_port = free_port(), free_port()
     try:
-        platform = start_platform(work, platform_port)
+        platform = start_platform(work, platform_port,
+                                  trusted=f"{args.core}.interop.test")
         procs.append(CORES[args.core](work, core_port, platform_port))
         run = scenario if TOPOLOGY[args.core] == "proxy" else scenario_b2bua
         try:
             run(args.core, work, core_port, platform_port, report, uas)
+            identity_check(work, platform_port, report, uas)
         finally:
             platform.stop()
         if TOPOLOGY[args.core] == "proxy":

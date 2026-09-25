@@ -30,6 +30,8 @@ from profiles.common.tables import BackingStoreUnavailable, ResolutionFailure  #
 from service.config import SipConfig  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
 from service.sip_core import SipCore, dialog_target  # noqa: E402
+from tests import mcpttinfo_fixture as mcf  # noqa: E402
+from tests.network_fixture import network_yaml  # noqa: E402
 from service.sip_tls import TlsListener  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
@@ -49,9 +51,15 @@ class Clock:
 class Flow:
     """Records every message the core sends on it."""
 
-    def __init__(self, name="flow"):
+    def __init__(self, name="flow", uris=None, dns=(), core=False):
         self.name = name
         self.sent = []
+        # What a verified client certificate would authenticate (ICD-OP-08):
+        # by default a flow is the user it is named after, and nobody else.
+        from core.sip import canonical_uri
+        self.peer_uris = tuple(uris) if uris is not None else (canonical_uri(name),)
+        self.peer_dns = tuple(dns)
+        self.peer_is_core = core          # issued by the core CA (ICD-OP-10)
 
     def send(self, text):
         self.sent.append(text)
@@ -83,7 +91,7 @@ def pki(tmp_path_factory):
     def name(cn):
         return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 
-    def make(cn, issuer_name, issuer_key, ca=False, san=False):
+    def make(cn, issuer_name, issuer_key, ca=False, san=False, dns=(), uris=()):
         key = ec.generate_private_key(ec.SECP256R1())
         b = (x509.CertificateBuilder().subject_name(name(cn))
              .issuer_name(issuer_name).public_key(key.public_key())
@@ -91,10 +99,14 @@ def pki(tmp_path_factory):
              .not_valid_before(now - datetime.timedelta(minutes=1))
              .not_valid_after(now + datetime.timedelta(days=1))
              .add_extension(x509.BasicConstraints(ca=ca, path_length=None), True))
+        names = []
         if san:
-            b = b.add_extension(x509.SubjectAlternativeName(
-                [x509.DNSName("localhost"),
-                 x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
+            names += [x509.DNSName("localhost"),
+                      x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+        names += [x509.DNSName(d) for d in dns]
+        names += [x509.UniformResourceIdentifier(u) for u in uris]
+        if names:
+            b = b.add_extension(x509.SubjectAlternativeName(names), False)
         return key, b.sign(issuer_key, hashes.SHA256())
 
     def write(stem, key, cert):
@@ -117,8 +129,31 @@ def pki(tmp_path_factory):
     write("ca", ca_key, ca)
     k, c = make("mcx-server", ca.subject, ca_key, san=True)
     write("server", k, c)
-    k, c = make("core-client", ca.subject, ca_key)
+    # The cores' own CA (ICD-OP-10), named by the network profile in sip_env.
+    core_key = ec.generate_private_key(ec.SECP256R1())
+    core_ca = (x509.CertificateBuilder().subject_name(name("core-ca"))
+               .issuer_name(name("core-ca")).public_key(core_key.public_key())
+               .serial_number(x509.random_serial_number())
+               .not_valid_before(now - datetime.timedelta(minutes=1))
+               .not_valid_after(now + datetime.timedelta(days=1))
+               .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
+               .sign(core_key, hashes.SHA256()))
+    write("core-ca", core_key, core_ca)
+    # plays a SIP core: issued by the core CA, and trusted by DNS name
+    k, c = make("core-client", core_ca.subject, core_key, dns=("core-client.example",))
     write("client", k, c)
+    # the ICD-OP-10 case: the users' CA issued a certificate with the core's name
+    k, c = make("impostor", ca.subject, ca_key, dns=("core-client.example",))
+    write("impostor", k, c)
+    # a certificate from the core CA whose name is not a trusted core
+    k, c = make("other-core", core_ca.subject, core_key, dns=("other-core.example",))
+    write("other-core", k, c)
+    # a directly attached user: may assert only its own URI
+    k, c = make("u0", ca.subject, ca_key, uris=(U[0],))
+    write("u0", k, c)
+    # a certificate the CA trusts that names nobody
+    k, c = make("anonymous", ca.subject, ca_key)
+    write("anonymous", k, c)
     # a client certificate from a CA the server does not trust
     rogue_key = ec.generate_private_key(ec.SECP256R1())
     rogue_ca = (x509.CertificateBuilder().subject_name(name("rogue"))
@@ -142,8 +177,10 @@ GROUPS_YAML = f"groups:\n  - id: 'grp:alpha'\n    members: {json.dumps(U)}\n"
 def sip_env(tmp_path, pki, **over):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
+    net = network_yaml(tmp_path, trusted_cores=["core-client.example"],
+                       core_ca=pki / "core-ca.crt")
     env = {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-            "MCX_RECORDER": "none", "MCX_BEARER": "none",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": str(net),
            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
            "MCX_HTTP_PORT": "0",
            "MCX_SIP_LISTEN": "127.0.0.1:0", "MCX_SIP_URI": LOCAL,
@@ -201,14 +238,16 @@ def register(core, uri, flow, n=1, expires=3600):
                       extra=[f"Contact: <{uri}>;expires={expires}"]), flow)
 
 
-def mc_body(call_type, target=None):
-    t = f"<mcptt-target>{target}</mcptt-target>" if target else ""
-    return SDP + f"<mcptt-call_type>{call_type}</mcptt-call_type>{t}"
-
-
 def invite(call_id, frm, to, call_type, **kw):
-    return msg("INVITE", to, call_id, 1, frm, to, body=mc_body(call_type),
-               ctype="multipart/mixed;boundary=b", **kw)
+    """A conformant client's INVITE (TS 24.379 10.1.1.2.1.1, 11.1.1.2.1.1):
+    addressed to the participating function's own identity, with the target
+    in <mcptt-request-uri> of a real multipart body. `to` is that target.
+
+    This used to append <mcptt-call_type> to the SDP under a multipart
+    Content-Type with no boundary lines -- a format of the platform's own
+    invention that no client produces (PLT-CONF-AUDIT CA-20)."""
+    return msg("INVITE", LOCAL, call_id, 1, frm, LOCAL,
+               body=mcf.body_for(call_type, to, SDP), ctype=mcf.CONTENT_TYPE, **kw)
 
 
 def answer(req: Request, code=200, body="", tag="callee", extra=()):
@@ -285,7 +324,7 @@ def test_unparseable_input_is_dropped_and_counted_not_answered(core):
 
 
 def test_register_stores_state_and_answers_200(core, clock):
-    f = Flow()
+    f = Flow(U[1])
     register(core, U[1], f)
     assert f.codes() == [200]
     assert core.registrations.is_registered(U[1])
@@ -294,9 +333,11 @@ def test_register_stores_state_and_answers_200(core, clock):
 
 
 def test_register_expires_zero_deregisters(core):
-    f = Flow()
+    f = Flow(U[1])
     register(core, U[1], f)
+    assert core.registrations.is_registered(U[1])      # else this proves nothing
     register(core, U[1], f, n=2, expires=0)
+    assert f.codes() == [200, 200]
     assert not core.registrations.is_registered(U[1])
     assert U[1] not in core.flows_by_user
 
@@ -343,7 +384,7 @@ def test_retransmission_of_a_rejected_request_gets_the_same_answer_not_a_replay_
 
 
 def test_a_genuine_replay_in_a_new_transaction_is_still_rejected(core):
-    f = Flow()
+    f = Flow(U[1])
     register(core, U[1], f, n=1)
     # same Call-ID and CSeq, different branch => a new transaction, a replay
     core.on_bytes(msg("REGISTER", "sip:mcptt.example", f"reg-{U[1]}-1", 1, U[1], U[1],
@@ -404,7 +445,83 @@ def test_mc_feature_tags_and_headers_are_on_the_wire(core, world):
     wire = world[U[1]].sent[0]                 # the exact bytes sent
     assert "Accept-Contact: *;+g.3gpp.mcptt;require;explicit" in wire
     assert "+g.3gpp.mcptt" in wire.split("Contact: ")[1].split("\r\n")[0]
-    assert f"P-Asserted-Identity: <{U[0]}>" in wire
+    # TS 24.379 6.3.2.2.6.2 item 7: the participating function asserts ITS
+    # OWN identity towards the terminating client. This test used to pin the
+    # caller's identity here, which is the defect it now guards against.
+    assert f"P-Asserted-Identity: <{LOCAL}>" in wire
+    assert f"P-Asserted-Identity: <{U[0]}>" not in wire
+
+
+# ============================================================ the MCPTT info body (CA-20)
+#
+# Literal expectations throughout; nothing below reads the renderer's constants.
+
+def test_invite_to_the_callee_carries_the_mcptt_info_body(core, world):
+    """6.3.2.2.3 item 8, 6.3.2.2.9, 10.1.1.4.1.1 item 4: the terminating client
+    learns what kind of call it is, who is calling and which group, from the
+    MCPTT info body -- which the platform did not send at all."""
+    core.on_bytes(invite("g1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    (req,) = world[U[1]].requests("INVITE")
+    assert (req.headers.get("Content-Type") or "").startswith("multipart/mixed;boundary=")
+    xml = mcf.mcinfo_of(req)
+    assert xml is not None, "no application/vnd.3gpp.mcptt-info+xml part"
+    assert '<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">' in xml
+    assert "<session-type>prearranged</session-type>" in xml
+    assert ('<mcptt-request-uri type="Normal"><mcpttURI>sip:u1@mcptt.example'
+            "</mcpttURI></mcptt-request-uri>") in xml
+    assert ('<mcptt-calling-user-id type="Normal"><mcpttURI>sip:u0@mcptt.example'
+            "</mcpttURI></mcptt-calling-user-id>") in xml
+    assert ('<mcptt-calling-group-id type="Normal"><mcpttURI>grp:alpha'
+            "</mcpttURI></mcptt-calling-group-id>") in xml
+    assert ('<emergency-ind type="Normal"><mcpttBoolean>true</mcpttBoolean>'
+            "</emergency-ind>") in xml
+    assert mcf.sdp_of(req).startswith("v=0")
+
+
+def test_a_conformant_client_request_selects_the_declared_call_type(rt, core, world):
+    """The inbound half: a body in the annex F.1 format, and nothing else,
+    selects the mcx call type that declares its signature."""
+    for cid, ct in (("s1", "prearranged-group"), ("s2", "emergency-group"),
+                    ("s3", "imminent-peril-group")):
+        core.on_bytes(invite(cid, U[0], "grp:alpha", ct), world[U[0]])
+        recs = {r["correlation_id"]: r for r in rt.store.sessions()}
+        assert recs[cid]["call_type"] == ct, (ct, recs[cid])
+
+
+def test_the_invented_format_is_no_longer_understood(rt, core, world):
+    """The format this platform used to read. A body carrying it has no
+    <mcpttinfo>, so no call type is selected and the session policy refuses."""
+    invented = SDP + "<mcptt-call_type>prearranged-group</mcptt-call_type>"
+    core.on_bytes(msg("INVITE", LOCAL, "inv1", 1, U[0], LOCAL, body=invented,
+                      ctype="application/sdp"), world[U[0]])
+    assert world[U[0]].codes()[-1] >= 400
+    assert not rt.store.has_session("inv1")
+
+
+@pytest.mark.parametrize("ctype, body", [
+    ("multipart/mixed;boundary=b", SDP + "<mcpttinfo/>"),       # no delimiter lines
+    (mcf.CONTENT_TYPE, mcf.multipart(SDP, "<mcpttinfo><unclosed>")),
+    (mcf.CONTENT_TYPE, mcf.multipart(SDP, '<!DOCTYPE x [<!ENTITY a "b">]><mcpttinfo/>')),
+])
+def test_a_malformed_body_is_refused_as_bad_request(rt, core, world, ctype, body):
+    """VP1-SIG-004: refused with 400, and no session state left behind."""
+    core.on_bytes(msg("INVITE", LOCAL, "bad1", 1, U[0], LOCAL, body=body, ctype=ctype),
+                  world[U[0]])
+    assert world[U[0]].codes()[-1] == 400
+    assert not rt.store.has_session("bad1")
+
+
+def test_the_floor_control_stream_is_not_data_media(core, world, rt):
+    """TS 24.380 clause 14: every MCPTT voice offer carries
+    "m=application <port> udp MCPTT". It is the floor control channel, and
+    counting it as DATA made every real voice call look like voice + data."""
+    offer = SDP + "m=application 20032 udp MCPTT\r\na=fmtp:MCPTT mc_queueing\r\n"
+    core.on_bytes(msg("INVITE", LOCAL, "fc1", 1, U[0], LOCAL,
+                      body=mcf.multipart(offer, mcf.mcinfo_xml("private", U[1])),
+                      ctype=mcf.CONTENT_TYPE), world[U[0]])
+    (req,) = world[U[1]].requests("INVITE")
+    accept = " ".join(req.headers.get_all("Accept-Contact"))
+    assert "+g.3gpp.mcdata" not in accept
 
 
 # ============================================================ VP1-SIG-005
@@ -434,7 +551,7 @@ def test_vp1_sig_005_refusal_leaves_no_session_state(env, clock):
     rt = build_runtime(env, clock)                 # fail-closed platform
     try:
         core = SipCore(rt, LOCAL, clock)
-        f = Flow()
+        f = Flow(U[0])
         core.on_bytes(invite("f2", U[0], U[1], "private"), f)
         assert f.codes() == [100, 503]
         assert_no_session_state(core, rt, "f2")
@@ -443,7 +560,7 @@ def test_vp1_sig_005_refusal_leaves_no_session_state(env, clock):
 
 
 def test_vp1_sig_005_unregistered_callee_leaves_no_session_state(core, rt):
-    f = Flow()
+    f = Flow(U[0])
     core.on_bytes(invite("f3", U[0], U[1], "private"), f)
     assert f.codes() == [100, 480]
     assert_no_session_state(core, rt, "f3")
@@ -519,7 +636,9 @@ def test_initiator_bye_releases_and_byes_the_callee(core, rt, world):
 def test_callee_bye_releases_and_byes_the_initiator(core, rt, world):
     _answered_call(core, world)
     leg = world[U[1]].requests("INVITE")[0].headers.get("Call-ID")
-    core.on_bytes(msg("BYE", LOCAL, leg, 2, U[1], U[0]), world[U[1]])
+    # in the leg's dialog: the callee's tag in From, the platform's in To
+    core.on_bytes(msg("BYE", LOCAL, leg, 2, U[1], U[0], from_tag="callee",
+                      to_tag=f"{leg}-l"), world[U[1]])
     assert world[U[1]].codes()[-1] == 200
     byes = world[U[0]].requests("BYE")
     assert len(byes) == 1 and byes[0].headers.get("Call-ID") == "k1"
@@ -891,8 +1010,9 @@ def test_bye_to_the_initiator_follows_the_invite_route_set(core, world):
     """The callee hangs up; the platform's BYE to the initiator goes to the
     initiator's Contact with the INVITE's Record-Route, unreversed."""
     req = _proxied_private_call(core, world)
-    core.on_bytes(msg("BYE", LOCAL, req.headers.get("Call-ID"), 2, U[1], LOCAL,
-                      to_tag="callee"), world[U[1]])
+    leg = req.headers.get("Call-ID")
+    core.on_bytes(msg("BYE", LOCAL, leg, 2, U[1], LOCAL, from_tag="callee",
+                      to_tag=f"{leg}-l"), world[U[1]])
     (bye,) = world[U[0]].requests("BYE")
     assert bye.uri == "sip:u0@192.0.2.9:5073;transport=tls"
     assert list(bye.headers.get_all("Route")) == [P2, P1]
@@ -957,3 +1077,809 @@ def test_addr_uri_ignores_angle_brackets_in_display_names(value, uri):
 ])
 def test_dialog_target_edge_cases(routes, ruri):
     assert dialog_target("sip:t@h;transport=tls", routes)[0] == ruri
+
+
+# ============================================================ SIP-OP-13: the UAC's ACKs
+#
+# The platform is the UAC on every leg toward a callee. Two duties it did not
+# carry out: re-ACK a retransmitted 2xx (RFC 3261 13.2.2.4) -- the INVITE
+# transaction was finished on the first 2xx, so the retransmission matched
+# nothing and was dropped -- and ACK a 3xx-6xx (17.1.1.3), which it never did.
+# With nothing in between neither shows. Behind a proxy that forwards over
+# UDP, a lost ACK makes the callee hang up an answered call after 64*T1.
+
+
+def _leg_invite(world, u=U[1]):
+    return world[u].requests("INVITE")[-1]
+
+
+def test_a_retransmitted_2xx_gets_the_same_ack_again(core, world):
+    _answered_call(core, world, cid="ra1")
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 200, SDP), world[U[1]])        # the retransmission
+    acks = [t for t in world[U[1]].sent if t.startswith("ACK ")]
+    assert len(acks) == 2 and acks[0] == acks[1]
+    assert not world[U[1]].requests("BYE")                    # same dialog: kept
+
+
+def test_the_2xx_window_closes_after_64_t1_without_failing_the_leg(core, rt, world, clock):
+    _answered_call(core, world, cid="ra2")
+    core.on_bytes(msg("ACK", LOCAL, "ra2", 1, U[0], U[1], branch="z9hG4bKra2"),
+                  world[U[0]])
+    clock.now += 64 * 500 + 1
+    core.tick()                                               # Timer M
+    assert rt.manager.session("ra2").state.value != "released"
+    assert not world[U[1]].requests("BYE")
+    core.on_bytes(answer(_leg_invite(world), 200, SDP), world[U[1]])
+    assert len(world[U[1]].requests("ACK")) == 1             # now unmatched
+    # the leg is still confirmed: hanging up reaches the callee
+    core.on_bytes(msg("BYE", LOCAL, "ra2", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    assert len(world[U[1]].requests("BYE")) == 1
+
+
+def test_a_second_fork_answering_is_acked_then_ended(core, rt, world):
+    _answered_call(core, world, cid="ra3")
+    req = _leg_invite(world)
+    fork_contact = "<sip:u1@192.0.2.44:5071;transport=tls>"
+    core.on_bytes(answer(req, 200, SDP, tag="fork2",
+                         extra=[f"Contact: {fork_contact}"]), world[U[1]])
+    ack, bye = world[U[1]].requests()[-2:]
+    assert ack.method == "ACK" and bye.method == "BYE"
+    for m in (ack, bye):
+        assert m.headers.get("To").endswith(";tag=fork2")
+        assert m.uri == "sip:u1@192.0.2.44:5071;transport=tls"
+    assert bye.headers.get("CSeq") == "2 BYE"
+    # the call itself goes on, and the fork's retransmission is re-ACKed only
+    assert rt.manager.session("ra3").state.value != "released"
+    core.on_bytes(answer(req, 200, SDP, tag="fork2",
+                         extra=[f"Contact: {fork_contact}"]), world[U[1]])
+    assert len(world[U[1]].requests("BYE")) == 1
+    assert len(world[U[1]].requests("ACK")) == 3
+    # the stray BYE's 200 closes its transaction
+    n = len(core.client)
+    core.on_bytes(answer(bye, 200, tag="fork2"), world[U[1]])
+    assert len(core.client) == n - 1
+
+
+def test_a_bye_from_the_stray_fork_does_not_end_the_call(core, rt, world):
+    """RFC 3261 12.2.2: dialogs are matched by Call-ID and tags. The fork
+    that answered second shares the leg's Call-ID; its BYE ends its own
+    dialog only. A BYE for a dialog nobody knows gets 481."""
+    _answered_call(core, world, cid="sf1")
+    core.on_bytes(msg("ACK", LOCAL, "sf1", 1, U[0], U[1], branch="z9hG4bKsf1"),
+                  world[U[0]])
+    inv = _leg_invite(world)
+    leg = inv.headers.get("Call-ID")
+    core.on_bytes(answer(inv, 200, SDP, tag="fork2"), world[U[1]])
+    core.on_bytes(msg("BYE", LOCAL, leg, 7, U[1], LOCAL, from_tag="fork2",
+                      to_tag=f"{leg}-l"), world[U[1]])
+    assert world[U[1]].codes()[-1] == 200
+    core.on_bytes(msg("BYE", LOCAL, leg, 8, U[1], LOCAL, from_tag="nobody",
+                      to_tag=f"{leg}-l"), world[U[1]])
+    assert world[U[1]].codes()[-1] == 481
+    assert rt.manager.session("sf1").state.value != "released"
+    assert world[U[0]].requests("BYE") == []
+
+
+def test_an_unanswered_stray_bye_does_not_touch_the_kept_dialog(core, world, clock):
+    _answered_call(core, world, cid="ra5")
+    core.on_bytes(msg("ACK", LOCAL, "ra5", 1, U[0], U[1], branch="z9hG4bKra5"),
+                  world[U[0]])
+    core.on_bytes(answer(_leg_invite(world), 200, SDP, tag="fork2"), world[U[1]])
+    clock.now += 64 * 500 + 1
+    core.tick()                                   # the stray BYE's Timer F
+    core.on_bytes(msg("BYE", LOCAL, "ra5", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    byes = world[U[1]].requests("BYE")
+    assert [b.headers.get("To").rsplit("tag=", 1)[1] for b in byes] == \
+        ["fork2", "callee"]
+
+
+def test_the_non_2xx_ack_carries_the_invites_route(core):
+    """17.1.1.3: 'the ACK MUST contain ... the Route header fields of the
+    request'. No leg INVITE carries a Route today (no outbound proxy), so
+    the transaction is driven directly."""
+    from service.sip_core import Leg
+    from core.sip import Headers as H
+    flow = Flow()
+    inv = Request("INVITE", "sip:u1@mcptt.example", H([
+        ("Via", "SIP/2.0/TLS mcptt.example;branch=z9hG4bKr1"),
+        ("From", f"<{LOCAL}>;tag=a"), ("To", f"<{U[1]}>"),
+        ("Call-ID", "rt1"), ("CSeq", "1 INVITE"),
+        ("Route", "<sip:ob1.example;lr>"), ("Route", "<sip:ob2.example;lr>")]))
+    txn = core.client.start(inv, flow, user=Leg(uri=U[1], call_id="rt1", flow=flow))
+    core.on_bytes(answer(inv, 404, tag="nf"), flow)
+    (ack,) = flow.requests("ACK")
+    assert list(ack.headers.get_all("Route")) == ["<sip:ob1.example;lr>",
+                                                  "<sip:ob2.example;lr>"]
+    assert txn.done
+
+
+def test_a_decline_is_acked_by_the_invite_transaction(core, world):
+    """RFC 3261 17.1.1.3: same Request-URI, Call-ID, From and top Via as the
+    INVITE (branch included), the response's To with its tag, CSeq number
+    unchanged with method ACK."""
+    core.on_bytes(invite("na1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 486, tag="busy"), world[U[1]])
+    (ack,) = world[U[1]].requests("ACK")
+    assert ack.uri == req.uri
+    assert ack.headers.get_all("Via")[0] == req.headers.get_all("Via")[0]
+    for h in ("From", "Call-ID"):
+        assert ack.headers.get(h) == req.headers.get(h)
+    assert ack.headers.get("To") == f"{req.headers.get('To')};tag=busy"
+    assert ack.headers.get("CSeq") == f"{req.headers.get('CSeq').split()[0]} ACK"
+    assert list(ack.headers.get_all("Route")) == list(req.headers.get_all("Route"))
+
+
+def test_an_answer_after_the_call_ended_is_acked_and_ended(core, rt, world):
+    """A group call: u1 answers, the initiator hangs up while u2 still rings,
+    then u2 answers. Its dialog must be ACKed and closed, not left to time out."""
+    core.on_bytes(invite("la1", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    reqs = {u: _leg_invite(world, u) for u in U[1:]}
+    core.on_bytes(answer(reqs[U[1]], 200, SDP), world[U[1]])
+    core.on_bytes(msg("BYE", LOCAL, "la1", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    core.on_bytes(answer(reqs[U[2]], 200, SDP, tag="late"), world[U[2]])
+    ack, bye = world[U[2]].requests()[-2:]
+    assert (ack.method, bye.method) == ("ACK", "BYE")
+    assert bye.headers.get("To").endswith(";tag=late")
+    # and a decline after the end is still ACKed
+    core.on_bytes(answer(reqs[U[3]], 603, tag="no"), world[U[3]])
+    assert world[U[3]].requests()[-1].method == "ACK"
+
+
+def test_a_non_2xx_after_the_2xx_is_discarded(core, rt, world):
+    """RFC 6026 7.2: in 'Accepted' only 2xx responses are passed up."""
+    _answered_call(core, world, cid="ra4")
+    core.on_bytes(answer(_leg_invite(world), 500, tag="other"), world[U[1]])
+    assert len(world[U[1]].requests("ACK")) == 1
+    assert rt.manager.session("ra4").state.value != "released"
+
+
+# ============================================================ CANCEL (SIP-OP-14, SIP-OP-15)
+
+
+def _responses(flow, method):
+    return [m for m in flow.messages() if isinstance(m, ReceivedResponse)
+            and m.headers.get("CSeq").split()[1] == method]
+
+
+def _ringing_group_call(core, world, cid):
+    """u1 answers; u2 is ringing (180); u3 has said nothing yet."""
+    core.on_bytes(invite(cid, U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    reqs = {u: _leg_invite(world, u) for u in U[1:]}
+    core.on_bytes(answer(reqs[U[1]], 200, SDP), world[U[1]])
+    core.on_bytes(answer(reqs[U[2]], 180, tag="r2"), world[U[2]])
+    # the initiator ACKs its 200, or the call ends at 64*T1 for that reason
+    ok = [r for r in _responses(world[U[0]], "INVITE") if r.code == 200][0]
+    core.on_bytes(msg("ACK", LOCAL, cid, 1, U[0], LOCAL, branch=f"z9hG4bK{cid}ack",
+                      to_tag=ok.headers.get("To").split("tag=")[1]), world[U[0]])
+    return reqs
+
+
+def test_ending_a_call_cancels_the_legs_still_ringing(core, world):
+    """RFC 3261 9.1: the CANCEL copies the INVITE's Request-URI, Call-ID,
+    To, From and CSeq number, has one Via -- the INVITE's top Via, branch
+    included -- and the INVITE's Route headers."""
+    reqs = _ringing_group_call(core, world, "cx1")
+    core.on_bytes(msg("BYE", LOCAL, "cx1", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    (cancel,) = world[U[2]].requests("CANCEL")
+    inv = reqs[U[2]]
+    assert cancel.uri == inv.uri
+    assert list(cancel.headers.get_all("Via")) == [inv.headers.get_all("Via")[0]]
+    for h in ("From", "To", "Call-ID"):
+        assert cancel.headers.get(h) == inv.headers.get(h)
+    assert "tag=" not in cancel.headers.get("To")
+    assert cancel.headers.get("CSeq") == f"{inv.headers.get('CSeq').split()[0]} CANCEL"
+    assert list(cancel.headers.get_all("Route")) == list(inv.headers.get_all("Route"))
+    # the answered leg is BYEd, not CANCELled
+    assert world[U[1]].requests("CANCEL") == [] and world[U[1]].requests("BYE")
+
+
+def test_a_leg_that_has_not_answered_at_all_is_cancelled_when_it_does(core, world):
+    """9.1: 'If no provisional response has been received, the CANCEL
+    request MUST NOT be sent; rather, the client MUST wait for the arrival
+    of a provisional response before sending the request.'"""
+    reqs = _ringing_group_call(core, world, "cx2")
+    core.on_bytes(msg("BYE", LOCAL, "cx2", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    assert world[U[3]].requests("CANCEL") == []
+    core.on_bytes(answer(reqs[U[3]], 100, tag="r3"), world[U[3]])
+    assert len(world[U[3]].requests("CANCEL")) == 1
+    core.on_bytes(answer(reqs[U[3]], 180, tag="r3"), world[U[3]])
+    assert len(world[U[3]].requests("CANCEL")) == 1          # once only
+
+
+def test_the_487_that_answers_a_cancel_is_acked_and_the_transactions_end(core, world):
+    reqs = _ringing_group_call(core, world, "cx3")
+    core.on_bytes(msg("BYE", LOCAL, "cx3", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    (cancel,) = world[U[2]].requests("CANCEL")
+    core.on_bytes(answer(cancel, 200, tag="r2"), world[U[2]])
+    core.on_bytes(answer(reqs[U[2]], 487, tag="r2"), world[U[2]])
+    (ack,) = world[U[2]].requests("ACK")
+    assert ack.headers.get("CSeq").endswith(" ACK")
+    assert ack.headers.get_all("Via")[0] == reqs[U[2]].headers.get_all("Via")[0]
+    assert world[U[2]].requests("BYE") == []
+    from service.sip_txn import top_branch
+    for method in ("INVITE", "CANCEL"):
+        assert core.client.find(top_branch(reqs[U[2]].headers), method) is None
+
+
+def test_a_2xx_that_crossed_the_cancel_is_acked_and_ended(core, world):
+    reqs = _ringing_group_call(core, world, "cx4")
+    core.on_bytes(msg("BYE", LOCAL, "cx4", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    core.on_bytes(answer(reqs[U[2]], 200, SDP, tag="r2"), world[U[2]])
+    ack, bye = world[U[2]].requests()[-2:]
+    assert (ack.method, bye.method) == ("ACK", "BYE")
+
+
+def test_a_leg_ringing_past_the_limit_is_cancelled_and_cannot_join_late(core, rt, world,
+                                                                       clock):
+    """SIP-OP-15: the call goes on (u1 answered); u2 rings past 64*T1. It is
+    CANCELled rather than forgotten, and a 2xx that crosses the CANCEL is
+    ACKed and BYEd -- the leg does not join, and its 2xx is not dropped
+    unmatched, which is what used to happen."""
+    reqs = _ringing_group_call(core, world, "cx5")
+    clock.now += 64 * 500
+    core.tick()
+    (cancel,) = world[U[2]].requests("CANCEL")
+    assert rt.manager.session("cx5").state.value != "released"
+    # u3 never sent a provisional: Timer B ends it without a CANCEL
+    assert world[U[3]].requests("CANCEL") == []
+    core.on_bytes(answer(reqs[U[2]], 200, SDP, tag="r2"), world[U[2]])
+    ack, bye = world[U[2]].requests()[-2:]
+    assert (ack.method, bye.method) == ("ACK", "BYE")
+    assert U[2] not in core.media._sessions["cx5"].endpoints or \
+        core.media._sessions["cx5"].endpoints[U[2]].remote_rtp is None
+    # and the transaction is gone 64*T1 after the CANCEL
+    clock.now += 64 * 500
+    core.tick()
+    from service.sip_txn import top_branch
+    assert core.client.find(top_branch(reqs[U[2]].headers), "INVITE") is None
+
+
+def test_a_private_call_ringing_past_the_limit_fails_and_cancels(core, rt, world, clock):
+    core.on_bytes(invite("cx6", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    clock.now += 64 * 500
+    core.tick()
+    assert world[U[0]].codes()[-1] == 480
+    (cancel,) = world[U[1]].requests("CANCEL")
+    core.on_bytes(answer(req, 487, tag="r1"), world[U[1]])
+    assert world[U[1]].requests()[-1].method == "ACK"
+    assert_no_session_state(core, rt, "cx6")
+
+
+def test_a_callee_that_never_answered_is_not_cancelled(core, rt, world, clock):
+    """Timer B in 'Calling' (no provisional): nothing to CANCEL."""
+    core.on_bytes(invite("cx7", U[0], U[1], "private"), world[U[0]])
+    clock.now += 64 * 500 + 1
+    core.tick()
+    assert world[U[1]].requests("CANCEL") == []
+    assert world[U[0]].codes() == [100, 480]
+
+
+# -- the initiator's CANCEL (RFC 3261 9.2) ------------------------------------------
+
+
+def _cancel_from_initiator(cid, branch=None):
+    return msg("CANCEL", LOCAL, cid, 1, U[0], LOCAL,
+               branch=branch or f"z9hG4bK{cid}1INVITE")
+
+
+def test_the_initiators_cancel_ends_the_call_with_487(core, rt, world):
+    core.on_bytes(invite("ic1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    core.on_bytes(_cancel_from_initiator("ic1"), world[U[0]])
+    (ok,) = _responses(world[U[0]], "CANCEL")
+    assert ok.code == 200
+    final = [r for r in _responses(world[U[0]], "INVITE") if r.code >= 200]
+    assert [r.code for r in final] == [487]
+    # 9.2: the two To tags SHOULD be the same
+    assert ok.headers.get("To") == final[0].headers.get("To")
+    assert len(world[U[1]].requests("CANCEL")) == 1
+    assert_no_session_state(core, rt, "ic1")
+    # the initiator's ACK for the 487 is absorbed, not answered
+    n = len(world[U[0]].sent)
+    core.on_bytes(msg("ACK", LOCAL, "ic1", 1, U[0], LOCAL,
+                      branch="z9hG4bKic11INVITE",
+                      to_tag=final[0].headers.get("To").split("tag=")[1]),
+                  world[U[0]])
+    assert len(world[U[0]].sent) == n
+
+
+def test_a_cancel_for_no_transaction_is_481(core, world):
+    core.on_bytes(_cancel_from_initiator("ic2", branch="z9hG4bKnothing"), world[U[0]])
+    assert world[U[0]].codes() == [481]
+
+
+def test_a_cancel_after_the_answer_changes_nothing(core, rt, world):
+    _answered_call(core, world, cid="ic3")
+    core.on_bytes(_cancel_from_initiator("ic3"), world[U[0]])
+    assert [r.code for r in _responses(world[U[0]], "CANCEL")] == [200]
+    assert 487 not in world[U[0]].codes()
+    assert rt.manager.session("ic3").state.value != "released"
+    assert world[U[1]].requests("CANCEL") == []
+
+
+def test_a_retransmitted_cancel_gets_the_same_answer(core, rt, world):
+    core.on_bytes(invite("ic4", U[0], U[1], "private"), world[U[0]])
+    core.on_bytes(_cancel_from_initiator("ic4"), world[U[0]])
+    core.on_bytes(_cancel_from_initiator("ic4"), world[U[0]])
+    oks = _responses(world[U[0]], "CANCEL")
+    assert [r.code for r in oks] == [200, 200]
+    assert [r.code for r in _responses(world[U[0]], "INVITE") if r.code >= 200] == [487]
+
+
+def test_options_advertises_cancel(core, world):
+    core.on_bytes(msg("OPTIONS", LOCAL, "op1", 1, U[0], LOCAL), world[U[0]])
+    (resp,) = world[U[0]].messages()
+    assert "CANCEL" in [m.strip() for m in resp.headers.get("Allow").split(",")]
+
+
+def test_the_cancel_carries_the_invites_route(core):
+    """9.1: 'the CANCEL request MUST contain ... the Route header fields of
+    the request being cancelled'. No leg INVITE carries a Route today, so
+    the transaction is driven directly, as for the non-2xx ACK."""
+    from service.sip_core import Leg
+    from core.sip import Headers as H
+    flow = Flow()
+    inv = Request("INVITE", "sip:u1@mcptt.example", H([
+        ("Via", "SIP/2.0/TLS mcptt.example;branch=z9hG4bKrc1"),
+        ("From", f"<{LOCAL}>;tag=a"), ("To", f"<{U[1]}>"),
+        ("Call-ID", "rc1"), ("CSeq", "1 INVITE"),
+        ("Route", "<sip:ob1.example;lr>"), ("Route", "<sip:ob2.example;lr>")]))
+    leg = Leg(uri=U[1], call_id="rc1", flow=flow)
+    leg.txn = core.client.start(inv, flow, user=leg)
+    core.client.proceed(leg.txn)
+    core._send_cancel(leg)
+    (cancel,) = flow.requests("CANCEL")
+    assert list(cancel.headers.get_all("Route")) == ["<sip:ob1.example;lr>",
+                                                     "<sip:ob2.example;lr>"]
+
+
+# -- found by the independent review of SIP-OP-14 ------------------------------------
+
+
+def test_legs_invited_before_an_establishment_fault_are_cancelled(core, world):
+    """A fault part-way through a group call's legs: the initiator gets 500,
+    and a leg already invited is CANCELled as soon as it rings -- not left
+    ringing until the no-answer limit."""
+    orig = core.adapter.render
+    n = [0]
+
+    def render(sig, ctx, req=None):
+        if sig.type.name == "INVITE":
+            n[0] += 1
+            if n[0] == 2:
+                raise RuntimeError("fault on the second leg")
+        return orig(sig, ctx, req)
+    core.adapter.render = render
+    core.on_bytes(invite("ef1", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    assert world[U[0]].codes()[-1] == 500
+    (req,) = world[U[1]].requests("INVITE")
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    assert len(world[U[1]].requests("CANCEL")) == 1
+
+
+def test_the_initiator_hanging_up_an_early_dialog_gets_its_invite_answered(core, rt,
+                                                                           world, clock):
+    """RFC 3261 15.1.2: a BYE on an early dialog; the pending INVITE MUST
+    still be answered, with 487 recommended -- and its transaction ends."""
+    core.on_bytes(invite("eb1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    ringing = [r for r in _responses(world[U[0]], "INVITE") if r.code == 180][0]
+    tag = ringing.headers.get("To").split("tag=")[1]
+    core.on_bytes(msg("BYE", LOCAL, "eb1", 2, U[0], LOCAL, to_tag=tag), world[U[0]])
+    assert [r.code for r in _responses(world[U[0]], "BYE")] == [200]
+    assert [r.code for r in _responses(world[U[0]], "INVITE") if r.code >= 200] == [487]
+    assert len(world[U[1]].requests("CANCEL")) == 1
+    clock.now += 64 * 500
+    core.tick()
+    assert core.server.find("z9hG4bKeb11INVITE", "INVITE") is None
+
+
+@pytest.mark.parametrize("change", [(b"core.example", b"evil.example"),
+                                    (b"Call-ID: sb1", b"Call-ID: other")])
+def test_a_cancel_must_match_more_than_the_branch(core, rt, world, change):
+    """RFC 3261 9.2 -> 17.2.3: branch AND the top Via's sent-by; and the
+    CANCEL's Call-ID is its INVITE's (9.1). Otherwise 481, call untouched."""
+    core.on_bytes(invite("sb1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    core.on_bytes(_cancel_from_initiator("sb1").replace(*change), world[U[2]])
+    assert [r.code for r in _responses(world[U[2]], "CANCEL")] == [481]
+    assert 487 not in world[U[0]].codes()
+    assert world[U[1]].requests("CANCEL") == []
+
+
+def test_a_cancelled_leg_that_rings_again_stays_out_of_the_call(core, rt, world, clock):
+    reqs = _ringing_group_call(core, world, "cr1")
+    clock.now += 64 * 500
+    core.tick()                                     # u2 CANCELled, call goes on
+    core.on_bytes(answer(reqs[U[2]], 180, tag="r2"), world[U[2]])
+    leg = [l for l in core.calls["cr1"].legs.values() if l.uri == U[2]][0]
+    assert leg.state == "failed" and len(world[U[2]].requests("CANCEL")) == 1
+
+
+# -- the ring limit is the call type's (SIP-OP-15, PLT-ICD-001 2.7) ------------------
+
+
+def test_the_core_takes_each_call_types_ring_limit_from_the_profile(core, rt):
+    assert core._no_answer_s == {ct.id: ct.no_answer_s
+                                 for ct in rt.loaded.profile.call_types}
+
+
+def _ringing_private_call(core, world, cid):
+    core.on_bytes(invite(cid, U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 180, tag="r1"), world[U[1]])
+    return req
+
+
+def test_a_short_ring_limit_cancels_early(core, world, clock):
+    core._no_answer_s["private"] = 5
+    _ringing_private_call(core, world, "nl1")
+    clock.now += 4999
+    core.tick()
+    assert world[U[1]].requests("CANCEL") == []
+    clock.now += 1
+    core.tick()
+    assert len(world[U[1]].requests("CANCEL")) == 1
+    assert world[U[0]].codes()[-1] == 480
+
+
+def test_a_long_ring_limit_outlasts_timer_b(core, rt, world, clock):
+    """In 'Proceeding' Timer B does not run (RFC 3261 17.1.1.2), so a call
+    type may let members ring longer than 64*T1."""
+    core._no_answer_s["private"] = 60
+    _ringing_private_call(core, world, "nl2")
+    clock.now += 59_999
+    core.tick()
+    assert world[U[1]].requests("CANCEL") == []
+    assert rt.store.has_session("nl2")
+    clock.now += 1
+    core.tick()
+    assert len(world[U[1]].requests("CANCEL")) == 1
+
+
+def test_a_member_that_never_rings_still_meets_timer_b(core, world, clock):
+    """In 'Calling' (no provisional) Timer B still ends the INVITE at 64*T1,
+    however long the call type lets members ring."""
+    core._no_answer_s["private"] = 60
+    core.on_bytes(invite("nl3", U[0], U[1], "private"), world[U[0]])
+    clock.now += 64 * 500
+    core.tick()
+    assert world[U[0]].codes() == [100, 480]
+    assert world[U[1]].requests("CANCEL") == []
+
+
+# ============================================================ ICD-OP-08: asserted identity
+
+
+def _reg(uri, n=1):
+    return msg("REGISTER", "sip:mcptt.example", f"reg-{uri}-{n}", n, uri, uri,
+               extra=[f"Contact: <{uri}>;expires=600"])
+
+
+def _warning(flow):
+    return [m.headers.get("Warning") or "" for m in flow.messages()
+            if isinstance(m, ReceivedResponse) and m.code >= 300][-1]
+
+
+def test_a_client_may_not_register_someone_elses_address(core):
+    """Registering U[1] from U[2]'s connection would route U[1]'s calls to
+    U[2]. PLT-IDM-004 in its R1 form (ICD-OP-08)."""
+    f = Flow(U[2])
+    core.on_bytes(_reg(U[1]), f)
+    assert f.codes() == [403]
+    assert "asserted identity is not the authenticated one" in _warning(f)
+    assert not core.registrations.is_registered(U[1])
+
+
+def test_a_client_may_not_call_as_someone_else(core, rt, world):
+    """The reviewer's case: F2's connection, From F0. Refused before anything
+    is established or anyone invited, and nothing reaches the audit trail
+    as a session."""
+    spoof = Flow(U[2])
+    core.on_bytes(invite("sp1", U[0], U[1], "private"), spoof)
+    assert spoof.codes() == [403]                  # not even a 100 Trying
+    assert world[U[1]].requests("INVITE") == []
+    assert rt.manager.session("sp1") is None
+
+
+def test_p_asserted_identity_is_what_is_checked(core, world):
+    """The initiator is taken from P-Asserted-Identity when present, so a
+    true From with a false P-Asserted-Identity is refused."""
+    core.on_bytes(invite("sp2", U[0], U[1], "private",
+                         extra=[f"P-Asserted-Identity: <{U[2]}>"]), world[U[0]])
+    assert 403 in world[U[0]].codes()
+    assert world[U[1]].requests("INVITE") == []
+
+
+def test_scheme_and_host_ignore_case_the_user_part_does_not(core):
+    """RFC 3261 19.1.4. Lower-casing the whole URI (the first version) let a
+    certificate for sip:u1@... register sip:U1@..., a different user to the
+    directory and the registration store, which compare user parts exactly."""
+    f = Flow(U[1])
+    core.on_bytes(_reg(U[1].replace("mcptt.example", "MCPTT.example").replace("sip:", "SIP:")
+                       ), f)
+    assert f.codes() == [200]
+    assert core.registrations.is_registered(U[1]) and core.flows_by_user[U[1]] is f
+    g = Flow(U[1])
+    core.on_bytes(_reg(U[1].replace("u1@", "U1@"), n=2), g)
+    assert g.codes() == [403]
+
+
+def test_a_trusted_core_may_assert_any_identity(core, world):
+    """RFC 3325: a peer the core CA issued, carrying a DNS name the network
+    profile lists in sip.trusted_cores, authenticated its users itself."""
+    proxy = Flow("proxy", uris=(), dns=("core-client.example",), core=True)
+    core.on_bytes(_reg(U[3], n=7), proxy)        # n: not the fixture's REGISTER
+    core.on_bytes(invite("tc1", U[0], U[1], "private"), proxy)
+    assert 200 in proxy.codes() and world[U[1]].requests("INVITE")
+
+
+@pytest.mark.parametrize("dns, uris, is_core", [
+    (("other-core.example",), (), True),       # the core CA's, but not listed
+    ((), (), True),
+    (("core-client.example.evil",), (), True),
+    (("core-client.example",), (), False),     # ICD-OP-10: the name, from the users' CA
+    ((), (), False)])
+def test_an_untrusted_peer_without_the_identity_asserts_nothing(core, dns, uris, is_core):
+    f = Flow("peer", uris=uris, dns=dns, core=is_core)
+    core.on_bytes(_reg(U[1]), f)
+    assert f.codes() == [403]
+
+
+def test_a_flow_that_does_not_say_is_not_a_core(core):
+    """A flow without the attribute (any transport other than TlsFlow) is
+    not a trusted core, whatever names it carries."""
+    class Bare:
+        peer_dns = ("core-client.example",)
+        sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+    f = Bare()
+    core.on_bytes(_reg(U[1]), f)
+    assert parse_message(f.sent[-1].encode()).code == 403
+
+
+@pytest.mark.parametrize("dns", [("other-core.example",), ()])
+def test_a_core_ca_certificate_asserts_no_user_identity(core, dns):
+    """The core CA vouches for cores only (review of NET-OP-01): a URI in a
+    certificate it issued is not a user's, so a core taken off the list, or
+    any other element holding such a certificate, asserts nothing."""
+    f = Flow("peer", uris=(U[1],), dns=dns, core=True)
+    core.on_bytes(_reg(U[1]), f)
+    assert f.codes() == [403]
+
+
+# -- over real TLS -----------------------------------------------------------------------
+
+
+def test_a_directly_attached_user_is_its_certificate(server, pki):
+    """The u0 certificate carries sip:u0@... in subjectAltName: that identity
+    registers, any other is refused."""
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert="u0")
+    try:
+        w.send(_reg(U[0]))
+        assert w.recv().code == 200
+        w.send(_reg(U[1], n=2))
+        assert w.recv().code == 403
+    finally:
+        w.close()
+
+
+def test_a_certificate_naming_nobody_asserts_nothing(server, pki):
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert="anonymous")
+    try:
+        w.send(_reg(U[0]))
+        assert w.recv().code == 403
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize("cert, code, is_core", [
+    ("client", 200, True),        # the core CA's certificate, with a listed name
+    ("impostor", 403, False),     # ICD-OP-10: the listed name, from the users' CA
+    ("other-core", 403, True),    # the core CA's, with a name nobody listed
+])
+def test_a_trusted_core_is_its_name_and_its_ca(server, pki, cert, code, is_core):
+    """Over real TLS: the handshake verifies against either anchor, and the
+    flow records which one issued the peer's certificate."""
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert=cert)
+    try:
+        w.send(_reg(U[2]))
+        assert w.recv().code == code
+        [flow] = [f for f in listener._flows]
+        assert flow.peer_is_core is is_core
+    finally:
+        w.close()
+
+
+def test_the_listener_trusts_the_core_ca_that_was_checked_not_the_file(tmp_path, pki):
+    """The core CA reaches the TLS context as the parsed certificate: what
+    the network profile's check saw and its hash covers is what is trusted,
+    even if the file changes after startup (review of NET-OP-01)."""
+    import shutil
+    anchor = tmp_path / "anchor.pem"
+    shutil.copy(pki / "core-ca.crt", anchor)
+    net = network_yaml(tmp_path, trusted_cores=["core-client.example"],
+                       core_ca=anchor, fname="anchored.yaml")
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(net)),
+                       lambda: __import__("time").time_ns() // 1_000_000,
+                       platform=Platform())
+    anchor.write_text("gone")
+    from service.clock import utc_ms
+    listener = TlsListener(SipCore(rt, LOCAL, utc_ms), rt.config.sip)
+    listener.start()
+    try:
+        w = Wire(listener.bound_port, pki, cert="client")
+        w.send(_reg(U[2]))
+        assert w.recv().code == 200
+        w.close()
+    finally:
+        listener.stop()
+        rt.close()
+
+
+def test_issued_by_needs_the_certificate_and_the_ca(pki):
+    from cryptography import x509 as X
+    from service.sip_tls import issued_by
+    der = X.load_pem_x509_certificate((pki / "client.crt").read_bytes()).public_bytes(
+        __import__("cryptography.hazmat.primitives.serialization",
+                   fromlist=["Encoding"]).Encoding.DER)
+    core_ca = X.load_pem_x509_certificate((pki / "core-ca.crt").read_bytes())
+    user_ca = X.load_pem_x509_certificate((pki / "ca.crt").read_bytes())
+    assert issued_by(der, core_ca) is True
+    assert issued_by(der, user_ca) is False            # another issuer
+    assert issued_by(None, core_ca) is False            # no certificate
+    assert issued_by(der, None) is False                # no core CA configured
+    assert issued_by(b"not der", core_ca) is False
+
+
+def test_the_flow_records_what_the_certificate_authenticates(server, pki):
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert="u0")
+    try:
+        w.send(_reg(U[0]))
+        w.recv()
+        flow = core.flows_by_user[U[0]]
+        assert flow.peer_uris == (U[0],) and flow.peer_dns == ()
+    finally:
+        w.close()
+
+
+def test_only_sip_uris_and_dns_names_from_the_certificate_count():
+    """A tel: or https: subjectAltName is not a SIP identity a client may
+    assert; DNS names and URIs are compared lower-cased."""
+    from service.sip_tls import TlsFlow
+    cert = {"subjectAltName": (("URI", "SIP:U0@MCPTT.example"), ("URI", "tel:+331234"),
+                               ("URI", "https://u0.example/"), ("DNS", "Core.Example"),
+                               ("IP Address", "127.0.0.1"))}
+    flow = TlsFlow(None, "peer", "CN=x", cert)
+    assert flow.peer_uris == ("sip:U0@mcptt.example",)       # user part kept
+    assert flow.peer_dns == ("core.example",)
+    assert TlsFlow(None, "peer", None, None).peer_uris == ()
+
+
+
+# -- a dialog belongs to the connection it was set up on (review of ICD-OP-08) -------
+
+
+def _answered(core, world, cid):
+    core.on_bytes(invite(cid, U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 200, SDP), world[U[1]])
+    return req
+
+
+def test_a_response_from_another_connection_is_not_the_callees(core, rt, world):
+    """The reviewer's case: a peer with no identity answered u0's call to u1,
+    and media for u1 went to the peer's address."""
+    core.on_bytes(invite("dr1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    intruder = Flow("intruder", uris=())
+    core.on_bytes(answer(req, 200, SDP, tag="evil"), intruder)
+    assert 200 not in world[U[0]].codes()
+    assert intruder.sent == [] and core.counters["foreign_response"] == 1
+    core.on_bytes(answer(req, 200, SDP), world[U[1]])          # the real answer
+    assert 200 in world[U[0]].codes()
+
+
+def test_a_response_naming_another_call_id_is_dropped(core, world):
+    core.on_bytes(invite("dr2", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    forged = answer(req, 200, SDP).replace(
+        req.headers.get("Call-ID").encode(), b"someone-else")
+    core.on_bytes(forged, world[U[1]])
+    assert 200 not in world[U[0]].codes()
+
+
+def test_branches_are_not_guessable(core, world):
+    core.on_bytes(invite("dr3", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    branches = {top_branch_of(world[u].requests("INVITE")[0]) for u in U[1:]}
+    assert len(branches) == 3
+    assert all(re.fullmatch(r"z9hG4bKmcx\d+\.[0-9a-f]{16}", b) for b in branches)
+
+
+def top_branch_of(req):
+    from service.sip_txn import top_branch
+    return top_branch(req.headers)
+
+
+@pytest.mark.parametrize("who, from_tag", [("member", "ft"), ("stranger", "ft"),
+                                           ("caller", "wrong-tag")])
+def test_only_the_caller_can_hang_up_the_call(core, rt, world, who, from_tag):
+    """A BYE with the call's Call-ID ended it whoever sent it: every invited
+    member learns that Call-ID from its own leg's (<cid>.legN)."""
+    _answered(core, world, "db1")
+    flow = {"member": world[U[1]], "stranger": Flow("x", uris=()),
+            "caller": world[U[0]]}[who]
+    before = len(flow.sent)
+    core.on_bytes(msg("BYE", LOCAL, "db1", 2, U[0], LOCAL, to_tag="x",
+                      from_tag=from_tag), flow)
+    assert [m.code for m in flow.messages()[before:]
+            if isinstance(m, ReceivedResponse)] == [481]
+    assert rt.manager.session("db1").state.value != "released"
+
+
+def test_the_caller_can_still_hang_up(core, rt, world):
+    _answered(core, world, "db2")
+    core.on_bytes(msg("BYE", LOCAL, "db2", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    assert 200 in [m.code for m in world[U[0]].messages()
+                   if isinstance(m, ReceivedResponse) and
+                   m.headers.get("CSeq").endswith("BYE")]
+    assert world[U[1]].requests("BYE")
+
+
+def test_a_leg_bye_from_another_connection_is_refused(core, rt, world):
+    req = _answered(core, world, "db3")
+    bye = msg("BYE", LOCAL, req.headers.get("Call-ID"), 2, U[1], LOCAL,
+              to_tag=re.search(r"tag=([^;>\s]+)", req.headers.get("From")).group(1),
+              from_tag="callee")
+    stranger = Flow("x", uris=())
+    core.on_bytes(bye, stranger)
+    assert stranger.codes() == [481]
+    assert rt.manager.session("db3").state.value != "released"
+
+
+def test_a_live_call_id_cannot_be_reused_by_a_new_invite(core, rt, world):
+    """The reviewer's case: u1, correctly authenticated, took over u0's
+    Call-ID; u0's BYE then ended u1's call and the original was orphaned."""
+    _answered(core, world, "cr9")
+    core.on_bytes(msg("INVITE", LOCAL, "cr9", 2, U[1], LOCAL,
+                      body=mcf.body_for("private", U[2], SDP),
+                      ctype=mcf.CONTENT_TYPE), world[U[1]])
+    assert world[U[1]].codes()[-1] == 400
+    assert world[U[2]].requests("INVITE") == []
+    assert core.calls["cr9"].initiator == U[0]
+
+
+def test_an_ack_from_another_connection_does_not_confirm_the_call(core, rt, world, clock):
+    """The missing-ACK timeout must still end a call whose caller never
+    ACKed, whoever else sent an ACK with its Call-ID and CSeq."""
+    _answered(core, world, "da1")
+    ok = [m for m in world[U[0]].messages()
+          if isinstance(m, ReceivedResponse) and m.code == 200][0]
+    tag = re.search(r"tag=([^;>\s]+)", ok.headers.get("To")).group(1)
+    core.on_bytes(msg("ACK", LOCAL, "da1", 1, U[0], LOCAL, branch="z9hG4bKforged",
+                      to_tag=tag), Flow("x", uris=()))
+    clock.now += 64 * 500 + 1
+    core.tick()
+    assert rt.manager.session("da1") is None or \
+        rt.manager.session("da1").state.value == "released"
+
+
+def test_a_cancel_from_another_connection_is_refused(core, rt, world):
+    core.on_bytes(invite("dc1", U[0], U[1], "private"), world[U[0]])
+    other = Flow("x", uris=())
+    core.on_bytes(_cancel_from_initiator("dc1"), other)
+    assert other.codes() == [481]
+    assert 487 not in world[U[0]].codes()

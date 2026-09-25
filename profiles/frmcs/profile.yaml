@@ -39,9 +39,20 @@ applications:
   - {id: etcs, label: ETCS over IPcon, media: [data], safety_relevant: true}
   - {id: ato, label: ATO over IPcon, media: [data], safety_relevant: true}
 
+# Every group call type below is an ad hoc group call (UIC FRMCS SRS 21.4.4
+# lists ad hoc group procedures only, and no prearranged group call occurs
+# anywhere in the SRS), and ad hoc group calls do not exist in
+# TS 24.379 before Rel-18. At MCX_RELEASE=17 no client can request them:
+# with MCX_STRICT_RELEASE=true this profile refuses to start there; with
+# false it starts and reports rec-broadcast and shunting-group unreachable.
 call_types:
   - id: rec-broadcast
     label: Railway emergency call
+    # UIC FRMCS SRS 10.2.2.1: REC-Voice is an "MCPTT ad hoc group
+    # communication for emergency group call". Ad hoc group calls exist
+    # from Rel-18; emergency is <adhoc-emergency-ind> (TS 24.379 6.2.8.1.21).
+    mc_signature: {session_type: adhoc, emergency: true}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: broadcast
     urgency: railway-emergency
@@ -55,10 +66,14 @@ call_types:
       queueing_enabled: false
       override_allowed: true
       max_queue_depth: 0
-      timers_ms: {T2: 1000, T20: 100, T8: 100}
+      timers_ms: {T2: 1000, T20: 100, T8: 1000, T3: 3000}
 
   - id: shunting-group
     label: Shunting group call
+    # SRS 21.4.4 lists only ad hoc group procedures (communication and
+    # emergency alert); no prearranged group call occurs anywhere in the SRS. Shunting itself is not covered by the SRS (SHUNT-OP-01).
+    mc_signature: {session_type: adhoc}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: on-demand
     urgency: operational
@@ -73,10 +88,13 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 4
-      timers_ms: {T2: 3000, T20: 100, T8: 100}
+      timers_ms: {T2: 3000, T20: 100, T8: 1000, T3: 3000}
 
   - id: driver-controller
     label: Driver to controller call
+    # SRS 21.4.4: private call.
+    mc_signature: {session_type: private}
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [voice]
     session_model: on-demand
     urgency: operational
@@ -91,10 +109,13 @@ call_types:
       queueing_enabled: true
       override_allowed: false
       max_queue_depth: 2
-      timers_ms: {T2: 4000, T20: 100, T8: 100}
+      timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}
 
   - id: etcs-ipcon
     label: ETCS data session
+    # MCData IP connectivity (SRS 21.4.4), not an MCPTT session.
+    mc_signature: null
+    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [data]
     session_model: pre-established
     urgency: operational
@@ -140,6 +161,9 @@ identity:
       location_key: track_section
       multiplicity: multi
       resolves_to: group
+  # The serving cell a client reports becomes a track_section or yard_id
+  # through the network profile's cell map (MCX_NETWORK_FILE, PLT-ICD-001 2.8), not
+  # through this profile: cell identities are network data (PRF-OP-03).
 
 priority:
   default_scope: railway

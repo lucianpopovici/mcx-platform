@@ -1,8 +1,8 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.0
-**Date:** 2026-09-24
+**Version:** 2.4
+**Date:** 2026-09-25
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
 
@@ -1385,52 +1385,120 @@ document does not pick up the wrong one and "correct" the code to match.
 
 ---
 
-### 4.36 CA-20 — the layer this audit never read
+### 4.36 CA-20 — the layer this audit never read, and the parser it read past
 
-Every item above was found by reading `core/`. The platform also has a
-`service/` layer, and `service/sip_core.py` builds messages of its own: the
-responses it sends the originator, the INVITE the controlling function sends
-each member, and every ACK and BYE. None of that was in scope, and nobody
-noticed that it was out of scope — v1.8 described the audit as covering
-"every constant the platform puts on the wire".
+CA-20 opened on 2026-09-24 as a check of `service/`, which builds messages of
+its own and was never in scope. Its first finding was not in `service/` at
+all. **The platform read the MCPTT info body in a format that does not exist.**
 
-It came to light the other way round, by running VP1-SIG-001 against
-Kamailio (PLT-VP-R1 §7.1.1). Both ACKs of an answered call were dropped by
-the proxy. The platform's 2xx carried no Record-Route, contrary to RFC 3261
-§12.1.1, and its own ACK and BYE went to the peer's address-of-record with no
-Route header, contrary to §12.2.1.1. TS 24.379 reaches RFC 3261 through its
-instruction to build these messages "according to 3GPP TS 24.229". That part
-is fixed and pinned (SIP-OP-09).
+`core/sip.py`'s `_parse_mc_info` looked for `<mcptt-call_type>`,
+`<mcptt-target>`, `<mcptt-application>` and `<mcptt-urgency>`, appended to the
+SDP under a `multipart/mixed` Content-Type with no boundary delimiters. None
+of those four names occurs anywhere in TS 24.379, in any release. The real
+body (annex F.1) is an XML document in namespace `urn:3gpp:ns:mcpttInfo:1.0`,
+with `<session-type>`, `<mcptt-request-uri>`, `<emergency-ind>` and so on,
+carried as its own part of a real multipart body.
 
-Reading the governing clauses while diagnosing it turned up the rest.
-Checked against TS 24.379 V20.0.0 and **not yet fixed**:
+So **no conformant MCPTT client could have placed a call on this platform.**
+It would have found no call type in the client's INVITE and refused it.
+
+This sat in `core/` through the whole audit, including CA-02, CA-06 and CA-10,
+which read the INVITE path. The audit read the protocol constants that were
+declared as constants. It never read the string literals inside the parser
+that consumed them. The same pass found that the renderer set
+`P-Asserted-Identity` to the calling user, where TS 24.379 6.3.2.2.6.2 item 7
+requires the participating function's own identity.
+
+The interoperability run (PLT-VP-R1 §7.1.1) could not see this either. Its
+user agent sent `<mcptt-call_type>` because I copied the body from the
+platform's tests instead of from the specification. On the one point that
+mattered most, the "independent" agent shared the platform's assumption.
+
+**Fixed (CA-20a):**
+
+| What | Now |
+|---|---|
+| The body format | `core/mcinfo.py`, from the annex F.1 schema, which is extracted verbatim to `docs/3GPP/schemas/` by `tools/spec/extract_xsd.py` for Rel-17, 18 and 20. Rendered bodies are validated against all three; the invented format is rejected by all three. |
+| Real multipart | RFC 2046 splitting and building; a multipart body without delimiters is a 400. |
+| Call type from the body | Declared per call type in each profile as `mc_signature` (PLT-ICD-001 §2.6, a design decision taken 2026-09-24). The loader refuses two call types with one signature. |
+| INVITE to the callee | Carries the MCPTT info body with session type, invitee, caller and calling group (6.3.2.2.3 item 8; 10.1.1.4.1.1 item 4), and asserts the participating function's identity (6.3.2.2.6.2 item 7). |
+| Floor control stream | `m=application <port> udp MCPTT` (TS 24.380 clause 14) is no longer counted as data media. Every conformant voice offer carries it, so every real voice call had been classified as voice plus data. |
+| Release | `adhoc` and `<adhoc-emergency-ind>` exist from Rel-18 only (tabulated across all seven releases); `core/release.py` gates them. |
+| Hostile XML | A document type declaration is refused. The body never needs one, and it is the vehicle for entity expansion. |
+
+Nine mutants, one per fix, each killed by the test written for it.
+
+**Two independent reviews followed, and both found things.** The
+specification check confirmed ten of twelve claims and corrected two
+overstatements. EXAMPLE 5 is not well-formed only because of its mismatched
+end tag. And SRS 21.4.4 lists ad hoc emergency *alert* procedures as well as
+ad hoc group communication; the point that matters, that no prearranged
+group call occurs anywhere in the SRS, stands. The code review of the new
+parser found three defects and one unintended behaviour change:
+
+- an XML declaration naming `bogus` or `UTF-7` escaped as an uncaught
+  exception, so any unauthenticated INVITE could get a 500 with a traceback
+- a multipart body with no close-delimiter silently lost its last part
+- a boundary parameter inside another quoted parameter was taken as the
+  boundary
+- moving `P-Asserted-Identity` to the platform applied to every outbound
+  INVITE, including gateway legs with no MCPTT body, where the caller then
+  travelled nowhere
+
+It also found that an ad hoc emergency flagged with `<emergency-ind>` rather
+than `<adhoc-emergency-ind>` was silently downgraded to a normal call. It is
+now honoured: the worst reading of a malformed emergency request is the one
+that drops the emergency. All are fixed, each with a case that fails on the
+reviewed code. That is the third time in this audit that code written to
+close a finding needed an independent reader to find its own defects.
+
+Re-run against Kamailio with a user agent whose body is written from annex F.1: an
+independent client's conformant INVITE was understood, the group call was set
+up, and the callee received the body naming the caller and the group.
+
+**Consequences found on the way, recorded rather than fixed:**
+
+- **FRMCS group calls need Rel-18 at least.** UIC FRMCS SRS 10.2.2.1 defines
+  REC-Voice as "MCPTT ad hoc group communication for emergency group call",
+  and 21.4.4 lists only ad hoc group procedures ("prearranged" occurs nowhere
+  in the SRS). Ad hoc group calls do not exist
+  in TS 24.379 before Rel-18. At `MCX_RELEASE=17`, startup now reports
+  `rec-broadcast` and `shunting-group` as unreachable. `CLAUDE.md`'s claim
+  that any profile runs at any release was never true of what the wire can
+  carry. Refusing to start instead is a decision (PLT-VP-R1 REL-OP-02).
+- **FRMCS group calls also cannot work at Rel-18 yet.** An ad hoc INVITE
+  (TS 24.379 17.2.2.1.1 item 10b) carries `<mcptt-request-uri>` only in
+  particular cases. Otherwise the participants are named some other way, and
+  the platform resolves only prearranged groups (PLT-VP-R1 ADHOC-OP-01).
+- **Two pairs of call types cannot be told apart.** mcx `prearranged-group`
+  and `coordination-group`, and utility `crew-call` and `switching-order`,
+  are the same prearranged voice group call to TS 24.379. The second of each
+  pair is declared `null` until the profile owner decides how to separate
+  them (PLT-VP-R1 PRF-OP-01).
+- **The specification's own example is malformed.** TS 24.379 V20.0.0 clause
+  4.8 EXAMPLE 5 closes `<mcpttinfo>` with `</mcptt-info>`, so it is not
+  well-formed; it also lacks the namespace, so it would not be schema-valid
+  even if it were. A test pins that the parser refuses it,
+  so nobody "fixes" the parser to accept it.
+
+**Corrections to this section's own first version.** It cited clause
+6.3.3.1.2 for the INVITE a UE receives. That is the controlling function's
+INVITE, which in the combined role never reaches the wire. The governing
+clause is 6.3.2.2.3. It also listed `P-Asserted-Service` as missing, which
+6.3.3.1.2 requires and 6.3.2.2.3 does not. That row is withdrawn.
+
+**Still open (CA-20b), each read against the right clause:**
 
 | Clause | Requires | The platform sends |
 |---|---|---|
-| 6.3.3.1.2 item 1 (controlling function's INVITE) | Contact = an MCPTT session identity with `g.3gpp.mcptt`, `isfocus` and `g.3gpp.icsi-ref` | `<sip:mcptt@mcptt.example>` — the server's public service identity, no `isfocus` |
-| 6.3.3.1.2 item 3 | `P-Asserted-Service: urn:urn-7:3gpp-service.ims.icsi.mcptt` | nothing |
-| 6.3.2.1.5.2 items 1–2 (participating function's 200 OK) | `Require: timer`, `Session-Expires` | nothing |
-| 6.3.2.1.5.2 item 3 | Contact with `g.3gpp.mcptt`, `g.3gpp.icsi-ref` and `isfocus` | `<sip:mcptt@mcptt.example>` with no feature tags at all |
-| 6.3.2.1.5.2 items 4–5 | `Supported: tdialog`, `Supported: norefersub` | nothing |
+| 6.3.2.2.3 items 3–6 (INVITE to the terminating client) | `Supported: timer, tdialog, norefersub`; Contact with `isfocus` and an MCPTT session identity | none of the option tags; Contact is the server's public service identity, no `isfocus` |
+| 6.3.2.1.5.2 (200 OK to the originator) | `Require: timer`, `Session-Expires`, Contact with `isfocus`, `Supported: tdialog, norefersub` | none |
 
-Two more to check against the clauses before calling them defects: the
-controlling function's INVITE puts the platform's own URI in `To` rather
-than the invitee's, and its Via host is `mcptt.example` with no port, which
-works only because every response rides back on the same TLS connection.
-
-Neither Kamailio nor Asterisk refused the platform for any of these, and that
-is not evidence that they are harmless. A generic proxy has no reason to
-inspect MCPTT feature tags. An MCPTT client uses `isfocus` to recognise that
-it is talking to a controlling function, and an MC-aware core would route on
-`P-Asserted-Service`.
-
-The item stays open, with a narrower instruction than the rest of this
-document: read `service/sip_core.py` against TS 24.379 clause by clause, the
-way `core/` was read, rather than fixing only the rows above. The rows above
-were found incidentally, and the prior established in section 5 — eleven of
-fifteen sets wrong — has no reason to be kinder to code nobody looked at.
-
----
+None of these is a header to add on its own. `timer` commits the platform to
+RFC 4028 session refresh; `tdialog` and `norefersub` commit it to RFC 4538 and
+RFC 4488 behaviour; a session identity in the Contact changes where in-dialog
+requests arrive. Each needs the behaviour behind it, so CA-20b is feature work
+with a conformance reason, not a header patch.
 
 ### 4.37 CA-21 — the floor timers had the right values and the wrong jobs
 
@@ -1495,6 +1563,40 @@ receives about 30 Revokes during the 3 s default T3. Legal (the count is an
 implementation option) and noisy. The values are the profile owner's to
 choose: PLT-VP-R1 PRF-OP-02.
 
+### 4.38 CA-22 — ad hoc group calls, read before they were written
+
+Ad hoc group calls (PLT-VP-R1 ADHOC-OP-01) were built from TS 24.379 clause
+17 as read in V18.13.0, and checked against V20.0.0. The protocol constants
+introduced were read, not recalled:
+
+| Constant | Source | Where |
+|---|---|---|
+| Warning 187 "can't determine the adhoc group participants" | table 4.4.2-2, V18.13.0 and V20.0.0 (identical; clause 17.4.2.2 step 7A spells it "cant", and the table is followed) | `core/sip.py` |
+| Warning 189 "maximum number of allowed adhoc group participants exceeded" | same table | `core/sip.py` |
+| Codes 184–195 first appear in Rel-18 | table 4.4.2-2 of V17.15.0 has none of them | `core/release.py` (already so) |
+| `<call-participants-criterias>`, `<adhoc-grp-emg-alert-grp-ind>` | annex F.1 schema, Rel-18 and Rel-20; absent in Rel-17 | `core/mcinfo.py`, `core/release.py` |
+| `application/resource-lists+xml`, namespace `urn:ietf:params:xml:ns:resource-lists` | 17.2.2.1.1 item 11; RFC 4826 | `core/mcinfo.py` |
+
+The rendered member-INVITE and 200 OK bodies validate against the Rel-18 and
+Rel-20 schemas (`tests/test_mcinfo.py`).
+
+**Two inconsistencies in the specification**, recorded rather than resolved:
+
+- Warning 185 is "user not authorised to initiate the adhoc group call" in
+  table 4.4.2-2, and "user is not authorised to initiate …" in clauses
+  17.3.2.1.1 step 9 and 17.4.2.2 step 4. The platform does not emit 185
+  (ADHOC-OP-02).
+- Clause 17.4.2.2 numbers its member-determination cases 12 i–iii in Rel-18
+  and 12 a–c in Rel-20. Rel-20's case c points to 17.4.5 for the criteria
+  procedure, which is 17.4.6. Code comments use the Rel-18 numbering.
+
+**Found in the platform, not the specification:** nothing supplied the
+initiator's roles to admission, so every call type declaring
+`initiator_roles` refused every caller (PLT-ICD-001 0.7 §3.4).
+
+---
+
+
 ---
 
 ## 5. NOT verified — the work that remains
@@ -1510,6 +1612,9 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-24 | The PLMN identity in the network profile's `plmns`, and the check that a cell belongs to one | TS 24.379 annex F.3, `tPlmnIdentityFormat` (the same in V17.15.0, V18.13.0 and V20.0.0) | **Closed, with one question left to the specification.** `tPlmnIdentityFormat` is `\d{3}\d{3}`: MCC then MNC, six digits. tEcgi and tNcgi begin with the same six, so a cell's PLMN is its first six digits. They are read as ASCII digits, `[0-9]`, as for CA-23. Annex F.3 does not say how a two-digit MNC fills three digits. The platform does not guess: it compares the six digits as written, and PLT-ICD-001 ICD-OP-12 records the question. |
+| CA-23 | Location report constants: the MIME type, the namespace `urn:3gpp:ns:mcpttLocationInfo:1.0`, the ECGI and NCGI formats, and where the NCGI sits | TS 24.379 annex F.3 (schema extracted verbatim for V17.15.0, V18.13.0, V20.0.0 into `docs/3GPP/schemas/mcpttlocation-24379-*.xsd`), F.3.3 semantics | **Closed.** tEcgi `\d{3}\d{3}[0-1]{28}` and tNcgi `\d{3}\d{3}[0-1]{36}` are read as ASCII digits only. `CurrentServingNcgi` sits in `CurrentLocation/anyExt`, with its `Ncgi` in the `anyExt` of tLocationType, from Rel-18; Rel-17's schema has no NCGI. The test reports validate against the Rel-18 and Rel-20 schemas. |
+| CA-22 | Ad hoc group call constants: warnings 187 and 189, the Rel-18 `<anyExt>` elements, the RFC 5366 list | TS 24.379 clause 17, table 4.4.2-2, annex F.1 (V18.13.0, V20.0.0) | **Closed.** See 4.38. Two wording inconsistencies in the specification recorded. |
 | CA-21 | Timer *behaviour* in `core/floor.py` and the media plane | TS 24.380 6.3.4.3-6.3.4.5, 6.3.5.6 | **Closed.** See 4.37. Eleven deviations fixed, one deliberate deviation recorded (FC-OP-07). |
 | CA-07 | MCData and MCVideo feature tags | TS 24.281, TS 24.282 | **Closed.** See 4.25. Both confirmed; DATA-OP-01 opened for the MCData service-specific ICSIs. |
 | CA-15 | 5QI and ARP values in every profile | TS 23.501 table 5.7.4-1, FRMCS SRS 14.6 | **Closed.** See 4.23. |
@@ -1525,7 +1630,7 @@ ordered by consequence:
 | IWF-OP-01 | TS 24.379 reserves 301-350; TS 29.379 allocates 300 | Both tables | **Open, for 3GPP CT1.** See 4.35. No effect today — there is no receive-side warning parser — but it would be a defect in one. |
 | IWF-OP-02 | `CT_MC_INFO` declared and unused | TS 29.379, throughout | **Open, low consequence.** See 4.35. The spelling is right; nothing builds the body. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
-| CA-20 | Messages built in `service/sip_core.py` — responses, in-dialog requests, the controlling function's INVITE | TS 24.379 clauses 6.3.2.1.5 and 6.3.3.1.2; RFC 3261 §12 | **Open.** See 4.36. Found by VP1-SIG-001, not by this audit, which never read `service/`. The dialog-routing part is fixed (PLT-VP-R1 SIP-OP-09); the TS 24.379 part is listed, not fixed. |
+| CA-20 | Service-layer messages, and the MCPTT info body in `core/sip.py` | TS 24.379 annex F.1, 6.3.2.1.5, 6.3.2.2.3, 6.3.2.2.6.2; RFC 3261 §12 | **20a closed, 20b open.** See 4.36. The platform read and wrote a body format that does not exist, so no conformant client could call it. Fixed, schema-validated and re-run through Kamailio. The session-timer, Target-Dialog, REFER and session-identity requirements remain (20b), and are feature work. |
 
 **Confirmed against a specification and pinned by test:** the 14 RTCP field
 IDs, the `MCPT` name, PT=204, the floor control subtypes, the Deny and Revoke
@@ -1534,15 +1639,19 @@ codes, the Warning header shape, the MCPTT feature tag and ICSI, the
 Accept-Contact pair, the Answer-Mode values and branches, the four content
 types, and the group document structure and media type.
 
-**Fifteen of the items in the table above have been checked against a
+**Sixteen of the items in the table above have been checked against a
 primary source, on top of CA-01, CA-02, CA-04 and CA-06 closed in v0.3. Four
-of the fifteen found the code already correct — CA-05, CA-07, CA-09 and
-CA-10. The other eleven found at least one defect.** Every constant in
-`core/` that the platform puts on the wire has now been read from a
-specification, in every release it supports, and every blocked item is
-unblocked. The qualifier matters: v1.8 said "every constant the platform puts
-on the wire", and it was not true. `service/` builds its own responses and
-in-dialog requests, this audit never read it, and CA-20 is what that cost. That is the prior
+found the code already correct — CA-05, CA-07, CA-09 and CA-10. The other
+twelve found at least one defect.** Every blocked item is unblocked.
+
+This paragraph has now twice claimed more coverage than the audit had. v1.8
+said "every constant the platform puts on the wire" had been read; v1.9
+narrowed that to `core/`. Both were false, and CA-20 shows why. The audit
+read constants that were declared as constants. It did not read the element
+names written as string literals inside the parser, and those were invented.
+The honest statement is narrower: **every declared protocol constant in
+`core/` has been read from a specification. The message-building and parsing
+code around those constants has been read only where a finding led there.** That is the prior
 for what remains — not a certainty of defect, but nowhere near a presumption
 of correctness.
 
@@ -1583,10 +1692,12 @@ answer, since an undercount of the clean results is the one nobody checks.
 ## 7. Recommendation
 
 **Every document this audit asked for is now in the repository, and every
-item that was blocked on one is closed.** Every constant in `core/` that the
-platform puts on the wire has been read from a primary specification, in every
-release the platform supports. That was not true of a single one of them when
-this document opened. It is not yet true of `service/` (CA-20).
+item that was blocked on one is closed.** Every declared protocol constant in
+`core/` has been read from a primary specification, in every release the
+platform supports. That was not true of a single one of them when this
+document opened. It is not true of the code that builds and parses messages
+around those constants, which is where CA-20 found the worst defect in this
+audit (4.36).
 
 Most of section 7 as it stood at v1.6 was written when CA-07, CA-08 and CA-09
 were blocked and the FRMCS profile had never been reconciled with the UIC
@@ -1636,7 +1747,11 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
-| 2.0 | 2026-09-24 | CA-21 opened and closed (4.37): the floor timers had the right defaults and the wrong behaviour. T2 started at the grant instead of the first media packet, T20 ran on every grant without limit, T8 did T3's job, T1 was never driven, the revoke causes were always #255, a queued hand-over sent a Floor Idle first, a pre-emptor was not put in front of the queue, and a holder asking again was denied. All fixed against the clause and mutation-tested. Two inconsistencies in TS 24.380 itself recorded. CA-20 (4.36) remains open and unrelated to this change. |
+| 2.4 | 2026-09-25 | CA-24: the PLMN identity format for the network profile (NET-OP-01), read from `tPlmnIdentityFormat` in three versions. How a two-digit MNC is written is not specified (PLT-ICD-001 ICD-OP-12). |
+| 2.3 | 2026-09-25 | CA-23: the location report constants, read from annex F.3 of three versions, and its schema extracted verbatim. |
+| 2.2 | 2026-09-25 | CA-22 (4.38): the ad hoc group call constants, read from V18.13.0 and V20.0.0 before use. Two specification inconsistencies recorded, along with one platform defect found on the way (initiator roles never reached admission). |
+| 2.1 | 2026-09-24 | CA-21 opened and closed (4.37): the floor timers had the right defaults and the wrong behaviour. T2 started at the grant instead of the first media packet, T20 ran on every grant without limit, T8 did T3's job, T1 was never driven, the revoke causes were always #255, a queued hand-over sent a Floor Idle first, a pre-emptor was not put in front of the queue, and a holder asking again was denied. All fixed against the clause and mutation-tested. Two inconsistencies in TS 24.380 itself recorded. |
+| 2.0 | 2026-09-24 | CA-20a closed. The platform read and wrote an MCPTT info body of its own invention (`<mcptt-call_type>` and three other elements that exist in no release of TS 24.379), so no conformant client could place a call. The interop user agent had copied the format from the platform's tests. Replaced by `core/mcinfo.py`, validated against the annex F.1 schema extracted verbatim for Rel-17, 18 and 20; call types declared per profile by signature (PLT-ICD-001 §2.6); `P-Asserted-Identity` and the floor-control m-line corrected. Found on the way: FRMCS group calls need Rel-18 and ad hoc participant resolution; two pairs of call types cannot be told apart; the specification's own example is malformed. v1.9's CA-20 section cited the wrong clause and a header that clause does not require; both corrected. The coverage claim in §5 and §7 is corrected a second time. |
 | 1.9 | 2026-09-24 | CA-20 opened, found by running VP1-SIG-001 rather than by this audit. `service/` builds messages of its own and was never in scope, although v1.8 described the audit as covering every constant the platform puts on the wire; that claim is corrected in §5 and §7. The RFC 3261 §12 dialog-routing part is fixed. The TS 24.379 part is listed in 4.36 (no `isfocus`, no `P-Asserted-Service`, no session timer, a Contact that is not a session identity) and not yet fixed. |
 | 1.8 | 2026-09-22 | CA-09 closed, the last blocked item. TS 29.379 table 4.2.2-1 allocates three interworking warning codes — 300, 301 and 302, all Land Mobile Radio media security — and none of them means an interworking gateway is unreachable, so `gateway-unavailable` correctly carries no code. The behaviour was already right; the recorded reason was a deferral rather than a finding, and a deferral invites the next reader to resolve it by guessing 301. Pinned by two tests, each killing a mutant nothing else in 544 catches — including a coordinated change that updates both existing snapshot guards to match. TS 29.379 independently corroborates five identifiers, the first corroboration in this audit not drawn from the document that defined the constant. New IWF-OP-01 (the two specifications disagree about the lower bound of the reserved range: 24.379 reserves 301-350, 29.379 allocates 300) and IWF-OP-02. The running tally in §5 was found four items out of date and replaced by a count derived from the table. |
 | 1.7 | 2026-09-22 | CA-19: table J-1's bands read by hand. CA-17's fix was incomplete — the priority ordering is carried by three fields and only `level` had been corrected, so ATO still out-ranked shunting on the floor and, more seriously, carried `preemption_vulnerability: false`, meaning nothing could pre-empt an active ATO session, including the REC the appendix's own worked example names. ETCS the same. All three fields now derive from band membership, and FRMCS-OP-02 closes. The band boundaries inferred in CA-17 would have been wrong in four of seven; nothing had been committed from that inference. |

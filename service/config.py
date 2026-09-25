@@ -7,6 +7,8 @@ a refusal to start (PLT-GEN-003, PLT-IDM-007), never a fallback.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Optional, Tuple
@@ -38,6 +40,29 @@ BEARER_NONE = "none"
 BEARER_STUB = "stub"
 KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 
+# REL-OP-02, decided 2026-09-24: a profile can declare call types the
+# configured 3GPP release cannot carry (the FRMCS profile's ad hoc group calls
+# before Rel-18). MCX_STRICT_RELEASE=true refuses to start in that case;
+# false starts and reports them. Required, like MCX_RELEASE: a default of
+# false would let a deployment accept unreachable emergency calls without
+# anyone having chosen to.
+STRICT_RELEASE_VALUES = {"true": True, "false": False}
+
+# Settings whose content moved into the network profile (NET-OP-01).
+MOVED_TO_NETWORK = ("MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS")
+
+
+_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def is_fqdn(name: str) -> bool:
+    """RFC 1035 2.3.4 / RFC 1123 2.1: labels of 1-63 characters, 253 in all,
+    and at least two labels -- which also keeps the keyword "none" from ever
+    being read as a name in a list."""
+    labels = name.split(".")
+    return (len(name) <= 253 and len(labels) >= 2
+            and all(_LABEL.fullmatch(label) for label in labels))
+
 
 @dataclass(frozen=True)
 class SipConfig:
@@ -49,6 +74,8 @@ class SipConfig:
     ca: Optional[Path]
     client_auth: str            # "required" | "optional"
     roles: Tuple[str, ...]
+    # The trusted SIP cores and their CA (ICD-OP-08, ICD-OP-10) are network
+    # data: see service/network.py.
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -150,9 +177,18 @@ class Config:
     idms: str
     recorder: str
     bearer: str
+    strict_release: bool
+    # ADHOC-OP-04 (decided 2026-09-25): how many entries an ad hoc caller's
+    # participant list may hold, whatever the call type -- the deployment's
+    # counterpart of the service configuration's <max-no-participants>
+    # (TS 24.379 17.4.2.2 step 6, warning 189). Required, no default.
+    adhoc_list_max: int
     host: str
     port: int
     groups_file: Optional[Path]
+    # NET-OP-01 (decided 2026-09-25): the network profile -- PLMNs, cell
+    # map, trusted SIP cores and their CA. Required, no default.
+    network: Path
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
 
@@ -211,12 +247,48 @@ class Config:
                 f"MCX_BEARER={bearer!r} is not a known bearer reservation "
                 f"source (known: {', '.join(KNOWN_BEARERS)})")
 
+        strict = (env.get("MCX_STRICT_RELEASE") or "").strip().lower()
+        if not strict:
+            raise StartupRefused(
+                "MCX_STRICT_RELEASE is not set: state whether the process may "
+                "start when the profile declares call types this release "
+                "cannot carry (true = refuse, false = start and warn); there "
+                "is no default")
+        if strict not in STRICT_RELEASE_VALUES:
+            raise StartupRefused(
+                f"MCX_STRICT_RELEASE={strict!r} must be 'true' or 'false'")
+
+        raw_max = (env.get("MCX_ADHOC_LIST_MAX") or "").strip()
+        if not raw_max:
+            raise StartupRefused(
+                "MCX_ADHOC_LIST_MAX is not set: state how many entries an ad hoc "
+                "caller's participant list may hold (a positive integer); there "
+                "is no default, because an unbounded list is unbounded work "
+                "before the caller is authorised")
+        if not raw_max.isdigit() or int(raw_max) < 1:
+            raise StartupRefused(
+                f"MCX_ADHOC_LIST_MAX={raw_max!r} must be a whole number of at least 1")
+
         try:
             port = int(env.get("MCX_HTTP_PORT") or "8080")
         except ValueError as exc:
             raise StartupRefused(f"MCX_HTTP_PORT is not an integer: {exc}") from exc
         if not 0 <= port <= 65535:
             raise StartupRefused(f"MCX_HTTP_PORT {port} is out of range")
+
+        for moved in MOVED_TO_NETWORK:
+            if moved in env:
+                # Refused rather than ignored: an operator who sets it would
+                # otherwise believe it applies.
+                raise StartupRefused(
+                    f"{moved} is no longer read: its content is part of the "
+                    "network profile (MCX_NETWORK_FILE, PLT-ICD-001 2.8)")
+        network = (env.get("MCX_NETWORK_FILE") or "").strip()
+        if not network:
+            raise StartupRefused(
+                "MCX_NETWORK_FILE is not set: name the network profile (PLMNs, "
+                "cell map, trusted SIP cores and their CA); there is no default, "
+                "and every audit record names the one in force")
 
         groups = (env.get("MCX_GROUPS_FILE") or "").strip()
         sip = SipConfig.from_env(env)
@@ -229,9 +301,12 @@ class Config:
             idms=idms,
             recorder=recorder,
             bearer=bearer,
+            strict_release=STRICT_RELEASE_VALUES[strict],
+            adhoc_list_max=int(raw_max),
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,
+            network=Path(network),
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
         )

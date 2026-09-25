@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
+from .mcinfo import Signature
+
 
 def freeze_map(d: Optional[Mapping]) -> Mapping:
     return MappingProxyType(dict(d or {}))
@@ -56,6 +58,17 @@ class CallType:
     max_participants: Optional[int]
     initiator_roles: Tuple[str, ...]
     floor: FloorConfig
+    # How a native MCPTT client asks for this call type (TS 24.379 annex F.1),
+    # or None when it cannot: the call type is reachable only some other way
+    # (a gateway, MCData) or TS 24.379 cannot tell it apart from another.
+    # Declared, never inferred (PLT-ICD-001 section 2.6).
+    mc_signature: Optional[Signature] = None
+    # How long an invited member may ring (the leg's INVITE is in
+    # 'Proceeding') before the core CANCELs it, in seconds. Service policy,
+    # declared per call type (PLT-VP-R1 SIP-OP-15, PLT-ICD-001 2.7). The
+    # loader requires it; None only in a CallType built by hand, and then
+    # the transaction layer's Timer B is the only limit.
+    no_answer_s: Optional[int] = None
 
 
 @dataclass(frozen=True)
