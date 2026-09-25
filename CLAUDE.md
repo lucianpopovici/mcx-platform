@@ -4,11 +4,17 @@ Read this before touching anything. It is the shared context for every task in
 this repository; individual task briefs are in `CLAUDE-1-service.md`,
 `CLAUDE-2-sip-transport.md` and `CLAUDE-3-media.md`.
 
+**Then read `kb/AGENT.md`.** `kb/` is this project's memory for agents: what is
+open, what was decided and why (`kb/decisions/`), and what the last session left
+(`kb/handover/`). Run `python3 kb/tools/kb.py build` first: `kb/STATE.md` is
+generated, git-ignored, and the only place test and gate counts are kept current.
+
 ## What this is
 
 A 3GPP mission-critical services platform (MCPTT / MCData) that runs as either a
-public-safety deployment or a railway FRMCS deployment, from one codebase and one
-image, with the profile chosen at deploy time.
+public-safety deployment or a railway FRMCS deployment, from one codebase, with
+one release image per profile around a core that is identical in every image,
+and the profile still named at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
 cores.** 966 tests pass and 20 boundary gates pass. `python3 -m service` runs.
@@ -55,6 +61,8 @@ for p in mcx frmcs utility; do for r in 17 19; do
   MCX_PROFILE=$p MCX_RELEASE=$r python3 -m pytest tests/test_conformance.py -q
 done; done
 python3 -m pytest tests/test_release.py -q    # release gating, all 8 releases
+# release images: one per profile, same core hash in each (VP1-BND-006)
+python3 tools/package.py --all --out dist --tar
 ```
 
 ## Architecture in one pass
@@ -202,7 +210,7 @@ suppressed or raised.
 | `docs/PLT-ICD-001.md` | The six hook contracts: PRE/POST/INV, §8.1 sequence, reason codes |
 | `docs/PLT-VP-R1.md` | R1 verification plan: 99 cases with exact pass criteria |
 | `docs/PLT-ANL-R1.md` | The three analyses and the gate-failure procedure |
-| `core/PROFILE_BOUNDARY.md` | Why the boundary sits where it does |
+| `core/PROFILE_BOUNDARY.md` | Why the boundary sits where it does, and why one image per profile |
 
 ## Status and honesty
 
