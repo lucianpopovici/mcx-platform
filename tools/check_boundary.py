@@ -107,7 +107,8 @@ HOOK_METHODS = {
     "identity_resolver": {"resolve", "bind", "unbind", "identities_of",
                           "determine_participants"},
     "priority_policy": {"evaluate", "compare"},
-    "session_policy": {"admit", "decide", "floor_policy"},
+    # authorise: PLT-ICD-001 0.13 section 5.0 (ICD-OP-09).
+    "session_policy": {"authorise", "admit", "decide", "floor_policy"},
     "bearer_selector": {"select", "on_path_event"},
     "interworking_gateway": {"route", "map_inbound"},
     "interconnection_gateway": {"route", "rights", "map_inbound_priority",

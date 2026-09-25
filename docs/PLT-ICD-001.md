@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.12 (draft)
+**Version:** 0.13 (draft)
 **Date:** 2026-09-25
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -265,10 +265,11 @@ consult mutable state, because functional-identity bindings change at runtime.
 
 Read-only. Returns the identities a user currently holds, for display and
 audit, and, from v0.7, for admission. The core passes the initiator's
-identities to IF-SES `admit` as `attributes["initiator.roles"]`
-(comma-separated) at §8.1 step 4a, for call types that restrict who may start
-them (`initiator_roles`). The core always writes that attribute itself, so a
-request cannot supply it. Returns an empty sequence for a user holding none,
+identities as `attributes["initiator.roles"]` (comma-separated), for call
+types that restrict who may start them (`initiator_roles`). It looks them up
+at §8.1 step 0 (step 4a before v0.13), and every hook from IF-SES `authorise`
+onward sees them. The core always writes that attribute itself, so a request
+cannot supply it. Returns an empty sequence for a user holding none,
 and does not raise for an unknown user.
 
 Before v0.7 nothing supplied `initiator.roles`, so every call type that
@@ -361,9 +362,52 @@ profile knowledge, so it is a hook. `SessionRequest` gains
 
 ## 5. IF-SES — SessionPolicy
 
+### 5.0 `authorise(request) -> Admission`
+
+Whether this initiator may start this call type at all. Added in v0.13
+(ICD-OP-09). Called at §8.1 step 0, before anything about the called party is
+looked up, so the answer to an unauthorised caller does not depend on the
+target. TS 24.379 17.4.2.2 orders ad hoc calls the same way: it authorises the
+user and the service in steps 4 and 5, and only then checks the list (step 6)
+and determines who to call (step 12).
+
+**PRE** The core has written the initiator's roles to
+`request.attributes["initiator.roles"]` (§3.4), replacing any value the
+request carried.
+
+**POST**
+1. Returns `Admission`. Refusal is a return value, never an exception.
+2. `permitted=True` → `reason_code` is the empty string.
+3. `permitted=False` → `reason_code` is a member of the profile's declared
+   `reject_reason_codes`.
+4. The core checks POST-2 and POST-3 itself, for `authorise` and `admit`
+   alike. A violation fails the session with `hook-contract-violation`.
+
+**INV**
+1. The answer cannot depend on the called party. This is enforced by
+   construction: the core passes a copy of the request with `target`,
+   `participants`, `participant_criteria` and `adhoc_alert_group` emptied.
+   The initiator, call type, media, application, urgency, location and
+   attributes remain.
+2. Anything that depends on the called party (participant limits, capacity
+   per group, the partner's rights) belongs to `admit` or later.
+
+The in-tree `TableSessionPolicy` refuses an undeclared call type with
+`call-type-not-permitted` and an initiator holding none of the call type's
+`initiator_roles` with `not-authorised`. Both checks were in `admit` before
+v0.13.
+
+**Deviation, deliberate.** For prearranged group calls, TS 24.379 10.1.1.4.2
+looks the group up first (404, warning 163 "group does not exist") and only
+then authorises the user (403, warning 119). The platform authorises first for
+every call type. This is stricter: an unauthorised caller cannot learn which
+groups exist either.
+
 ### 5.1 `admit(request, resolution, priority) -> Admission`
 
-**PRE** IF-IDR and IF-PRI have both succeeded for this request.
+**PRE** `authorise` permitted this request, and IF-IDR and IF-PRI have both
+succeeded for it. An `admit` given a call type the profile does not declare
+may raise `HookContractViolation`. The in-tree policy does.
 
 **POST**
 1. Returns `Admission`. Refusal is a return value, never an exception
@@ -499,6 +543,9 @@ data-only sessions.
 ### 8.1 Session establishment — normal
 
 ```
+0  IF-IDR.identities_of(initiator)             → the initiator's roles (§3.4)
+0  IF-SES.authorise(request without target)     → Admission   (v0.13, §5.0)
+   ── if not permitted: reject, stop — nothing about the target looked up ──
 1  IF-IDR.resolve(target, request)              → Resolution
       ── ad hoc (§3.5): IF-IDR.resolve per listed entry, OR
          IF-IDR.determine_participants(criteria, request) ──
@@ -506,7 +553,6 @@ data-only sessions.
       ── ONLY when resolution.kind is EXTERNAL ──
       ── if it returns None: refuse `gateway-unavailable`, stop ──
 3  IF-PRI.evaluate(request, resolution)         → PriorityDecision
-4a IF-IDR.identities_of(initiator)             → the initiator's roles (v0.7, §3.4)
 4  IF-SES.admit(request, resolution, priority)  → Admission
    ── if not permitted: reject, stop ──
 5  IF-SES.decide(request, resolution)           → SessionDecision
@@ -538,7 +584,7 @@ compensating call is made to hooks already invoked.
 ### 8.2 Pre-emption
 
 ```
-1  steps 1–4 of §8.1 for the incoming session
+1  steps 0–4 of §8.1 for the incoming session
 2  core: select candidate victims from active sessions
 3  for each candidate: IF-PRI.compare(incoming, candidate)
       compare ≤ 0                              → not a victim
@@ -624,10 +670,11 @@ environmental condition.
 | ICD-OP-06 | Floor control across a gateway: TETRA and P25 PTT models do not map cleanly onto 24.380 grant, queue, override and revoke. Decide which are unsupported over IF-IWF rather than discovering it at interop. | R4 start |
 | ICD-OP-07 | Media anchoring for a routed session: does the platform stay in the media path or hand off to the gateway? Affects recording obligations (PLT-OAM-008) for interworked calls. | R4 start |
 | ICD-OP-08 | **CLOSED 2026-09-25 in its R1 form (decided: certificate identity plus trusted cores).** A request may assert only an identity its TLS connection authenticated (PLT-IDM-004 without OpenID Connect, which is R2). A peer whose verified certificate carries a DNS name listed in `MCX_SIP_TRUSTED_PEERS` (required, no default; `none`, or fully qualified names; since v0.12 `sip.trusted_cores` in the network profile, §2.8) is a SIP core that authenticated its users itself, and may assert any identity (RFC 3325 trust domain). Every other peer may assert only a `sip:` URI in its certificate's subjectAltName. The check runs on REGISTER (the AoR) and INVITE (the initiator, from P-Asserted-Identity or From), and a mismatch is 403 `identity-not-authenticated`. The scheme and host are compared without case and the user part exactly (RFC 3261 19.1.4). The independent review found that binding identity alone left calls open to other peers, so a dialog is now also bound to the connection it was set up on: a response must arrive on its request's connection and carry its Call-ID; branches are unguessable; a BYE for the call must come from the caller's connection with the caller's tag, and a BYE for a leg from that leg's connection; an ACK must come on its INVITE's connection, and so must a CANCEL; and a new INVITE may not reuse a live call's Call-ID. **Deployment requirements that follow**, which the platform cannot check: a trusted core must itself authenticate every user and police P-Asserted-Identity (strip it from untrusted sources); and core certificates must come from a CA that issues trusted DNS names only to cores (see ICD-OP-10). The interop Kamailio meets neither: it tests the trust mechanism, not a secure core. Originally: **From v0.7.** Admission now authorises on `initiator.roles`, and the initiator is taken from P-Asserted-Identity or From. PLT-IDM-004 (bind the authenticated identity to the request) is not enforced on the SIP path, so on a direct TLS connection a caller can assert someone else's identity and so their roles. Before v0.7 the role check failed closed for everyone, so the exposure is new in effect, but the weakness is older. Resolving it is PLT-IDM-004 work: bind the TLS client identity to the registered AoR. | closed |
-| ICD-OP-09 | **From v0.7.** Resolution runs before admission (§8.1), so an unauthorised caller can tell "nobody matches" (187, 404) from "not allowed" (403, 100), and learn whether a user exists or a role is currently held. TS 24.379 17.4.2.2 authorises first (steps 4 and 5). The same was true for prearranged groups before ad hoc calls existed. | R2 |
+| ICD-OP-09 | **CLOSED 2026-09-25 (decided: a new hook method, IF-SES `authorise`).** Authorisation is §8.1 step 0, after the core looks up the initiator's roles and before any target lookup (§5.0). The request `authorise` sees has the called party removed, so an unauthorised caller gets the same refusal whatever it calls: an existing or unknown user, a held or unheld role, criteria matching someone or no one, and a list over the limit. The core writes `initiator.roles` once, and every later hook sees that value. The independent review found no remaining oracle. It found three things, all fixed: `admit` crashed on an undeclared call type; later hooks still saw roles the client supplied; and the documents were not updated. It also found the two open points below. Originally: **From v0.7.** Resolution runs before admission (§8.1), so an unauthorised caller can tell "nobody matches" (187, 404) from "not allowed" (403, 100), and learn whether a user exists or a role is currently held. TS 24.379 17.4.2.2 authorises first (steps 4 and 5). The same was true for prearranged groups before ad hoc calls existed. | closed |
 | ICD-OP-10 | **CLOSED 2026-09-25 (decided: a separate CA for cores, in the network profile).** The core CA is named by the network profile (§2.8), must be a self-signed root with `pathLenConstraint` 0, and must be kept apart from the users' anchors in `MCX_SIP_TLS_CA` (by key, by name, and by issuance). A trusted core needs both a certificate the core CA issued directly and a listed DNS name, and a certificate the core CA issued asserts no user identity (ICD-NET-003, -004). The independent review found three defects in the first version, all fixed before delivery: an intermediate under the users' root was accepted as the core CA; a TRUSTED CERTIFICATE block in the core CA file became an anchor unchecked and unhashed; and core-CA certificates could also authenticate user URIs. Originally: **From v0.9.** SIP cores and users share one trust anchor (`MCX_SIP_TLS_CA`). A core is recognised by a DNS name in its certificate, so any certificate from that CA carrying the name is trusted. That includes a user certificate, if enrolment lets a user choose DNS names. | closed |
 | ICD-OP-11 | **From v0.9.** The inbound guard records a request's (Call-ID, CSeq) before the identity check runs. A refused, spoofed request therefore uses up that pair, and a genuine request that later carries the same pair is answered 482. This matters only if Call-IDs can be predicted. | R2 |
 | ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. | before a two-digit-MNC deployment |
+| ICD-OP-13 | **From v0.13.** A request relayed by a gateway (§7.2) has two weaknesses. (1) Its audit trail records `session-admitted` before §8.1 runs, so a request refused at step 0 shows "admitted" and then "refused". (2) The gateway may name a local user as the initiator, and step 0 then authorises it with that user's roles. The gateway's word is taken for who is calling. Both predate v0.13. The remedy for the second is to authorise gateway-originated requests on the gateway's own rights. | R4 start |
 
 ---
 
@@ -635,6 +682,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.13 | 2026-09-25 | Major change (ICD-VER-003): IF-SES gains `authorise(request)` (§5.0), called at §8.1 step 0 with the called party removed from the request. The roles lookup moves from step 4a to step 0. `admit`'s PRE now includes a successful `authorise`. The core checks POST-2 and POST-3 of both methods. All in-tree profiles implement it in the same change set: the call-type and role checks move from `admit` to `authorise`. §8.2 step 1 now reads steps 0–4. ICD-OP-09 closed; ICD-OP-13 opened. |
 | 0.12 | 2026-09-25 | §2.8 becomes the network profile (`MCX_NETWORK_FILE`, NET-OP-01): PLMNs, the cell map, and the trusted SIP cores with a CA of their own (ICD-NET-001 to 004; ICD-LOC-001 gains the PLMN check; ICD-LOC-005 superseded). The network identifier joins the audit identity. ICD-OP-10 closed; ICD-OP-12 opened. `MCX_CELLS_FILE` and `MCX_SIP_TRUSTED_PEERS` are withdrawn and refused. A minor change: no hook or parameter object changes. |
 | 0.11 | 2026-09-25 | §2.8: the cell map is deployment data (`MCX_CELLS_FILE`), not a profile section (PRF-OP-03). It is required when the profile has location-dependent identities (ICD-LOC-005). The profile schema is back to what it was before 0.10. |
 | 0.10 | 2026-09-25 | §2.8 added: the cell map `identity.cells` (ICD-LOC-001 to 004). The core reads the client's location report (annex F.3) and applies the map, so location-dependent identities resolve from a native client's call. A minor change: an optional profile section, and no hook change. |
