@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping, Optional, Sequence
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -23,7 +23,12 @@ def _name(cn: str) -> x509.Name:
     return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 
 
-def make(directory: Path, parties: Iterable[str]) -> Path:
+def make(directory: Path, parties: Iterable[str],
+         uris: Optional[Mapping[str, Sequence[str]]] = None) -> Path:
+    """One certificate per party, all from one throwaway CA. `uris` adds
+    subjectAltName URIs: a user's certificate names the sip: identity it may
+    assert to the platform (PLT-ICD-001 ICD-OP-08)."""
+    uris = uris or {}
     directory.mkdir(parents=True, exist_ok=True)
     now = datetime.datetime.now(datetime.timezone.utc)
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -54,7 +59,10 @@ def make(directory: Path, parties: Iterable[str]) -> Path:
                 .add_extension(x509.BasicConstraints(ca=False, path_length=None), True)
                 .add_extension(x509.SubjectAlternativeName(
                     [x509.DNSName("localhost"), x509.DNSName(cn),
-                     x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
+                     x509.DNSName(f"{cn}.interop.test"),
+                     x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+                    + [x509.UniformResourceIdentifier(u) for u in uris.get(cn, ())]),
+                    False)
                 .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
                                False)
                 .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(

@@ -15,6 +15,7 @@ Contact.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import ssl
@@ -82,9 +83,14 @@ class Dialog:
 
 
 class UA:
-    def __init__(self, aor: str, host: str, port: int, pki: str, name: str = "ua"):
+    def __init__(self, aor: str, host: str, port: int, pki: str,
+                 name: Optional[str] = None):
         self.aor = aor
         self.user = aor.split(":", 1)[1].split("@")[0]
+        # The user's own certificate when there is one (it names the user's
+        # sip: URI, ICD-OP-08); `name` picks another, e.g. to impersonate.
+        if name is None:
+            name = self.user if os.path.exists(f"{pki}/{self.user}.crt") else "ua"
         self.rx: List[str] = []
         self.log: List[tuple] = []          # (direction, first line, full text)
         self.lock = threading.Lock()

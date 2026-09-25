@@ -111,7 +111,7 @@ class ServerTransactions:
             txn.retransmit_at = None
             txn.expires_at = now + 64 * self._t1          # linger (Timer H/J)
 
-    def absorb_ack(self, request: Request) -> Optional[ServerTxn]:
+    def absorb_ack(self, request: Request, flow: Any = None) -> Optional[ServerTxn]:
         """Match an ACK to its INVITE transaction and stop the timers.
 
         An ACK to a non-2xx final response carries the INVITE's branch; an ACK
@@ -127,6 +127,11 @@ class ServerTransactions:
                     txn = t
                     break
         if txn is None or txn.state not in (COMPLETED, ACCEPTED):
+            return None
+        if flow is not None and txn.flow is not flow:
+            # An ACK from another connection is not the caller's: it must not
+            # stop the missing-ACK timeout of someone else's call (review of
+            # ICD-OP-08).
             return None
         txn.state = CONFIRMED
         txn.expires_at = self._now() + 64 * self._t1

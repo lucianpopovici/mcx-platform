@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from core.sip import SipError, split_frame
+from core.sip import SipError, canonical_uri, split_frame
 
 from .config import SipConfig
 from .sip_core import SipCore
@@ -43,11 +43,24 @@ def make_context(cfg: SipConfig) -> ssl.SSLContext:
     return ctx
 
 
+def _san(cert, kind: str) -> tuple:
+    """subjectAltName entries of one kind ('URI', 'DNS')."""
+    return tuple(v.strip() for k, v in (cert or {}).get("subjectAltName", ())
+                 if k == kind)
+
+
 class TlsFlow:
-    def __init__(self, sock: ssl.SSLSocket, peer: str, subject: Optional[str]):
+    def __init__(self, sock: ssl.SSLSocket, peer: str, subject: Optional[str],
+                 cert: Optional[dict] = None):
         self._sock = sock
         self.peer = peer
         self.peer_subject = subject      # None: peer presented no certificate
+        # What the verified certificate authenticates (ICD-OP-08): the SIP
+        # identities a directly attached client may assert, and the DNS names
+        # a trusted SIP core is recognised by. Empty without a certificate.
+        self.peer_uris = tuple(canonical_uri(u) for u in _san(cert, "URI")
+                               if u.lower().startswith("sip:"))
+        self.peer_dns = tuple(d.lower() for d in _san(cert, "DNS"))
         self.closed = False
         self._lock = threading.Lock()
 
@@ -163,7 +176,7 @@ class TlsListener:
             self._count("no_client_cert")
         self._count("accepted")
         tls.settimeout(None)
-        flow = TlsFlow(tls, peer, subject)
+        flow = TlsFlow(tls, peer, subject, cert or None)
         self._flows.add(flow)
         log.info("SIP flow up peer=%s client_cert=%s", peer, subject)
         buf = b""

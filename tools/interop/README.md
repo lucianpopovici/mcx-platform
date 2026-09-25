@@ -24,7 +24,7 @@ kept there.
 |---|---|
 | `run.py` | Starts the platform from its environment alone (no `platform=` injection), starts the core, drives the scenario |
 | `ua.py` | The user agents. They import nothing from `core/` or `service/`, so agreement with the platform means agreement about the specification rather than about shared code |
-| `pki.py` | A throwaway CA and one certificate per party |
+| `pki.py` | A throwaway CA and one certificate per party. Each user's certificate names its `sip:` URI, which is the only identity it may assert directly to the platform. The core under test is trusted by its `<core>.interop.test` DNS name (`MCX_SIP_TRUSTED_PEERS`, PLT-ICD-001 ICD-OP-08). Neither interop core authenticates users, so these runs test the trust mechanism, not a secure deployment. |
 | `kamailio.cfg.in` | Kamailio as a registrar and record-routing proxy. The in-dialog handling follows Kamailio's default configuration, deliberately not relaxed |
 | `asterisk/` | Asterisk as a B2BUA that registers each user onward to the platform |
 

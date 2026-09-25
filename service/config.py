@@ -7,6 +7,8 @@ a refusal to start (PLT-GEN-003, PLT-IDM-007), never a fallback.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Optional, Tuple
@@ -47,6 +49,18 @@ KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 STRICT_RELEASE_VALUES = {"true": True, "false": False}
 
 
+_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def _is_fqdn(name: str) -> bool:
+    """RFC 1035 2.3.4 / RFC 1123 2.1: labels of 1-63 characters, 253 in all,
+    and at least two labels -- which also keeps the keyword "none" from ever
+    being read as a name in a list."""
+    labels = name.split(".")
+    return (len(name) <= 253 and len(labels) >= 2
+            and all(_LABEL.fullmatch(label) for label in labels))
+
+
 @dataclass(frozen=True)
 class SipConfig:
     host: str
@@ -57,6 +71,11 @@ class SipConfig:
     ca: Optional[Path]
     client_auth: str            # "required" | "optional"
     roles: Tuple[str, ...]
+    # ICD-OP-08 (decided 2026-09-25): peers whose certificate carries one of
+    # these DNS names are SIP cores trusted to assert any identity
+    # (P-Asserted-Identity, RFC 3325 trust domain). Every other peer may
+    # assert only the sip: URIs in its own certificate. Empty: none trusted.
+    trusted_peers: Tuple[str, ...] = ()
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -114,7 +133,23 @@ class SipConfig:
             raise StartupRefused(
                 "MCX_SIP_ROLES=participating alone is not supported: the "
                 "controlling function is not reachable remotely (SIP-OP-03)")
-        return SipConfig(host, port, uri, cert, key, ca, auth, roles)
+        # Required, no default: "none", or DNS names from trusted cores'
+        # certificates. A default of "trust everyone" is what this replaced.
+        raw_trusted = need("MCX_SIP_TRUSTED_PEERS")
+        if raw_trusted.lower() == "none":
+            trusted: Tuple[str, ...] = ()
+        else:
+            trusted = tuple(sorted({t.strip().lower()
+                                    for t in raw_trusted.split(",")}))
+            if not trusted or not all(_is_fqdn(t) for t in trusted):
+                # Fully qualified names only: a single label such as
+                # "localhost" is on many certificates, and trusting it would
+                # trust nearly everyone (review of ICD-OP-08).
+                raise StartupRefused(
+                    f"MCX_SIP_TRUSTED_PEERS={raw_trusted!r}: give 'none', or a "
+                    "comma-separated list of fully qualified DNS names from the "
+                    "trusted cores' certificates")
+        return SipConfig(host, port, uri, cert, key, ca, auth, roles, trusted)
 
 
 @dataclass(frozen=True)

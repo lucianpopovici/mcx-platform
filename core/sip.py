@@ -31,6 +31,7 @@ from .errors import (
     ADHOC_PARTICIPANTS_UNDETERMINED,
     ADHOC_TOO_MANY_PARTICIPANTS,
     CALL_TYPE_NOT_PERMITTED,
+    IDENTITY_NOT_AUTHENTICATED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
@@ -173,6 +174,7 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     # TS 24.379 17.4.2.2 steps 6, 7, 7A and 12: both are 403.
     ADHOC_PARTICIPANTS_UNDETERMINED: Status.FORBIDDEN,
     ADHOC_TOO_MANY_PARTICIPANTS: Status.FORBIDDEN,
+    IDENTITY_NOT_AUTHENTICATED: Status.FORBIDDEN,
 }
 
 # TS 24.379 clause 4.4.1: the RFC 3261 warn-code is always 399 (miscellaneous
@@ -231,6 +233,7 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
 # failure. It holds at the platform's edge only: a proxy turns a lone 503 into
 # a 500 and drops the Warning, which was accepted (PLT-VP-R1 SIP-OP-10).
 LOCAL_WARNING_TEXTS: Mapping[str, str] = {
+    IDENTITY_NOT_AUTHENTICATED: "asserted identity is not the authenticated one",
     NO_BINDING: "identity has no current holder",
     NO_LOCATION_BINDING: "location required for this identity",
     CAPACITY_EXHAUSTED: "maximum number of sessions reached",
@@ -241,6 +244,12 @@ LOCAL_WARNING_TEXTS: Mapping[str, str] = {
 }
 
 REFUSALS_WITHOUT_WARNING_TEXT: Mapping[str, str] = {
+    # 141 ("user unknown to the participating function": it cannot associate
+    # the public user identity with an MCPTT ID) is the nearest. Here the
+    # identity is associated perfectly well; it is simply not the one this
+    # connection authenticated. Table 4.4.2-2 of V18.13.0 has no such code.
+    IDENTITY_NOT_AUTHENTICATED: "no code for an asserted identity the "
+                                "connection did not authenticate",
     # 141 is the nearest, but it is the opposite direction: it means the
     # participating function could not associate a public user identity with
     # an MCPTT ID. `no-binding` means a known identity that nobody holds.
@@ -996,6 +1005,18 @@ def build_sdp(address: str, audio_port: int, floor_port: Optional[int],
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+
+def canonical_uri(uri: str) -> str:
+    """A SIP URI for comparison: scheme and host lower-cased, the user part
+    left as it is -- RFC 3261 19.1.4 compares the user part case-sensitively,
+    and so do the directory and the registration store."""
+    uri = uri.strip()
+    scheme, colon, rest = uri.partition(":")
+    if not colon:
+        return uri
+    user, at, host = rest.rpartition("@")
+    return f"{scheme.lower()}:{user}{at}{host.lower()}"
 
 
 def _uri(value: str) -> str:

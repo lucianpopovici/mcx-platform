@@ -19,19 +19,21 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import dataclasses
 import threading
 
-from core.errors import NOT_AUTHORISED
+from core.errors import IDENTITY_NOT_AUTHENTICATED, NOT_AUTHORISED
 from core.hooks import MediaKind
 from core.invoke import Invoker
 from core.session import Session, Signal, SignalType
 from core.sip import (
     Adapter, DialogContext, Headers, InboundGuard, ReceivedResponse, Request,
-    RegistrationStore, Response, SipError, Status, build_sdp, negotiate,
+    RegistrationStore, Response, SipError, Status, build_sdp, canonical_uri,
+    negotiate,
     parse_message, parse_sdp,
 )
 
@@ -233,6 +235,8 @@ class SipCore:
         self.server = ServerTransactions(clock, t1=t1)
         self.client = ClientTransactions(clock, t1=t1)
         self.flows_by_user: Dict[str, Any] = {}
+        sip_cfg = runtime.config.sip
+        self._trusted_peers = set(sip_cfg.trusted_peers if sip_cfg else ())
         self.calls: Dict[str, Call] = {}
         self._dialogs: Dict[str, Call] = {}       # any Call-ID -> its call
         self._pending: Dict[str, Call] = {}
@@ -263,7 +267,7 @@ class SipCore:
     def _on_request(self, req: Request, flow: Any) -> None:
         # 1 — retransmission?
         if req.method == "ACK":
-            if self.server.absorb_ack(req) is None:
+            if self.server.absorb_ack(req, flow) is None:
                 log.info("stray ACK dropped call-id=%s",
                          req.headers.get("Call-ID"))
             return
@@ -342,13 +346,18 @@ class SipCore:
         self._final(txn, Response(Status.OK, Headers([("Allow", ALLOWED)])))
 
     def _register(self, req: Request, txn: ServerTxn, flow: Any) -> None:
-        aor = _uri(req.headers.get("To") or "")
+        # Canonical form (scheme and host lower-cased, RFC 3261 19.1.4), so
+        # the domain check, the store and call routing agree on one key.
+        aor = canonical_uri(_uri(req.headers.get("To") or ""))
         contact = req.headers.get("Contact") or ""
         if not aor:
             raise SipError("REGISTER has no To")
         domain = aor.rpartition("@")[2]
         if domain not in self.rt.loaded.profile.identity.domains:
             return self._reject(txn, NOT_AUTHORISED)       # PLT-IDM-008
+        if not self._authenticated_as(flow, aor):
+            # Registering someone else's address would route their calls here.
+            return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
         expires_s = req.headers.get("Expires")
         m = _EXPIRES_PARAM.search(contact)
         seconds = int(m.group(1)) if m else (
@@ -365,8 +374,33 @@ class SipCore:
 
     # -- INVITE (initiator side) ---------------------------------------------
 
+    def _authenticated_as(self, flow: Any, identity: str) -> bool:
+        """ICD-OP-08 (decided 2026-09-25), PLT-IDM-004 in its R1 form.
+
+        A peer whose certificate carries a DNS name listed in
+        MCX_SIP_TRUSTED_PEERS is a SIP core that authenticated its users
+        itself: it may assert any identity (RFC 3325 trust domain). Any other
+        peer may assert only a sip: URI in its own certificate's
+        subjectAltName. A peer without a certificate can assert nothing.
+        """
+        dns = set(getattr(flow, "peer_dns", ()))
+        if dns & self._trusted_peers:
+            return True
+        return canonical_uri(identity) in getattr(flow, "peer_uris", ())
+
     def _invite(self, req: Request, txn: ServerTxn, flow: Any) -> None:
         sr = self.adapter.parse_invite(req)
+        if not self._authenticated_as(flow, sr.initiator):
+            # Checked before anything is established or anyone invited: the
+            # initiator's identity decides priority, roles and admission.
+            return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        if sr.request_id in self._dialogs or sr.request_id in self.calls:
+            # A new INVITE reusing a live call's Call-ID would replace that
+            # call in every table keyed by it: its BYE would then end the
+            # newcomer's call, and the original would be orphaned (review of
+            # ICD-OP-08). Re-INVITE is not supported, so this is refused.
+            return self._final(txn, Response(Status.BAD_REQUEST, Headers(
+                [("Warning", '399 mcx "Call-ID of a call in progress"')])))
         call = Call(cid=sr.request_id, invite=req, sr=sr, txn=txn, flow=flow,
                     initiator=sr.initiator,
                     remote_target=_addr_uri(req.headers.get("Contact") or "") or sr.initiator,
@@ -491,11 +525,13 @@ class SipCore:
         flow.send(req.render())
 
     def _with_branch(self, req: Request) -> Request:
+        # Unique AND unguessable: responses are matched to transactions by
+        # branch, and a guessable one let any peer answer for a callee.
         self._branch_seq += 1
         headers = Headers(req.headers.items())
         via = headers.get("Via") or ""
-        headers.set("Via", re.sub(r"branch=[^;,\s]+",
-                                  f"branch=z9hG4bKmcx{self._branch_seq}", via))
+        branch = f"z9hG4bKmcx{self._branch_seq}.{secrets.token_hex(8)}"
+        headers.set("Via", re.sub(r"branch=[^;,\s]+", f"branch={branch}", via))
         return Request(req.method, req.uri, headers, req.body)
 
     # -- responses from callees --------------------------------------------------
@@ -504,6 +540,15 @@ class SipCore:
         txn = self.client.match(resp)
         if txn is None:
             log.info("response with no transaction dropped code=%s", resp.code)
+            return
+        if txn.flow is not flow or resp.headers.get("Call-ID") != \
+                txn.request.headers.get("Call-ID"):
+            # A response belongs to the connection its request went out on,
+            # and to that request's Call-ID. Otherwise any peer could answer
+            # for a callee (review of ICD-OP-08).
+            self.counters["foreign_response"] = self.counters.get("foreign_response", 0) + 1
+            log.warning("response from another flow or Call-ID dropped code=%s",
+                        resp.code)
             return
         if txn.user is None:
             # A BYE that ended a stray forked dialog: nothing waits on it.
@@ -751,7 +796,7 @@ class SipCore:
         # 17.2.3: the branch, AND the sent-by of the top Via; and a CANCEL
         # names its INVITE's Call-ID (9.1). A branch alone would let any
         # peer that learnt it cancel someone else's call.
-        if invite_txn is None \
+        if invite_txn is None or invite_txn.flow is not flow \
                 or _sent_by(req.headers) != _sent_by(invite_txn.request.headers) \
                 or req.headers.get("Call-ID") != invite_txn.request.headers.get("Call-ID"):
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
@@ -799,6 +844,15 @@ class SipCore:
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
         call_id = req.headers.get("Call-ID")
         leg = call.legs.get(call_id or "")
+        # A dialog's BYE comes from its remote party, on its connection, with
+        # its tag (RFC 3261 12.2.2). Call-ID alone let any invited member --
+        # who learns the call's Call-ID from its own leg's -- end the call.
+        if call_id == call.cid and (flow is not call.flow or
+                                    _tag_of(req.headers.get("From")) !=
+                                    _tag_of(call.invite.headers.get("From"))):
+            return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
+        if leg is not None and flow is not leg.flow:
+            return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
         if leg is not None:
             # RFC 3261 12.2.2: a request belongs to a dialog by Call-ID AND
             # tags. A leg's Call-ID can carry a second dialog -- a fork that
@@ -920,6 +974,11 @@ def _quoted(text: object) -> str:
     in it used to end the warn-text early (found by review)."""
     clean = "".join(c if c >= " " and c != "\x7f" else " " for c in str(text))
     return clean.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _tag_of(value: Optional[str]) -> str:
+    m = re.search(r";\s*tag=([^;>\s,]+)", value or "")
+    return m.group(1) if m else ""
 
 
 def _sent_by(headers) -> str:

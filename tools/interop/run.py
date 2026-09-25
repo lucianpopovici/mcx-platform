@@ -116,7 +116,8 @@ class Proc:
         self.fh.close()
 
 
-def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
+def start_platform(work: Path, port: int, recorder: str = "stub",
+                   trusted: str = "none") -> Proc:
     groups = work / "groups.yaml"
     groups.write_text(
         "groups:\n"
@@ -138,6 +139,9 @@ def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
         "MCX_SIP_TLS_CA": str(work / "pki/ca.crt"),
         "MCX_SIP_CLIENT_AUTH": "optional",
         "MCX_SIP_ROLES": "participating,controlling",
+        # The core under test authenticates its users; by its certificate's
+        # DNS name it may assert their identities (ICD-OP-08).
+        "MCX_SIP_TRUSTED_PEERS": trusted,
         "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0",
     })
     proc = Proc("platform", [sys.executable, "-m", "service"],
@@ -550,6 +554,23 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
         report.observe("originating: did the platform invite the callee?", "no")
 
 
+def identity_check(work: Path, platform_port: int, report: Report,
+                   uas: List[UA]) -> None:
+    """ICD-OP-08, straight to the platform (no core in between, so nobody
+    vouches for the caller): a client holding u2's certificate may register
+    as u2 and not as u1."""
+    ca = str(work / "pki")
+    own = UA(U2, "127.0.0.1", platform_port, ca, name="u2"); uas.append(own)
+    r = own.register()
+    report.check("identity: a client registers as the user its certificate names",
+                 first_line(r).startswith("SIP/2.0 200"), first_line(r))
+    spoof = UA(U1, "127.0.0.1", platform_port, ca, name="u2"); uas.append(spoof)
+    r = spoof.register()
+    report.check("identity: the same certificate cannot register as another user",
+                 first_line(r).startswith("SIP/2.0 403"),
+                 f"{first_line(r)} / Warning: {header(r, 'Warning') or '(none)'}")
+
+
 def refusal_comparison(core: str, work: Path, core_port: int, platform_port: int,
                        report: Report, uas: List[UA]) -> None:
     """The same 503 refusal, directly and through the core (SIP-OP-10: the proxy
@@ -558,7 +579,8 @@ def refusal_comparison(core: str, work: Path, core_port: int, platform_port: int
     Runs a fail-closed platform (MCX_RECORDER=none) on the port the core
     already routes to, so the core's configuration is untouched.
     """
-    platform = start_platform(work, platform_port, recorder="none")
+    platform = start_platform(work, platform_port, recorder="none",
+                              trusted=f"{core}.interop.test")
     try:
         results = {}
         for label, target_port in (("direct", platform_port), (core, core_port)):
@@ -584,16 +606,19 @@ def main() -> int:
 
     work = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="mcx-interop-"))
     work.mkdir(parents=True, exist_ok=True)
-    pki.make(work / "pki", ("platform", "ua", "kamailio", "asterisk"))
+    pki.make(work / "pki", ("platform", "ua", "kamailio", "asterisk", "u1", "u2"),
+             uris={"u1": [U1], "u2": [U2]})
 
     report, uas, procs = Report(), [], []
     platform_port, core_port = free_port(), free_port()
     try:
-        platform = start_platform(work, platform_port)
+        platform = start_platform(work, platform_port,
+                                  trusted=f"{args.core}.interop.test")
         procs.append(CORES[args.core](work, core_port, platform_port))
         run = scenario if TOPOLOGY[args.core] == "proxy" else scenario_b2bua
         try:
             run(args.core, work, core_port, platform_port, report, uas)
+            identity_check(work, platform_port, report, uas)
         finally:
             platform.stop()
         if TOPOLOGY[args.core] == "proxy":

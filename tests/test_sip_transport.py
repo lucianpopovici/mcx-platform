@@ -50,9 +50,14 @@ class Clock:
 class Flow:
     """Records every message the core sends on it."""
 
-    def __init__(self, name="flow"):
+    def __init__(self, name="flow", uris=None, dns=()):
         self.name = name
         self.sent = []
+        # What a verified client certificate would authenticate (ICD-OP-08):
+        # by default a flow is the user it is named after, and nobody else.
+        from core.sip import canonical_uri
+        self.peer_uris = tuple(uris) if uris is not None else (canonical_uri(name),)
+        self.peer_dns = tuple(dns)
 
     def send(self, text):
         self.sent.append(text)
@@ -84,7 +89,7 @@ def pki(tmp_path_factory):
     def name(cn):
         return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 
-    def make(cn, issuer_name, issuer_key, ca=False, san=False):
+    def make(cn, issuer_name, issuer_key, ca=False, san=False, dns=(), uris=()):
         key = ec.generate_private_key(ec.SECP256R1())
         b = (x509.CertificateBuilder().subject_name(name(cn))
              .issuer_name(issuer_name).public_key(key.public_key())
@@ -92,10 +97,14 @@ def pki(tmp_path_factory):
              .not_valid_before(now - datetime.timedelta(minutes=1))
              .not_valid_after(now + datetime.timedelta(days=1))
              .add_extension(x509.BasicConstraints(ca=ca, path_length=None), True))
+        names = []
         if san:
-            b = b.add_extension(x509.SubjectAlternativeName(
-                [x509.DNSName("localhost"),
-                 x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
+            names += [x509.DNSName("localhost"),
+                      x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+        names += [x509.DNSName(d) for d in dns]
+        names += [x509.UniformResourceIdentifier(u) for u in uris]
+        if names:
+            b = b.add_extension(x509.SubjectAlternativeName(names), False)
         return key, b.sign(issuer_key, hashes.SHA256())
 
     def write(stem, key, cert):
@@ -118,8 +127,15 @@ def pki(tmp_path_factory):
     write("ca", ca_key, ca)
     k, c = make("mcx-server", ca.subject, ca_key, san=True)
     write("server", k, c)
-    k, c = make("core-client", ca.subject, ca_key)
+    # plays a SIP core: trusted by DNS name in sip_env (MCX_SIP_TRUSTED_PEERS)
+    k, c = make("core-client", ca.subject, ca_key, dns=("core-client.example",))
     write("client", k, c)
+    # a directly attached user: may assert only its own URI
+    k, c = make("u0", ca.subject, ca_key, uris=(U[0],))
+    write("u0", k, c)
+    # a certificate the CA trusts that names nobody
+    k, c = make("anonymous", ca.subject, ca_key)
+    write("anonymous", k, c)
     # a client certificate from a CA the server does not trust
     rogue_key = ec.generate_private_key(ec.SECP256R1())
     rogue_ca = (x509.CertificateBuilder().subject_name(name("rogue"))
@@ -153,6 +169,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_TLS_CA": str(pki / "ca.crt"),
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
+           "MCX_SIP_TRUSTED_PEERS": "core-client.example",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
     env.update(over)
     return env
@@ -288,7 +305,7 @@ def test_unparseable_input_is_dropped_and_counted_not_answered(core):
 
 
 def test_register_stores_state_and_answers_200(core, clock):
-    f = Flow()
+    f = Flow(U[1])
     register(core, U[1], f)
     assert f.codes() == [200]
     assert core.registrations.is_registered(U[1])
@@ -297,9 +314,11 @@ def test_register_stores_state_and_answers_200(core, clock):
 
 
 def test_register_expires_zero_deregisters(core):
-    f = Flow()
+    f = Flow(U[1])
     register(core, U[1], f)
+    assert core.registrations.is_registered(U[1])      # else this proves nothing
     register(core, U[1], f, n=2, expires=0)
+    assert f.codes() == [200, 200]
     assert not core.registrations.is_registered(U[1])
     assert U[1] not in core.flows_by_user
 
@@ -346,7 +365,7 @@ def test_retransmission_of_a_rejected_request_gets_the_same_answer_not_a_replay_
 
 
 def test_a_genuine_replay_in_a_new_transaction_is_still_rejected(core):
-    f = Flow()
+    f = Flow(U[1])
     register(core, U[1], f, n=1)
     # same Call-ID and CSeq, different branch => a new transaction, a replay
     core.on_bytes(msg("REGISTER", "sip:mcptt.example", f"reg-{U[1]}-1", 1, U[1], U[1],
@@ -513,7 +532,7 @@ def test_vp1_sig_005_refusal_leaves_no_session_state(env, clock):
     rt = build_runtime(env, clock)                 # fail-closed platform
     try:
         core = SipCore(rt, LOCAL, clock)
-        f = Flow()
+        f = Flow(U[0])
         core.on_bytes(invite("f2", U[0], U[1], "private"), f)
         assert f.codes() == [100, 503]
         assert_no_session_state(core, rt, "f2")
@@ -522,7 +541,7 @@ def test_vp1_sig_005_refusal_leaves_no_session_state(env, clock):
 
 
 def test_vp1_sig_005_unregistered_callee_leaves_no_session_state(core, rt):
-    f = Flow()
+    f = Flow(U[0])
     core.on_bytes(invite("f3", U[0], U[1], "private"), f)
     assert f.codes() == [100, 480]
     assert_no_session_state(core, rt, "f3")
@@ -1515,3 +1534,275 @@ def test_a_member_that_never_rings_still_meets_timer_b(core, world, clock):
     core.tick()
     assert world[U[0]].codes() == [100, 480]
     assert world[U[1]].requests("CANCEL") == []
+
+
+# ============================================================ ICD-OP-08: asserted identity
+
+
+def _reg(uri, n=1):
+    return msg("REGISTER", "sip:mcptt.example", f"reg-{uri}-{n}", n, uri, uri,
+               extra=[f"Contact: <{uri}>;expires=600"])
+
+
+def _warning(flow):
+    return [m.headers.get("Warning") or "" for m in flow.messages()
+            if isinstance(m, ReceivedResponse) and m.code >= 300][-1]
+
+
+def test_a_client_may_not_register_someone_elses_address(core):
+    """Registering U[1] from U[2]'s connection would route U[1]'s calls to
+    U[2]. PLT-IDM-004 in its R1 form (ICD-OP-08)."""
+    f = Flow(U[2])
+    core.on_bytes(_reg(U[1]), f)
+    assert f.codes() == [403]
+    assert "asserted identity is not the authenticated one" in _warning(f)
+    assert not core.registrations.is_registered(U[1])
+
+
+def test_a_client_may_not_call_as_someone_else(core, rt, world):
+    """The reviewer's case: F2's connection, From F0. Refused before anything
+    is established or anyone invited, and nothing reaches the audit trail
+    as a session."""
+    spoof = Flow(U[2])
+    core.on_bytes(invite("sp1", U[0], U[1], "private"), spoof)
+    assert spoof.codes() == [403]                  # not even a 100 Trying
+    assert world[U[1]].requests("INVITE") == []
+    assert rt.manager.session("sp1") is None
+
+
+def test_p_asserted_identity_is_what_is_checked(core, world):
+    """The initiator is taken from P-Asserted-Identity when present, so a
+    true From with a false P-Asserted-Identity is refused."""
+    core.on_bytes(invite("sp2", U[0], U[1], "private",
+                         extra=[f"P-Asserted-Identity: <{U[2]}>"]), world[U[0]])
+    assert 403 in world[U[0]].codes()
+    assert world[U[1]].requests("INVITE") == []
+
+
+def test_scheme_and_host_ignore_case_the_user_part_does_not(core):
+    """RFC 3261 19.1.4. Lower-casing the whole URI (the first version) let a
+    certificate for sip:u1@... register sip:U1@..., a different user to the
+    directory and the registration store, which compare user parts exactly."""
+    f = Flow(U[1])
+    core.on_bytes(_reg(U[1].replace("mcptt.example", "MCPTT.example").replace("sip:", "SIP:")
+                       ), f)
+    assert f.codes() == [200]
+    assert core.registrations.is_registered(U[1]) and core.flows_by_user[U[1]] is f
+    g = Flow(U[1])
+    core.on_bytes(_reg(U[1].replace("u1@", "U1@"), n=2), g)
+    assert g.codes() == [403]
+
+
+def test_a_trusted_core_may_assert_any_identity(core, world):
+    """RFC 3325: a peer whose certificate carries a DNS name listed in
+    MCX_SIP_TRUSTED_PEERS authenticated its users itself."""
+    proxy = Flow("proxy", uris=(), dns=("core-client.example",))
+    core.on_bytes(_reg(U[3], n=7), proxy)        # n: not the fixture's REGISTER
+    core.on_bytes(invite("tc1", U[0], U[1], "private"), proxy)
+    assert 200 in proxy.codes() and world[U[1]].requests("INVITE")
+
+
+@pytest.mark.parametrize("dns, uris", [(("other-core.example",), ()),
+                                       ((), ()),
+                                       (("core-client.example.evil",), ())])
+def test_an_untrusted_peer_without_the_identity_asserts_nothing(core, dns, uris):
+    f = Flow("peer", uris=uris, dns=dns)
+    core.on_bytes(_reg(U[1]), f)
+    assert f.codes() == [403]
+
+
+# -- configuration ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [None, "", "a,,b", "bad name!", "-x.example", ",",
+                                   "localhost", "kamailio", "none,core.example",
+                                   "a" * 64 + ".example",
+                                   ".".join(["abcdefghij"] * 24) + ".example",
+                                   "*.example"])
+def test_trusted_peers_must_be_stated(tmp_path, pki, value):
+    from service.config import Config
+    env = sip_env(tmp_path, pki)
+    env.pop("MCX_SIP_TRUSTED_PEERS")
+    if value is not None:
+        env["MCX_SIP_TRUSTED_PEERS"] = value
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(env)
+    assert "MCX_SIP_TRUSTED_PEERS" in str(exc.value)
+
+
+@pytest.mark.parametrize("value, parsed", [
+    ("none", ()), ("NONE", ()),
+    ("B.example, a.example,b.example", ("a.example", "b.example")),
+])
+def test_trusted_peers_are_parsed(tmp_path, pki, value, parsed):
+    from service.config import Config
+    cfg = Config.from_env(sip_env(tmp_path, pki, MCX_SIP_TRUSTED_PEERS=value))
+    assert cfg.sip.trusted_peers == parsed
+
+
+# -- over real TLS -----------------------------------------------------------------------
+
+
+def test_a_directly_attached_user_is_its_certificate(server, pki):
+    """The u0 certificate carries sip:u0@... in subjectAltName: that identity
+    registers, any other is refused."""
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert="u0")
+    try:
+        w.send(_reg(U[0]))
+        assert w.recv().code == 200
+        w.send(_reg(U[1], n=2))
+        assert w.recv().code == 403
+    finally:
+        w.close()
+
+
+def test_a_certificate_naming_nobody_asserts_nothing(server, pki):
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert="anonymous")
+    try:
+        w.send(_reg(U[0]))
+        assert w.recv().code == 403
+    finally:
+        w.close()
+
+
+def test_the_flow_records_what_the_certificate_authenticates(server, pki):
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert="u0")
+    try:
+        w.send(_reg(U[0]))
+        w.recv()
+        flow = core.flows_by_user[U[0]]
+        assert flow.peer_uris == (U[0],) and flow.peer_dns == ()
+    finally:
+        w.close()
+
+
+def test_only_sip_uris_and_dns_names_from_the_certificate_count():
+    """A tel: or https: subjectAltName is not a SIP identity a client may
+    assert; DNS names and URIs are compared lower-cased."""
+    from service.sip_tls import TlsFlow
+    cert = {"subjectAltName": (("URI", "SIP:U0@MCPTT.example"), ("URI", "tel:+331234"),
+                               ("URI", "https://u0.example/"), ("DNS", "Core.Example"),
+                               ("IP Address", "127.0.0.1"))}
+    flow = TlsFlow(None, "peer", "CN=x", cert)
+    assert flow.peer_uris == ("sip:U0@mcptt.example",)       # user part kept
+    assert flow.peer_dns == ("core.example",)
+    assert TlsFlow(None, "peer", None, None).peer_uris == ()
+
+
+
+# -- a dialog belongs to the connection it was set up on (review of ICD-OP-08) -------
+
+
+def _answered(core, world, cid):
+    core.on_bytes(invite(cid, U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    core.on_bytes(answer(req, 200, SDP), world[U[1]])
+    return req
+
+
+def test_a_response_from_another_connection_is_not_the_callees(core, rt, world):
+    """The reviewer's case: a peer with no identity answered u0's call to u1,
+    and media for u1 went to the peer's address."""
+    core.on_bytes(invite("dr1", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    intruder = Flow("intruder", uris=())
+    core.on_bytes(answer(req, 200, SDP, tag="evil"), intruder)
+    assert 200 not in world[U[0]].codes()
+    assert intruder.sent == [] and core.counters["foreign_response"] == 1
+    core.on_bytes(answer(req, 200, SDP), world[U[1]])          # the real answer
+    assert 200 in world[U[0]].codes()
+
+
+def test_a_response_naming_another_call_id_is_dropped(core, world):
+    core.on_bytes(invite("dr2", U[0], U[1], "private"), world[U[0]])
+    req = _leg_invite(world)
+    forged = answer(req, 200, SDP).replace(
+        req.headers.get("Call-ID").encode(), b"someone-else")
+    core.on_bytes(forged, world[U[1]])
+    assert 200 not in world[U[0]].codes()
+
+
+def test_branches_are_not_guessable(core, world):
+    core.on_bytes(invite("dr3", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    branches = {top_branch_of(world[u].requests("INVITE")[0]) for u in U[1:]}
+    assert len(branches) == 3
+    assert all(re.fullmatch(r"z9hG4bKmcx\d+\.[0-9a-f]{16}", b) for b in branches)
+
+
+def top_branch_of(req):
+    from service.sip_txn import top_branch
+    return top_branch(req.headers)
+
+
+@pytest.mark.parametrize("who, from_tag", [("member", "ft"), ("stranger", "ft"),
+                                           ("caller", "wrong-tag")])
+def test_only_the_caller_can_hang_up_the_call(core, rt, world, who, from_tag):
+    """A BYE with the call's Call-ID ended it whoever sent it: every invited
+    member learns that Call-ID from its own leg's (<cid>.legN)."""
+    _answered(core, world, "db1")
+    flow = {"member": world[U[1]], "stranger": Flow("x", uris=()),
+            "caller": world[U[0]]}[who]
+    before = len(flow.sent)
+    core.on_bytes(msg("BYE", LOCAL, "db1", 2, U[0], LOCAL, to_tag="x",
+                      from_tag=from_tag), flow)
+    assert [m.code for m in flow.messages()[before:]
+            if isinstance(m, ReceivedResponse)] == [481]
+    assert rt.manager.session("db1").state.value != "released"
+
+
+def test_the_caller_can_still_hang_up(core, rt, world):
+    _answered(core, world, "db2")
+    core.on_bytes(msg("BYE", LOCAL, "db2", 2, U[0], LOCAL, to_tag="x"), world[U[0]])
+    assert 200 in [m.code for m in world[U[0]].messages()
+                   if isinstance(m, ReceivedResponse) and
+                   m.headers.get("CSeq").endswith("BYE")]
+    assert world[U[1]].requests("BYE")
+
+
+def test_a_leg_bye_from_another_connection_is_refused(core, rt, world):
+    req = _answered(core, world, "db3")
+    bye = msg("BYE", LOCAL, req.headers.get("Call-ID"), 2, U[1], LOCAL,
+              to_tag=re.search(r"tag=([^;>\s]+)", req.headers.get("From")).group(1),
+              from_tag="callee")
+    stranger = Flow("x", uris=())
+    core.on_bytes(bye, stranger)
+    assert stranger.codes() == [481]
+    assert rt.manager.session("db3").state.value != "released"
+
+
+def test_a_live_call_id_cannot_be_reused_by_a_new_invite(core, rt, world):
+    """The reviewer's case: u1, correctly authenticated, took over u0's
+    Call-ID; u0's BYE then ended u1's call and the original was orphaned."""
+    _answered(core, world, "cr9")
+    core.on_bytes(msg("INVITE", LOCAL, "cr9", 2, U[1], LOCAL,
+                      body=mcf.body_for("private", U[2], SDP),
+                      ctype=mcf.CONTENT_TYPE), world[U[1]])
+    assert world[U[1]].codes()[-1] == 400
+    assert world[U[2]].requests("INVITE") == []
+    assert core.calls["cr9"].initiator == U[0]
+
+
+def test_an_ack_from_another_connection_does_not_confirm_the_call(core, rt, world, clock):
+    """The missing-ACK timeout must still end a call whose caller never
+    ACKed, whoever else sent an ACK with its Call-ID and CSeq."""
+    _answered(core, world, "da1")
+    ok = [m for m in world[U[0]].messages()
+          if isinstance(m, ReceivedResponse) and m.code == 200][0]
+    tag = re.search(r"tag=([^;>\s]+)", ok.headers.get("To")).group(1)
+    core.on_bytes(msg("ACK", LOCAL, "da1", 1, U[0], LOCAL, branch="z9hG4bKforged",
+                      to_tag=tag), Flow("x", uris=()))
+    clock.now += 64 * 500 + 1
+    core.tick()
+    assert rt.manager.session("da1") is None or \
+        rt.manager.session("da1").state.value == "released"
+
+
+def test_a_cancel_from_another_connection_is_refused(core, rt, world):
+    core.on_bytes(invite("dc1", U[0], U[1], "private"), world[U[0]])
+    other = Flow("x", uris=())
+    core.on_bytes(_cancel_from_initiator("dc1"), other)
+    assert other.codes() == [481]
+    assert 487 not in world[U[0]].codes()

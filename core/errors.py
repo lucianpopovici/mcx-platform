@@ -30,6 +30,9 @@ HOOK_CONTRACT_VIOLATION = "hook-contract-violation"
 # Ad hoc group calls (TS 24.379 clause 17; warning texts 187 and 189).
 ADHOC_PARTICIPANTS_UNDETERMINED = "adhoc-participants-undetermined"
 ADHOC_TOO_MANY_PARTICIPANTS = "adhoc-too-many-participants"
+# The identity a request asserts is not one its connection authenticated
+# (PLT-ICD-001 ICD-OP-08; PLT-IDM-004 in its R1 form).
+IDENTITY_NOT_AUTHENTICATED = "identity-not-authenticated"
 
 RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
     {
@@ -50,6 +53,7 @@ RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
         HOOK_CONTRACT_VIOLATION,
         ADHOC_PARTICIPANTS_UNDETERMINED,
         ADHOC_TOO_MANY_PARTICIPANTS,
+        IDENTITY_NOT_AUTHENTICATED,
     }
 )
 
@@ -68,6 +72,7 @@ CORE_ORIGINATED: FrozenSet[str] = frozenset(
         # The limit is the call type's, applied by the core. The other ad hoc
         # code is raised by a resolver, so a profile may declare it.
         ADHOC_TOO_MANY_PARTICIPANTS,
+        IDENTITY_NOT_AUTHENTICATED,
     }
 )
 
