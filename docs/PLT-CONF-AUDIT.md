@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.6
+**Version:** 2.7
 **Date:** 2026-09-25
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1596,6 +1596,39 @@ initiator's roles to admission, so every call type declaring
 
 ---
 
+### 4.39 CA-20b — session timers, the session identity and the focus Contact
+
+CA-20 left the dialog-level requirements of TS 24.379 open because each
+commits the platform to a behaviour, not a header. They were read from
+V20.0.0 (clauses 6.3.3.1.2, 6.3.2.1.5.1-2, 6.3.3.2.3.1-2) and RFC 4028,
+RFC 3311 and RFC 5627, and built (PLT-VP-R1 SIP-OP-11, SIP-OP-17):
+
+| Requirement | Source | Where |
+|---|---|---|
+| Contact = MCPTT session identity + `+g.3gpp.mcptt` + ICSI ref + `isfocus` (a base tag, no "+") on INVITEs to callees, 18x and 200 to the originator | 6.3.3.1.2 item 1; 6.3.2.1.5.1 item 1; 6.3.3.2.3.1 items 3-4; 6.3.3.2.3.2 items 5-6; RFC 3840 clause 5 | `Adapter.focus_contact` |
+| Session identity: a GRUU on the server's address of record, one per session, carrying no MCPTT ID or group ID | clause 4.5; RFC 5627 3.1 | `SipCore._session_identity` |
+| `Supported: timer` and `Session-Expires` without refresher on INVITEs to callees | 6.3.3.1.2 items 6-7 | `Adapter._invite` |
+| `Require: timer` and `Session-Expires` on the 200 OK; refresher from the request, else "uac" | 6.3.3.2.3.2 items 2-3; 6.3.2.1.5.2 items 1-2 | `uas_session_timer`, `SipCore._answer_headers` |
+| `Supported: tdialog, norefersub, explicitsub, nosub` on the 200 OK; `norefersub` on 18x | 6.3.3.2.3.2 items 8-10; 6.3.2.1.5.2 items 4-5; 6.3.2.1.5.1 item 2 | `SUPPORTED_ON_ANSWER`, `SUPPORTED_ON_PROVISIONAL` |
+| 422 with `Min-SE: 90` below 90 s; a 422 received is retried with its Min-SE | RFC 4028 sections 4, 5, 7.4, 9 | `uas_session_timer`, `SipCore._retry_leg_422` |
+| A peer without timer support: refresher "uas", no `Require` | RFC 4028 section 9 | `uas_session_timer` |
+| Refresh at half the interval; the watching side sends BYE at the interval less min(32 s, a third) | RFC 4028 section 10 | `service/session_timer.py` |
+| Refresh by UPDATE when the peer allows it, else re-INVITE; 491 on glare, retried after 0-2 s on the initiator's dialog and 2.1-4 s on legs, whose Call-IDs the platform chose; 408/481 end the dialog | RFC 3311; RFC 3261 14.1-14.2; RFC 5057 | `SipCore._send_refresh`, `_refresh_failed` |
+| Compact form `x` for Session-Expires | RFC 4028 section 4 | `core/sip.py` `_COMPACT` |
+
+One deviation, deliberate: 6.3.3.2.3.2 items 2-3 and 6.3.2.1.5.2 items 1-2
+write `refresher=uac` and `Require: timer` unconditionally. For a peer that
+lists no `timer` support, RFC 4028 section 9 forbids requiring it and makes
+the answerer the refresher. The platform follows RFC 4028, and keeps the
+timer itself, so a caller without timers is still found out when it
+vanishes. A requested `refresher=uas` is honoured (section 9: the request's
+choice stands).
+
+Two things are carried as the specification says without the behaviour behind
+them, decided 2026-09-25: the four REFER option tags (the platform does not
+implement REFER, and Allow omits it), and `explicitsub`/`nosub` from RFC 7614.
+The limits of the refresh implementation are recorded as PLT-VP-R1 SIP-OP-18.
+
 ## 5. NOT verified — the work that remains
 
 CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
@@ -1629,7 +1662,7 @@ ordered by consequence:
 | IWF-OP-01 | TS 24.379 reserves 301-350; TS 29.379 allocates 300 | Both tables | **Open, for 3GPP CT1.** See 4.35. No effect today — there is no receive-side warning parser — but it would be a defect in one. |
 | IWF-OP-02 | `CT_MC_INFO` declared and unused | TS 29.379, throughout | **Open, low consequence.** See 4.35. The spelling is right; nothing builds the body. |
 | CA-10 | `+` prefix on feature tags in `Contact` | IETF RFC 3840 clause 5 | **Closed, and the code was right.** See 4.21. |
-| CA-20 | Service-layer messages, and the MCPTT info body in `core/sip.py` | TS 24.379 annex F.1, 6.3.2.1.5, 6.3.2.2.3, 6.3.2.2.6.2; RFC 3261 §12 | **20a closed, 20b open.** See 4.36. The platform read and wrote a body format that does not exist, so no conformant client could call it. Fixed, schema-validated and re-run through Kamailio. The session-timer, Target-Dialog, REFER and session-identity requirements remain (20b), and are feature work. |
+| CA-20 | Service-layer messages, and the MCPTT info body in `core/sip.py` | TS 24.379 annex F.1, 6.3.2.1.5, 6.3.2.2.3, 6.3.2.2.6.2; RFC 3261 §12 | **Closed (20a 2026-09-24, 20b 2026-09-25).** See 4.36. The platform read and wrote a body format that does not exist, so no conformant client could call it. Fixed, schema-validated and re-run through Kamailio. 20b, the session timers, session identity and focus Contact, is built: see 4.39. REFER remains unimplemented; its option tags are carried. |
 
 **Confirmed against a specification and pinned by test:** the 14 RTCP field
 IDs, the `MCPT` name, PT=204, the floor control subtypes, the Deny and Revoke
@@ -1746,6 +1779,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.7 | 2026-09-25 | CA-20b closed (4.39): session timers (RFC 4028) with in-dialog UPDATE and re-INVITE, the session identity and the focus Contact, read from TS 24.379 V20.0.0 and the RFCs. |
 | 2.6 | 2026-09-25 | CA-26: ad hoc refusal rendering (150, 185, 186, 3B/3C bodies), read from 17.4.2.2 and table 4.4.2-2 of two versions. |
 | 2.5 | 2026-09-25 | CA-25: authorisation before target determination, read from 17.4.2.2 and 10.1.1.4.2. One deliberate deviation (prearranged groups are authorised first too) and one gap (warnings 185/186, ADHOC-OP-05). |
 | 2.4 | 2026-09-25 | CA-24: the PLMN identity format for the network profile (NET-OP-01), read from `tPlmnIdentityFormat` in three versions. How a two-digit MNC is written is not specified (PLT-ICD-001 ICD-OP-12). |

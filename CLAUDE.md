@@ -17,7 +17,7 @@ one release image per profile around a core that is identical in every image,
 and the profile still named at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 966 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 1107 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -187,7 +187,10 @@ ADHOC-OP-04), checked before any entry is resolved. Every process also names
 a network profile, `MCX_NETWORK_FILE` (required, no default; NET-OP-01): the
 PLMNs, the map from reported cells to locations, and the trusted SIP cores
 with a CA of their own (ICD-OP-10). Its `name/version/hash` joins the profile
-and release in every audit record. The conformance matrix being
+and release in every audit record. With SIP enabled, `MCX_SESSION_EXPIRES`
+(required, no default, at least 90) is the RFC 4028 session interval: how long
+a call whose far end vanished without a BYE can outlive it (SIP-OP-17). The
+conformance matrix being
 green does not mean every call type is reachable. Release numbers live in
 `core/release.py` and nowhere else — `VP1-BND-022` fails a build that compares
 a release to a literal anywhere else.
