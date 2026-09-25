@@ -629,7 +629,7 @@ def test_strict_release_values_are_case_insensitive(env):
 @pytest.mark.parametrize("value", [None, "", "  ", "0", "-3", "1.5", "ten", "+5"])
 def test_the_ad_hoc_list_cap_must_be_stated_as_a_positive_integer(env, value):
     """Required with no default: an unbounded list is unbounded work done
-    before the caller is authorised."""
+    before any participant is resolved."""
     e = {k: v for k, v in env.items() if k != "MCX_ADHOC_LIST_MAX"}
     if value is not None:
         e["MCX_ADHOC_LIST_MAX"] = value

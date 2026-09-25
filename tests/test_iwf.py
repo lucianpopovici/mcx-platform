@@ -220,6 +220,21 @@ def test_inbound_gets_no_privilege_from_the_gateway(wired):
     assert refusal.reason_code == "unknown-target"
 
 
+def test_inbound_is_authorised_before_its_target_is_looked_up(wired):
+    """ICD-OP-09 for a gateway's request: map_inbound, then §8.1 from step 0.
+    An undeclared call type is refused by authorise, before resolve."""
+    manager, sink, _ = wired
+    manager.receive_inbound({
+        "request_id": "in-order", "call_type": "private",
+        "initiator": "sip:u0@mcptt.example", "target": "sip:u1@mcptt.example",
+        "system": "tetra"})
+    calls = [(r.detail["interface"], r.detail["method"])
+             for r in sink.for_session("in-order")
+             if r.type is RecordType.HOOK_INVOCATION]
+    assert calls[:4] == [("IF-IWF", "map_inbound"), ("IF-IDR", "identities_of"),
+                         ("IF-SES", "authorise"), ("IF-IDR", "resolve")]
+
+
 def test_inbound_priority_assertion_is_advisory(wired):
     """A foreign system that could set its own priority could pre-empt local
     emergency calls. IF-PRI decides, from the mapped request."""

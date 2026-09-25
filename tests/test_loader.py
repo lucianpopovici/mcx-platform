@@ -465,10 +465,9 @@ def test_vp1_hook_024_determinism(mcx):
 
 
 def test_vp1_hook_030_admission_refuses_by_return_value(mcx):
-    res = Resolution(kind=ResolutionKind.USER, members=("sip:a@mcptt.example",))
-    priority = mcx.hooks.priority_policy.evaluate(request_for("private"), res)
-    verdict = mcx.hooks.session_policy.admit(
-        request_for("no-such-call-type"), res, priority)
+    """Since ICD 0.13 an undeclared call type is refused by authorise
+    (§5.0), before any lookup; still a return value, not an exception."""
+    verdict = mcx.hooks.session_policy.authorise(request_for("no-such-call-type"))
     assert verdict.permitted is False
     assert verdict.reason_code == "call-type-not-permitted"
 
@@ -477,10 +476,14 @@ def test_vp1_hook_031_reason_codes_declared(mcx):
     declared = set(mcx.profile.admission.reject_reason_codes)
     res = Resolution(kind=ResolutionKind.USER, members=("sip:a@mcptt.example",))
     priority = mcx.hooks.priority_policy.evaluate(request_for("private"), res)
+    policy = mcx.hooks.session_policy
     for ct in ("no-such-call-type", "private"):
-        verdict = mcx.hooks.session_policy.admit(request_for(ct), res, priority)
+        verdict = policy.authorise(request_for(ct))
         if not verdict.permitted:
             assert verdict.reason_code in declared
+    busy = request_for("private", attributes={"core.active_sessions": "2000"})
+    verdict = policy.admit(busy, res, priority)
+    assert not verdict.permitted and verdict.reason_code in declared
 
 
 def test_admission_enforces_participant_limit(mcx):

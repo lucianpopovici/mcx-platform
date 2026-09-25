@@ -132,15 +132,28 @@ class TableSessionPolicy:
 
     # -- admission ------------------------------------------------------
 
-    def admit(self, request: SessionRequest, resolution: Resolution,
-              priority: PriorityDecision) -> Admission:
+    def authorise(self, request: SessionRequest) -> Admission:
+        """PLT-ICD-001 §5.0: the call type exists in this profile, and the
+        initiator holds a role allowed to start it. Nothing here reads the
+        target, so the answer is the same whoever or whatever is called."""
         declared = self._profile.call_type(request.call_type)
         if declared is None:
             return self._refuse(CALL_TYPE_NOT_PERMITTED)
-
         if declared.initiator_roles and not self._initiator_permitted(request,
                                                                      declared):
             return self._refuse(NOT_AUTHORISED)
+        return Admission(permitted=True, reason_code="")
+
+    def admit(self, request: SessionRequest, resolution: Resolution,
+              priority: PriorityDecision) -> Admission:
+        # PRE (§5.1): authorise permitted this request. A call type it let
+        # through that the table does not declare is a defect of the profile
+        # (a subclass's authorise, say), reported as one, not as a crash.
+        declared = self._profile.call_type(request.call_type)
+        if declared is None:
+            raise HookContractViolation(
+                f"admit called for undeclared call type {request.call_type!r}; "
+                "authorise should have refused it")
 
         if declared.max_participants is not None and \
                 len(resolution.members) > declared.max_participants:

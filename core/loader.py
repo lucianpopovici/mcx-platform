@@ -42,7 +42,7 @@ HOOK_INTERFACES: Mapping[str, Tuple[type, Tuple[str, ...]]] = {
                            "determine_participants")),
     "priority_policy": (hook_ifaces.PriorityPolicy, ("evaluate", "compare")),
     "session_policy": (hook_ifaces.SessionPolicy,
-                       ("admit", "decide", "floor_policy")),
+                       ("authorise", "admit", "decide", "floor_policy")),
     "bearer_selector": (hook_ifaces.BearerSelector, ("select", "on_path_event")),
     "interworking_gateway": (hook_ifaces.InterworkingGateway,
                              ("route", "map_inbound")),

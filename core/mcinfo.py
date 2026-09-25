@@ -317,12 +317,17 @@ def _esc(s: str) -> str:
              .replace('"', "&quot;"))
 
 
-def render(info: McInfo, release: Release) -> str:
+def render(info: McInfo, release: Release, adhoc: Optional[bool] = None) -> str:
     """An mcptt-info body for `info`, valid against the annex F.1 schema of
-    `release`. Raises McInfoError for a fact that release cannot express."""
+    `release`. Raises McInfoError for a fact that release cannot express.
+
+    `adhoc` says where the emergency indication goes when the body carries no
+    session type (a refusal, TS 24.379 17.4.2.2 step 3B); otherwise the
+    session type decides."""
     if info.session_type and info.session_type not in SESSION_TYPES:
         raise McInfoError(f"unknown session-type {info.session_type!r}")
-    adhoc = info.session_type == "adhoc"
+    if adhoc is None:
+        adhoc = info.session_type == "adhoc"
     if adhoc and info.emergency and not supports_mc_indicator(release, "adhoc-emergency-ind"):
         raise McInfoError(f"{release} has no ad hoc emergency indication")
     el = {}

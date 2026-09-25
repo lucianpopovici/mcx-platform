@@ -3,6 +3,8 @@
 Implements PLT-ICD-001 §8.1 exactly and in order, with no step reordered and no
 compensating call to a hook already invoked when a later step fails.
 
+  0  IF-IDR.identities_of, IF-SES.authorise
+                       -- refusal stops here, before the target is looked up
   1  IF-IDR.resolve
   2  IF-IWF.route
   3  IF-PRI.evaluate
@@ -43,6 +45,7 @@ from .errors import (
     HookContractViolation,
 )
 from .hooks import (
+    Admission,
     BearerDecision,
     MediaKind,
     ResolutionKind,
@@ -85,6 +88,10 @@ class Signal:
 class Refusal:
     reason_code: str
     detail: str = ""
+    # The §8.1 step that refused, when a transport needs to say more than the
+    # code: "authorise" for step 0 (TS 24.379 17.4.2.2 steps 3B-5 answer an
+    # authorisation refusal of an ad hoc call differently). Empty otherwise.
+    step: str = ""
 
 
 @dataclass
@@ -182,6 +189,24 @@ class SessionManager:
         request = self._located(request)
 
         try:
+            # 0 — IF-SES.authorise, before anything about the target is
+            # looked up (ICD-OP-09; TS 24.379 17.4.2.2 authorises in steps 4
+            # and 5 and determines participants in step 12). Otherwise an
+            # unauthorised caller learns from the refusal whether a user
+            # exists or a role is held: "nobody matches" against "not allowed".
+            #
+            # The roles are the core's, written once, here: every hook from
+            # now on sees them, and none sees what the request carried
+            # under that name (review of ICD-OP-09).
+            request = self._with_roles(request, invoker)
+            authorisation = invoker.call(
+                "IF-SES", "authorise", self._hooks.session_policy.authorise,
+                self._without_target(request), post=self._check_admission)
+            if not authorisation.permitted:
+                return self._refuse(cid, request, authorisation.reason_code,
+                                    "not authorised to start this call type",
+                                    step="authorise")
+
             # 1 — IF-IDR. An ad hoc group call names no group; its members
             # come from the caller's list or criteria (§3.5).
             if request.adhoc:
@@ -249,10 +274,11 @@ class SessionManager:
                                     request, resolution)
 
             # 4 — IF-SES.admit
-            enriched = self._with_capacity(request, invoker)
+            enriched = self._with_capacity(request)
             admission = invoker.call("IF-SES", "admit",
                                      self._hooks.session_policy.admit,
-                                     enriched, resolution, priority)
+                                     enriched, resolution, priority,
+                                     post=self._check_admission)
             if not admission.permitted:
                 return self._refuse(cid, request, admission.reason_code,
                                     "admission refused")
@@ -483,16 +509,11 @@ class SessionManager:
     def _has_floor_media(self, request: SessionRequest) -> bool:
         return any(m in (MediaKind.VOICE, MediaKind.VIDEO) for m in request.media)
 
-    def _with_capacity(self, request: SessionRequest,
-                       invoker: Invoker) -> SessionRequest:
-        """Supply what the admission hook needs and cannot find out itself:
-        current session counts, and the functional identities the initiator
-        holds (`initiator.roles`, read by call types that restrict who may
-        start them), looked up through IF-IDR `identities_of`.
-
-        FINDING: PLT-ICD-001 §5.1 INV-2 says the core supplies these, but
-        `SessionRequest` has no field for them, so they travel in `attributes`.
-        An explicit field belongs in ICD v0.2.
+    def _with_roles(self, request: SessionRequest,
+                    invoker: Invoker) -> SessionRequest:
+        """The functional identities the initiator holds (`initiator.roles`,
+        read by call types that restrict who may start them), looked up
+        through IF-IDR `identities_of`, for authorisation and admission.
 
         FINDING (ADHOC-OP-01 work, 2026-09-25): nothing supplied
         `initiator.roles` before, so every call type declaring
@@ -500,7 +521,6 @@ class SessionManager:
         Always written by the core, never taken from the request.
         """
         attributes = dict(request.attributes)
-        attributes["core.active_sessions"] = str(self._platform.active_sessions())
         roles = invoker.call("IF-IDR", "identities_of",
                              self._hooks.identity_resolver.identities_of,
                              request.initiator)
@@ -508,6 +528,43 @@ class SessionManager:
         # replace(), not a field-by-field rebuild: a rebuild silently dropped
         # every field added to SessionRequest after it was written.
         return dataclasses.replace(request, attributes=attributes)
+
+    @staticmethod
+    def _without_target(request: SessionRequest) -> SessionRequest:
+        """What authorise may see (§5.0 INV-1): the request with every field
+        that names or selects the called party emptied. The guarantee that
+        the answer cannot depend on the target is then structural, not a
+        convention each profile must keep."""
+        return dataclasses.replace(request, target="", participants=(),
+                                   participant_criteria=None,
+                                   adhoc_alert_group=False)
+
+    def _with_capacity(self, request: SessionRequest) -> SessionRequest:
+        """What admission needs and cannot find out itself: current session
+        counts.
+
+        FINDING: PLT-ICD-001 §5.1 INV-2 says the core supplies these, but
+        `SessionRequest` has no field for them, so they travel in `attributes`.
+        An explicit field belongs in ICD v0.2.
+        """
+        attributes = dict(request.attributes)
+        attributes["core.active_sessions"] = str(self._platform.active_sessions())
+        return dataclasses.replace(request, attributes=attributes)
+
+    def _check_admission(self, admission: Admission) -> None:
+        """PLT-ICD-001 §5.1 POST-2 and POST-3, for authorise and admit alike:
+        a permission carries no code, and a refusal carries a code the
+        profile declared. The core checks it rather than trust the hook:
+        a refusal with no code would reach the caller unexplained."""
+        if admission.permitted:
+            if admission.reason_code:
+                raise HookContractViolation(
+                    f"permitted, with reason code {admission.reason_code!r}")
+        elif admission.reason_code not in \
+                self._profile.admission.reject_reason_codes:
+            raise HookContractViolation(
+                f"refused with reason code {admission.reason_code!r}, which the "
+                "profile does not declare")
 
     def _check_resolution(self, resolution: Resolution) -> None:
         """PLT-ICD-001 §3.2 POST-1: kind and member count must agree."""
@@ -589,8 +646,8 @@ class SessionManager:
             return None, (ADHOC_TOO_MANY_PARTICIPANTS,
                           f"{len(listed)} participants listed, limit {limit}")
         # The deployment's cap, checked before any entry is resolved: every
-        # entry costs a hook call and an audit record, and this runs before
-        # the caller is authorised (PLT-VP-R1 ADHOC-OP-04, ICD-OP-09).
+        # entry costs a hook call and an audit record (PLT-VP-R1
+        # ADHOC-OP-04). The caller has been authorised by now (ICD-OP-09).
         cap = self._adhoc_list_max
         if cap is not None and len(listed) > cap:
             return None, (ADHOC_TOO_MANY_PARTICIPANTS,
@@ -657,7 +714,7 @@ class SessionManager:
             raise HookContractViolation("determine_participants returned duplicates")
 
     def _refuse(self, cid: str, request: SessionRequest, reason_code: str,
-                detail: str):
+                detail: str, step: str = ""):
         # PLT-HOK-033: nothing is established, no invitation is sent.
         self._auditor.emit(RecordType.SESSION_REFUSED, cid,
                            call_type=request.call_type,
@@ -666,7 +723,7 @@ class SessionManager:
         return None, (Signal(SignalType.RESPONSE_REJECT,
                              target=request.initiator,
                              detail={"reason_code": reason_code}),), \
-            Refusal(reason_code=reason_code, detail=detail)
+            Refusal(reason_code=reason_code, detail=detail, step=step)
 
     def _fail(self, cid: str, request: SessionRequest, failure: HookFailure):
         self._auditor.emit(RecordType.SESSION_FAILED, cid,
