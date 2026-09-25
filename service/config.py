@@ -159,6 +159,11 @@ class Config:
     recorder: str
     bearer: str
     strict_release: bool
+    # ADHOC-OP-04 (decided 2026-09-25): how many entries an ad hoc caller's
+    # participant list may hold, whatever the call type -- the deployment's
+    # counterpart of the service configuration's <max-no-participants>
+    # (TS 24.379 17.4.2.2 step 6, warning 189). Required, no default.
+    adhoc_list_max: int
     host: str
     port: int
     groups_file: Optional[Path]
@@ -231,6 +236,17 @@ class Config:
             raise StartupRefused(
                 f"MCX_STRICT_RELEASE={strict!r} must be 'true' or 'false'")
 
+        raw_max = (env.get("MCX_ADHOC_LIST_MAX") or "").strip()
+        if not raw_max:
+            raise StartupRefused(
+                "MCX_ADHOC_LIST_MAX is not set: state how many entries an ad hoc "
+                "caller's participant list may hold (a positive integer); there "
+                "is no default, because an unbounded list is unbounded work "
+                "before the caller is authorised")
+        if not raw_max.isdigit() or int(raw_max) < 1:
+            raise StartupRefused(
+                f"MCX_ADHOC_LIST_MAX={raw_max!r} must be a whole number of at least 1")
+
         try:
             port = int(env.get("MCX_HTTP_PORT") or "8080")
         except ValueError as exc:
@@ -250,6 +266,7 @@ class Config:
             recorder=recorder,
             bearer=bearer,
             strict_release=STRICT_RELEASE_VALUES[strict],
+            adhoc_list_max=int(raw_max),
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,

@@ -131,7 +131,8 @@ class SessionManager:
                  platform: Optional[Platform] = None,
                  clock: Optional[Callable[[], int]] = None,
                  functions: Optional[Mapping[str, str]] = None,
-                 defer_floor_start: bool = False) -> None:
+                 defer_floor_start: bool = False,
+                 adhoc_list_max: Optional[int] = None) -> None:
         self._loaded = loaded
         self._hooks = loaded.hooks
         self._profile = loaded.profile
@@ -148,6 +149,10 @@ class SessionManager:
         # sets this so the initiator's grant timers do not run while callees
         # are still ringing.
         self._defer_floor = defer_floor_start
+        # The deployment's cap on an ad hoc participant list (the host's
+        # MCX_ADHOC_LIST_MAX, required there). None only for a manager built
+        # by hand, and then the call type's limit alone applies.
+        self._adhoc_list_max = adhoc_list_max
 
     # -- observation ----------------------------------------------------
 
@@ -537,9 +542,10 @@ class SessionManager:
         """(resolution, None), or (None, (reason_code, detail)) to refuse.
 
         In the order of 17.4.2.2 (Rel-18 numbering):
-          step 6   a list longer than the limit: 189. The limit is the call
-                   type's `max_participants`; the caller is not counted,
-                   since it is never invited.
+          step 6   a list longer than the limit: 189. The limits are the call
+                   type's `max_participants` and the deployment's list cap
+                   (ADHOC-OP-04); the caller is not counted, since it is
+                   never invited.
           step 7   a list AND criteria: 187.
           step 7A  a call following an ad hoc emergency alert names the
                    alert's group; this platform keeps no such groups, so
@@ -561,6 +567,13 @@ class SessionManager:
         if limit is not None and len(listed) > limit:
             return None, (ADHOC_TOO_MANY_PARTICIPANTS,
                           f"{len(listed)} participants listed, limit {limit}")
+        # The deployment's cap, checked before any entry is resolved: every
+        # entry costs a hook call and an audit record, and this runs before
+        # the caller is authorised (PLT-VP-R1 ADHOC-OP-04, ICD-OP-09).
+        cap = self._adhoc_list_max
+        if cap is not None and len(listed) > cap:
+            return None, (ADHOC_TOO_MANY_PARTICIPANTS,
+                          f"{len(listed)} participants listed, deployment limit {cap}")
         if listed and criteria is not None:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
                           "both a participant list and criteria were given")

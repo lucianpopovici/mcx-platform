@@ -38,12 +38,17 @@ def clock():
 
 
 @pytest.fixture
-def rt(tmp_path, pki, clock):
+def list_max():
+    return "100"
+
+
+@pytest.fixture
+def rt(tmp_path, pki, clock, list_max):
     g = tmp_path / "frmcs-groups.yaml"
     g.write_text(f"groups:\n  - id: 'grp:yard'\n    members: {json.dumps(F[1:3])}\n"
                  f"users: {json.dumps(F)}\n")
     env = sip_env(tmp_path, pki, MCX_PROFILE="frmcs", MCX_RELEASE="19",
-                  MCX_GROUPS_FILE=str(g))
+                  MCX_GROUPS_FILE=str(g), MCX_ADHOC_LIST_MAX=list_max)
     r = build_runtime(env, clock, platform=Platform())
     resolver = r.loaded.hooks.identity_resolver
     resolver.bind("shunting-team-leader", F[0], YARD)   # may start shunting calls
@@ -469,3 +474,64 @@ def test_warn_text_is_a_valid_quoted_string():
     characters removed, so the warn-text cannot end early."""
     from service.sip_core import _quoted
     assert _quoted('a"b\\c\r\nX: y') == 'a\\"b\\\\c  X: y'
+
+
+# ============================================================ the deployment's list cap (ADHOC-OP-04)
+
+
+def _count_resolves(rt):
+    resolver = rt.loaded.hooks.identity_resolver
+    calls = []
+    original = resolver.resolve
+
+    def counting(target, request):
+        calls.append(target)
+        return original(target, request)
+    resolver.resolve = counting
+    return calls
+
+
+@pytest.mark.parametrize("list_max", ["3"])
+def test_a_list_over_the_deployment_cap_is_refused_189_before_any_lookup(core, rt, world):
+    """The cap applies before a single entry is resolved: that is its point."""
+    calls = _count_resolves(rt)
+    listed = [F[1], F[2], "sip:p1@frmcs.example", "sip:p2@frmcs.example"]
+    core.on_bytes(adhoc_invite("cap1", mcf.adhoc_xml(), mcf.resource_list(listed)),
+                  world[F[0]])
+    code, warning = refusal(world[F[0]])
+    assert code == 403 and "189 " in warning
+    assert calls == []
+    assert not any(world[u].requests("INVITE") for u in F[1:])
+
+
+@pytest.mark.parametrize("list_max", ["3"])
+def test_a_list_at_the_cap_goes_ahead_and_the_caller_is_not_counted(core, world):
+    listed = [F[0], F[1], F[2], "sip:p1@frmcs.example"]
+    core.on_bytes(adhoc_invite("cap2", mcf.adhoc_xml(), mcf.resource_list(listed)),
+                  world[F[0]])
+    assert world[F[1]].requests("INVITE") and world[F[2]].requests("INVITE")
+
+
+@pytest.mark.parametrize("list_max", ["2"])
+def test_the_cap_bounds_a_call_type_that_declares_no_limit(core, rt, world):
+    """rec-broadcast declares no max_participants: before the cap, its list
+    was unbounded (the reviewer's 20,001-entry case)."""
+    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], None)
+    calls = _count_resolves(rt)
+    listed = [F[1], F[2], "sip:p1@frmcs.example"]
+    core.on_bytes(adhoc_invite("cap3", mcf.adhoc_xml(emergency=True),
+                               mcf.resource_list(listed)), world[F[0]])
+    code, warning = refusal(world[F[0]])
+    assert code == 403 and "189 " in warning and calls == []
+
+
+@pytest.mark.parametrize("list_max", ["1"])
+def test_the_cap_does_not_limit_criteria(core, rt, world):
+    """The decision was a cap on list length; criteria are bounded by the
+    call type's max_participants alone."""
+    many = (F[1], F[2], F[3])
+    rt.loaded.hooks.identity_resolver.determine_participants = \
+        lambda criteria, request: Resolution(kind=ResolutionKind.GROUP, members=many)
+    core.on_bytes(adhoc_invite("cap4", mcf.adhoc_xml(criteria="train-driver")),
+                  world[F[0]])
+    assert all(world[u].requests("INVITE") for u in many)

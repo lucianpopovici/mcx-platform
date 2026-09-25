@@ -219,7 +219,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                  config.recorder == RECORDER_STUB,
                                  config.bearer == BEARER_STUB),
                              clock=clock, functions=role_functions(config),
-                             defer_floor_start=config.sip is not None)
+                             defer_floor_start=config.sip is not None,
+                             adhoc_list_max=config.adhoc_list_max)
 
     groups = GroupDirectory(load_groups(config.groups_file),
                             load_users(config.groups_file))

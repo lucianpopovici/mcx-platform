@@ -129,7 +129,7 @@ def start_platform(work: Path, port: int, recorder: str = "stub") -> Proc:
     env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
     env.update({
         "MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-        "MCX_RECORDER": recorder, "MCX_BEARER": "stub", "MCX_STRICT_RELEASE": "true",
+        "MCX_RECORDER": recorder, "MCX_BEARER": "stub", "MCX_STRICT_RELEASE": "true", "MCX_ADHOC_LIST_MAX": "100",
         "MCX_DATA_DIR": str(data), "MCX_GROUPS_FILE": str(groups),
         "MCX_HTTP_PORT": str(free_port()),
         "MCX_SIP_LISTEN": f"127.0.0.1:{port}", "MCX_SIP_URI": AS_URI,

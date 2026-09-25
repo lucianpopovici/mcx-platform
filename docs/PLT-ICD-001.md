@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.7 (draft)
+**Version:** 0.8 (draft)
 **Date:** 2026-09-24
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -257,7 +257,7 @@ profile knowledge, so it is a hook. `SessionRequest` gains
 
 | ID | Rule |
 |---|---|
-| ICD-ADH-001 | A list longer than the call type's `max_participants` (the caller is not counted) is refused `adhoc-too-many-participants` (warning 189, step 6). Criteria that find more members than the limit are refused the same way. |
+| ICD-ADH-001 | A list longer than the call type's `max_participants`, or longer than the deployment's cap (`MCX_ADHOC_LIST_MAX`, required, no default; v0.8), is refused `adhoc-too-many-participants` (warning 189, step 6). The caller is not counted. Both checks come before any entry is resolved. Criteria that find more members than the call type's limit are refused the same way; the deployment cap is on lists only. |
 | ICD-ADH-002 | A list and criteria together (step 7), a call following an ad hoc emergency alert (step 7A: this platform keeps no alert groups), and a request with neither are refused `adhoc-participants-undetermined` (warning 187). |
 | ICD-ADH-003 | Each listed entry is resolved with `resolve`. Entries that yield no user are left out: unknown, outside the domains, a group, or an unheld or location-less functional identity. `resolver-unavailable` still fails the call. If nobody is left, the refusal is 187. The caller is never a member. |
 | ICD-ADH-004 | The core generates the ad hoc group identity (`sip:adhoc-<hash>@<first profile domain>`). It travels as `<mcptt-calling-group-id>` in each member's INVITE (17.4.2.1.1 item 4b) and in the 200 OK to the caller (17.4.2.2). Criteria, when used, travel in both as well (item 4c). |
@@ -587,6 +587,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.8 | 2026-09-25 | ICD-ADH-001: the deployment-wide list cap `MCX_ADHOC_LIST_MAX` (PLT-VP-R1 ADHOC-OP-04). A minor change: no hook or parameter object changes. |
 | 0.7 | 2026-09-25 | Major change (ICD-VER-003): IF-IDR gains `determine_participants` (§3.5). `SessionRequest` gains the ad hoc fields. §8.1 gains the ad hoc variant of step 1 and step 4a (`identities_of`, whose result admission now reads, §3.4). §9 gains two reason codes. All in-tree profiles implement the method in the same change set: the directory resolver refuses criteria, and the functional resolver matches functional identities. ICD-OP-08 and ICD-OP-09 opened. |
 | 0.6 | 2026-09-24 | §2.7 added: the ring limit `no_answer_s`, required on every call type (ICD-RNG-001 to 004). It replaces the fixed 64·T1 limit (PLT-VP-R1 SIP-OP-15). All three in-tree profiles updated in the same change set, at 32 s. |
 | 0.5 | 2026-09-24 | ICD-SIG-006: `MCX_STRICT_RELEASE` decides whether a call type the release cannot carry is fatal at startup (REL-OP-02). |

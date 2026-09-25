@@ -54,7 +54,7 @@ def env(tmp_path):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
     return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100",
             "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
             "MCX_HTTP_PORT": "0"}
 
@@ -618,3 +618,24 @@ def test_strict_release_must_be_stated_as_true_or_false(env, value):
 def test_strict_release_values_are_case_insensitive(env):
     for value in ("TRUE", "False"):
         build_runtime({**env, "MCX_STRICT_RELEASE": value}, _clock())
+
+
+# -- MCX_ADHOC_LIST_MAX (ADHOC-OP-04, decided 2026-09-25) ----------------------
+
+@pytest.mark.parametrize("value", [None, "", "  ", "0", "-3", "1.5", "ten", "+5"])
+def test_the_ad_hoc_list_cap_must_be_stated_as_a_positive_integer(env, value):
+    """Required with no default: an unbounded list is unbounded work done
+    before the caller is authorised."""
+    e = {k: v for k, v in env.items() if k != "MCX_ADHOC_LIST_MAX"}
+    if value is not None:
+        e["MCX_ADHOC_LIST_MAX"] = value
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, _clock())
+    assert "MCX_ADHOC_LIST_MAX" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["1", "250", " 7 "])
+def test_the_stated_ad_hoc_list_cap_reaches_the_session_layer(env, value):
+    rt = build_runtime({**env, "MCX_ADHOC_LIST_MAX": value}, _clock())
+    assert rt.config.adhoc_list_max == int(value)
+    assert rt.manager._adhoc_list_max == int(value)
