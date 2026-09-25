@@ -95,7 +95,7 @@ class UA:
         self.log: List[tuple] = []          # (direction, first line, full text)
         self.lock = threading.Lock()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.load_verify_locations(f"{pki}/ca.crt")
+        ctx.load_verify_locations(f"{pki}/trust.crt")    # platform and cores
         ctx.load_cert_chain(f"{pki}/{name}.crt", f"{pki}/{name}.key")
         ctx.check_hostname = False
         self.sock = ctx.wrap_socket(socket.create_connection((host, port), timeout=10))

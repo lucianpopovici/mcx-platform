@@ -48,11 +48,14 @@ KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 # anyone having chosen to.
 STRICT_RELEASE_VALUES = {"true": True, "false": False}
 
+# Settings whose content moved into the network profile (NET-OP-01).
+MOVED_TO_NETWORK = ("MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS")
+
 
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 
 
-def _is_fqdn(name: str) -> bool:
+def is_fqdn(name: str) -> bool:
     """RFC 1035 2.3.4 / RFC 1123 2.1: labels of 1-63 characters, 253 in all,
     and at least two labels -- which also keeps the keyword "none" from ever
     being read as a name in a list."""
@@ -71,11 +74,8 @@ class SipConfig:
     ca: Optional[Path]
     client_auth: str            # "required" | "optional"
     roles: Tuple[str, ...]
-    # ICD-OP-08 (decided 2026-09-25): peers whose certificate carries one of
-    # these DNS names are SIP cores trusted to assert any identity
-    # (P-Asserted-Identity, RFC 3325 trust domain). Every other peer may
-    # assert only the sip: URIs in its own certificate. Empty: none trusted.
-    trusted_peers: Tuple[str, ...] = ()
+    # The trusted SIP cores and their CA (ICD-OP-08, ICD-OP-10) are network
+    # data: see service/network.py.
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -133,23 +133,7 @@ class SipConfig:
             raise StartupRefused(
                 "MCX_SIP_ROLES=participating alone is not supported: the "
                 "controlling function is not reachable remotely (SIP-OP-03)")
-        # Required, no default: "none", or DNS names from trusted cores'
-        # certificates. A default of "trust everyone" is what this replaced.
-        raw_trusted = need("MCX_SIP_TRUSTED_PEERS")
-        if raw_trusted.lower() == "none":
-            trusted: Tuple[str, ...] = ()
-        else:
-            trusted = tuple(sorted({t.strip().lower()
-                                    for t in raw_trusted.split(",")}))
-            if not trusted or not all(_is_fqdn(t) for t in trusted):
-                # Fully qualified names only: a single label such as
-                # "localhost" is on many certificates, and trusting it would
-                # trust nearly everyone (review of ICD-OP-08).
-                raise StartupRefused(
-                    f"MCX_SIP_TRUSTED_PEERS={raw_trusted!r}: give 'none', or a "
-                    "comma-separated list of fully qualified DNS names from the "
-                    "trusted cores' certificates")
-        return SipConfig(host, port, uri, cert, key, ca, auth, roles, trusted)
+        return SipConfig(host, port, uri, cert, key, ca, auth, roles)
 
 
 @dataclass(frozen=True)
@@ -202,9 +186,9 @@ class Config:
     host: str
     port: int
     groups_file: Optional[Path]
-    # MCX_CELLS_FILE: a path, "none", or unset (None). Whether unset is
-    # allowed depends on the profile, so the runtime decides (PRF-OP-03).
-    cells: Optional[str] = None
+    # NET-OP-01 (decided 2026-09-25): the network profile -- PLMNs, cell
+    # map, trusted SIP cores and their CA. Required, no default.
+    network: Path
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
 
@@ -292,6 +276,20 @@ class Config:
         if not 0 <= port <= 65535:
             raise StartupRefused(f"MCX_HTTP_PORT {port} is out of range")
 
+        for moved in MOVED_TO_NETWORK:
+            if moved in env:
+                # Refused rather than ignored: an operator who sets it would
+                # otherwise believe it applies.
+                raise StartupRefused(
+                    f"{moved} is no longer read: its content is part of the "
+                    "network profile (MCX_NETWORK_FILE, PLT-ICD-001 2.8)")
+        network = (env.get("MCX_NETWORK_FILE") or "").strip()
+        if not network:
+            raise StartupRefused(
+                "MCX_NETWORK_FILE is not set: name the network profile (PLMNs, "
+                "cell map, trusted SIP cores and their CA); there is no default, "
+                "and every audit record names the one in force")
+
         groups = (env.get("MCX_GROUPS_FILE") or "").strip()
         sip = SipConfig.from_env(env)
         return Config(
@@ -308,7 +306,7 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,
-            cells=(env.get("MCX_CELLS_FILE") or "").strip() or None,
+            network=Path(network),
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
         )

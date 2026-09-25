@@ -98,26 +98,25 @@ def test_the_fixture_reports_are_schema_valid(spec, report):
     assert schema.validate(doc), schema.error_log
 
 
-# ============================================================ the deployment's cell map
+# ============================================================ the network profile's cell map
+# (loading, the PLMN check and the rest of the file: tests/test_network.py)
 
 
 from core.errors import StartupRefused  # noqa: E402
-from service.cells import load_cells  # noqa: E402
+from service.network import load_network  # noqa: E402
+from tests.network_fixture import network_yaml  # noqa: E402
 
 KEYS = {"track_section", "yard_id"}
 
 
-def cells_yaml(tmp_path, entries, name="cells.yaml"):
-    import yaml
-    p = tmp_path / name
-    p.write_text(yaml.safe_dump({"cells": entries}))
-    return p
+def load_cells(tmp_path, entries, keys=KEYS):
+    return load_network(network_yaml(tmp_path, cells=entries), keys).cells
 
 
 def test_a_cell_map_is_read(tmp_path):
-    got = load_cells(cells_yaml(tmp_path, [
+    got = load_cells(tmp_path, [
         {"cell": mcf.ECGI, "location": {"track_section": "S1"}},
-        {"cell": mcf.NCGI, "location": {"track_section": "S2", "yard_id": "Y1"}}]), KEYS)
+        {"cell": mcf.NCGI, "location": {"track_section": "S2", "yard_id": "Y1"}}])
     assert dict(got[mcf.ECGI]) == {"track_section": "S1"}
     assert dict(got[mcf.NCGI]) == {"track_section": "S2", "yard_id": "Y1"}
 
@@ -133,90 +132,51 @@ def test_a_cell_map_is_read(tmp_path):
     ([{"cell": mcf.ECGI}], "exactly 'cell' and 'location'"),
     ([{"cell": mcf.ECGI, "location": {"track_section": "S1"}, "name": "x"}],
      "exactly 'cell' and 'location'"),
+    ([{"cell": "001011" + mcf.ECGI[6:], "location": {"track_section": "S1"}}],
+     "PLMN 001011 is not one of this network's plmns (001010)"),
 ])
 def test_a_bad_cell_map_refuses_startup(tmp_path, entries, says):
     with pytest.raises(StartupRefused) as exc:
-        load_cells(cells_yaml(tmp_path, entries), KEYS)
+        load_cells(tmp_path, entries)
     assert says in str(exc.value)
-
-
-@pytest.mark.parametrize("text", ["cells: not-a-list\n", "other: []\n", "[]\n", "{{bad yaml"])
-def test_a_malformed_cell_file_refuses_startup(tmp_path, text):
-    p = tmp_path / "c.yaml"
-    p.write_text(text)
-    with pytest.raises(StartupRefused):
-        load_cells(p, KEYS)
 
 
 def test_every_defect_is_reported_at_once(tmp_path):
     with pytest.raises(StartupRefused) as exc:
-        load_cells(cells_yaml(tmp_path, [{"cell": "1", "location": {"x": "y"}},
-                                         {"cell": mcf.ECGI, "location": {"q": "z"}}]), KEYS)
+        load_cells(tmp_path, [{"cell": "1", "location": {"x": "y"}},
+                              {"cell": mcf.ECGI, "location": {"q": "z"}}])
     assert "2 defect(s)" in str(exc.value)
 
 
-# -- the startup rule (PRF-OP-03) --------------------------------------------------------
+def test_a_profile_without_location_keys_accepts_no_cell(tmp_path):
+    """mcx has no location keys, so any key in a cell map is unknown."""
+    with pytest.raises(StartupRefused) as exc:
+        load_cells(tmp_path, [{"cell": mcf.ECGI, "location": {"track_section": "S1"}}],
+                   keys=set())
+    assert "not a location_key of the profile (known: none)" in str(exc.value)
 
 
-def _env(tmp_path, pki, profile, cells):
+def test_the_runtime_checks_the_map_against_the_profile(tmp_path, pki, clock):
+    from service.runtime import build_runtime
     from tests.test_sip_transport import sip_env
-    env = sip_env(tmp_path, pki, MCX_PROFILE=profile, MCX_RELEASE="19")
-    env.pop("MCX_CELLS_FILE")
-    if profile != "mcx":
-        env.pop("MCX_GROUPS_FILE")       # the test groups are mcx users
-    if cells is not None:
-        env["MCX_CELLS_FILE"] = cells
-    return env
-
-
-def test_a_profile_with_location_keys_requires_the_setting(tmp_path, pki, clock):
-    from service.runtime import build_runtime
+    net = network_yaml(tmp_path, cells=[{"cell": mcf.ECGI,
+                                         "location": {"track_section": "S1"}}],
+                       fname="n.yaml")
     with pytest.raises(StartupRefused) as exc:
-        build_runtime(_env(tmp_path, pki, "frmcs", None), clock)
-    text = str(exc.value)
-    assert "MCX_CELLS_FILE" in text and "track_section" in text and "'none'" in text
-
-
-@pytest.mark.parametrize("value", ["none", "NONE"])
-def test_none_states_there_is_no_map(tmp_path, pki, clock, value):
-    from service.runtime import build_runtime
-    r = build_runtime(_env(tmp_path, pki, "frmcs", value), clock)
-    assert r.manager._cells == {}
-    r.close()
-
-
-def test_a_profile_without_location_keys_needs_no_setting(tmp_path, pki, clock):
-    from service.runtime import build_runtime
-    r = build_runtime(_env(tmp_path, pki, "mcx", None), clock)
-    assert r.manager._cells == {}
-    r.close()
-
-
-def test_a_named_file_is_checked_against_the_profiles_keys(tmp_path, pki, clock):
-    """mcx has no location keys, so any key in the file is unknown."""
-    from service.runtime import build_runtime
-    f = cells_yaml(tmp_path, [{"cell": mcf.ECGI, "location": {"track_section": "S1"}}])
-    with pytest.raises(StartupRefused) as exc:
-        build_runtime(_env(tmp_path, pki, "mcx", str(f)), clock)
+        build_runtime(sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(net),
+                              MCX_RELEASE="19"), clock)
     assert "not a location_key" in str(exc.value)
-
-
-def test_a_missing_file_refuses_startup(tmp_path, pki, clock):
-    from service.runtime import build_runtime
-    with pytest.raises(StartupRefused):
-        build_runtime(_env(tmp_path, pki, "frmcs", str(tmp_path / "absent.yaml")), clock)
 
 
 # ============================================================ end to end: REC by area
 
 
 @pytest.fixture
-def cells_file(tmp_path):
+def cells():
     """Overrides test_adhoc's: the frmcs runtime starts with a real cell map,
-    ECGI -> track section S1 and NCGI -> S2, through MCX_CELLS_FILE."""
-    return str(cells_yaml(tmp_path, [
-        {"cell": mcf.ECGI, "location": {"track_section": "S1"}},
-        {"cell": mcf.NCGI, "location": {"track_section": "S2"}}], name="deploy-cells.yaml"))
+    ECGI -> track section S1 and NCGI -> S2, in its network profile."""
+    return [{"cell": mcf.ECGI, "location": {"track_section": "S1"}},
+            {"cell": mcf.NCGI, "location": {"track_section": "S2"}}]
 
 
 @pytest.fixture

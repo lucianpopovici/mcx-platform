@@ -155,7 +155,7 @@ class SessionManager:
         # by hand, and then the call type's limit alone applies.
         self._adhoc_list_max = adhoc_list_max
         # Serving cell -> location attributes: deployment data, supplied by
-        # the host (MCX_CELLS_FILE; PLT-ICD-001 2.8, PRF-OP-03).
+        # the host (the network profile; PLT-ICD-001 2.8, PRF-OP-03).
         self._cells = dict(cells or {})
 
     # -- observation ----------------------------------------------------

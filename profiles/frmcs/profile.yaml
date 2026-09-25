@@ -162,7 +162,7 @@ identity:
       multiplicity: multi
       resolves_to: group
   # The serving cell a client reports becomes a track_section or yard_id
-  # through the deployment's cell map (MCX_CELLS_FILE, PLT-ICD-001 2.8), not
+  # through the network profile's cell map (MCX_NETWORK_FILE, PLT-ICD-001 2.8), not
   # through this profile: cell identities are network data (PRF-OP-03).
 
 priority:

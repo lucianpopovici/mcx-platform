@@ -11,7 +11,7 @@ public-safety deployment or a railway FRMCS deployment, from one codebase and on
 image, with the profile chosen at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 848 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 908 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -44,7 +44,8 @@ python3 -m pytest tests/ -q                   # must stay green (600+ tests)
 python3 tools/check_boundary.py --root .      # must stay 20/20
 # run it -- every one of these is required and none has a default
 MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
-  MCX_STRICT_RELEASE=true MCX_ADHOC_LIST_MAX=100 MCX_DATA_DIR=/tmp/mcx python3 -m service
+  MCX_STRICT_RELEASE=true MCX_ADHOC_LIST_MAX=100 MCX_NETWORK_FILE=examples/network.yaml \
+  MCX_DATA_DIR=/tmp/mcx python3 -m service
 # VP1-SIG-001: the real process against a third-party SIP core (needs the
 # kamailio / asterisk packages; prints PASS/FAIL/OBSERVED per step)
 python3 tools/interop/run.py --core kamailio
@@ -174,9 +175,11 @@ TS 24.379 has only from Rel-18. `MCX_STRICT_RELEASE` (required, no default)
 decides what happens then: `true` refuses to start, `false` starts and warns
 in the log and the health document (REL-OP-02). Ad hoc calls that list their
 participants are capped by `MCX_ADHOC_LIST_MAX` (required, no default;
-ADHOC-OP-04), checked before any entry is resolved. A profile with
-location-dependent identities (FRMCS) also needs `MCX_CELLS_FILE`: the
-deployment's map from reported cells to locations, or `none` (PRF-OP-03). The conformance matrix being
+ADHOC-OP-04), checked before any entry is resolved. Every process also names
+a network profile, `MCX_NETWORK_FILE` (required, no default; NET-OP-01): the
+PLMNs, the map from reported cells to locations, and the trusted SIP cores
+with a CA of their own (ICD-OP-10). Its `name/version/hash` joins the profile
+and release in every audit record. The conformance matrix being
 green does not mean every call type is reachable. Release numbers live in
 `core/release.py` and nowhere else — `VP1-BND-022` fails a build that compares
 a release to a literal anywhere else.

@@ -30,6 +30,7 @@ from core.session import Platform, SignalType  # noqa: E402
 from service import groups as groups_mod  # noqa: E402
 from service.http import Server  # noqa: E402
 from service.runtime import Health, build_runtime, fail_closed_platform  # noqa: E402
+from tests.network_fixture import network_yaml  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
 GROUPS_YAML = f"""
@@ -54,7 +55,8 @@ def env(tmp_path):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
     return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100", "MCX_CELLS_FILE": "none",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100",
+            "MCX_NETWORK_FILE": str(network_yaml(tmp_path)),
             "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
             "MCX_HTTP_PORT": "0"}
 
@@ -262,8 +264,10 @@ def test_vp1_oam_003_admission_refusal_establishment_release_audited(env):
         # PLT-OAM-001 + PLT-REL-005: the record names the profile AND the
         # release. Either alone leaves an unanswerable question months later
         # -- the same profile at two releases does not put the same bytes on
-        # the wire.
-        ident = f"{rt.loaded.profile.identifier()}+Rel-19"
+        # the wire. NET-OP-01 adds the network profile: which cells meant
+        # which location, and which cores could assert any identity.
+        ident = (f"{rt.loaded.profile.identifier()}+Rel-19"
+                 f"+test-net/1/{rt.network.content_hash[:16]}")
         assert all(r["profile"] == ident for r in rt.store.audit_records())
         assert rt.loaded.profile.identifier() in ident and "Rel-19" in ident
     finally:

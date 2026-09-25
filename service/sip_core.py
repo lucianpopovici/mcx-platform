@@ -235,8 +235,8 @@ class SipCore:
         self.server = ServerTransactions(clock, t1=t1)
         self.client = ClientTransactions(clock, t1=t1)
         self.flows_by_user: Dict[str, Any] = {}
-        sip_cfg = runtime.config.sip
-        self._trusted_peers = set(sip_cfg.trusted_peers if sip_cfg else ())
+        # From the network profile (ICD-OP-08, ICD-OP-10).
+        self._trusted_cores = set(runtime.network.trusted_cores)
         self.calls: Dict[str, Call] = {}
         self._dialogs: Dict[str, Call] = {}       # any Call-ID -> its call
         self._pending: Dict[str, Call] = {}
@@ -377,15 +377,18 @@ class SipCore:
     def _authenticated_as(self, flow: Any, identity: str) -> bool:
         """ICD-OP-08 (decided 2026-09-25), PLT-IDM-004 in its R1 form.
 
-        A peer whose certificate carries a DNS name listed in
-        MCX_SIP_TRUSTED_PEERS is a SIP core that authenticated its users
-        itself: it may assert any identity (RFC 3325 trust domain). Any other
-        peer may assert only a sip: URI in its own certificate's
-        subjectAltName. A peer without a certificate can assert nothing.
+        A peer whose certificate the network's core CA issued, carrying a
+        DNS name the network profile lists in sip.trusted_cores, is a SIP
+        core that authenticated its users itself: it may assert any identity
+        (RFC 3325 trust domain). Both are needed (ICD-OP-10): the name says
+        which core, the issuer says it is one. The core CA vouches for cores
+        and nothing else: a certificate it issued asserts no user identity,
+        so a core taken off the list asserts nothing at all. Any other peer
+        may assert only a sip: URI in its own certificate's subjectAltName. A
+        peer without a certificate can assert nothing.
         """
-        dns = set(getattr(flow, "peer_dns", ()))
-        if dns & self._trusted_peers:
-            return True
+        if getattr(flow, "peer_is_core", False):
+            return bool(set(getattr(flow, "peer_dns", ())) & self._trusted_cores)
         return canonical_uri(identity) in getattr(flow, "peer_uris", ())
 
     def _invite(self, req: Request, txn: ServerTxn, flow: Any) -> None:

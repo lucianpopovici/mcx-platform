@@ -16,6 +16,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.serialization import Encoding
+
 from core.sip import SipError, canonical_uri, split_frame
 
 from .config import SipConfig
@@ -29,18 +33,38 @@ HANDSHAKE_TIMEOUT_S = 10
 TICK_S = 0.1
 
 
-def make_context(cfg: SipConfig) -> ssl.SSLContext:
+def make_context(cfg: SipConfig,
+                 core_ca: Optional[x509.Certificate] = None) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(str(cfg.cert), str(cfg.key))
     if cfg.ca is not None:
         ctx.load_verify_locations(str(cfg.ca))
+    if core_ca is not None:
+        # The cores' own anchor (ICD-OP-10), from the network profile: the
+        # certificate that was checked and hashed, not the file re-read. A
+        # connection verifies against either anchor; which one issued the
+        # peer's certificate is decided per connection, by `issued_by`.
+        ctx.load_verify_locations(cadata=core_ca.public_bytes(Encoding.DER))
     # "required": a peer without a certificate cannot connect. "optional": a
     # peer that supports mutual auth is verified, one that cannot still may
     # connect (PLT-SEC-007: "where the peer supports it").
     ctx.verify_mode = (ssl.CERT_REQUIRED if cfg.client_auth == "required"
                        else ssl.CERT_OPTIONAL)
     return ctx
+
+
+def issued_by(der: Optional[bytes], ca: Optional[x509.Certificate]) -> bool:
+    """ICD-OP-10: whether the peer's certificate was issued directly by the
+    core CA. OpenSSL has already verified the chain to one of the anchors;
+    this says which. A certificate from the users' CA carrying a trusted
+    core's DNS name is therefore not a core. No certificate, or no core CA,
+    is a TypeError here, and so False, like any failure to verify."""
+    try:
+        x509.load_der_x509_certificate(der).verify_directly_issued_by(ca)
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+    return True
 
 
 def _san(cert, kind: str) -> tuple:
@@ -51,7 +75,7 @@ def _san(cert, kind: str) -> tuple:
 
 class TlsFlow:
     def __init__(self, sock: ssl.SSLSocket, peer: str, subject: Optional[str],
-                 cert: Optional[dict] = None):
+                 cert: Optional[dict] = None, core: bool = False):
         self._sock = sock
         self.peer = peer
         self.peer_subject = subject      # None: peer presented no certificate
@@ -61,6 +85,9 @@ class TlsFlow:
         self.peer_uris = tuple(canonical_uri(u) for u in _san(cert, "URI")
                                if u.lower().startswith("sip:"))
         self.peer_dns = tuple(d.lower() for d in _san(cert, "DNS"))
+        # Issued by the network's core CA (ICD-OP-10): only such a peer can
+        # be a trusted core, whatever DNS names it carries.
+        self.peer_is_core = core
         self.closed = False
         self._lock = threading.Lock()
 
@@ -87,7 +114,9 @@ class TlsListener:
         self.core = core
         self.cfg = cfg
         self.lock = lock or core.lock
-        self._ctx = make_context(cfg)
+        network = core.rt.network
+        self._core_ca = network.core_ca
+        self._ctx = make_context(cfg, network.core_ca)
         self._stop = threading.Event()
         self._srv: Optional[socket.socket] = None
         self._threads = []
@@ -176,7 +205,9 @@ class TlsListener:
             self._count("no_client_cert")
         self._count("accepted")
         tls.settimeout(None)
-        flow = TlsFlow(tls, peer, subject, cert or None)
+        flow = TlsFlow(tls, peer, subject, cert or None,
+                       core=issued_by(tls.getpeercert(binary_form=True),
+                                      self._core_ca))
         self._flows.add(flow)
         log.info("SIP flow up peer=%s client_cert=%s", peer, subject)
         buf = b""

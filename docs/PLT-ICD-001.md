@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.11 (draft)
-**Date:** 2026-09-24
+**Version:** 0.12 (draft)
+**Date:** 2026-09-25
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -145,31 +145,49 @@ All three in-tree profiles declare 32 for every call type, which keeps the
 previous behaviour. The value per call type is the profile owner's choice.
 
 
-### 2.8 Cell map (deployment data, not a hook and not the profile)
+### 2.8 Network profile (deployment data, not a hook and not the service profile)
 
-A client may attach its location to an INVITE: an
-`application/vnd.3gpp.mcptt-location-info+xml` body with a `<Report>`
-(TS 24.379 17.2.2.1.1 item 14a for ad hoc calls, 10.1.1.2.1.1 for prearranged
-ones; schema in annex F.3). What it reports is the network's view: the serving
-cell, as an ECGI or NCGI. A functional identity is keyed on a location
-attribute the profile names (`location_key`, e.g. `track_section`). Which cell
-stands for which attribute depends on the radio plan of one network, so the map
-is deployment data, like the groups file. It is not part of the profile. It is
-given by `MCX_CELLS_FILE` and checked at startup against the loaded profile.
-Adopted 2026-09-25 (PLT-VP-R1 ADHOC-OP-03; moved from the profile by PRF-OP-03).
+Some facts belong to the network a deployment runs in, not to the service:
+which PLMNs it is, which cell stands for which location attribute, and which
+SIP cores may assert identities for their users. They change when the radio
+plan or the core changes, not when the service does. They live in one file,
+the network profile, named by `MCX_NETWORK_FILE` (required, no default) and
+checked at startup against the loaded service profile. Adopted 2026-09-25
+(PLT-VP-R1 NET-OP-01). It replaces `MCX_CELLS_FILE` (PRF-OP-03) and
+`MCX_SIP_TRUSTED_PEERS` (ICD-OP-08), and closes ICD-OP-10.
 
 ```yaml
-cells:
+name: rail-ops
+version: "3"                          # a string: quote numbers
+plmns: ["001010"]                     # MCC then MNC, six digits (tPlmnIdentityFormat)
+cells:                                # [] when there is no cell map
   - {cell: "0010100000000000000000000100100011", location: {track_section: S1}}
+sip:
+  trusted_cores: [core1.rail.example] # [] when no core is trusted
+  core_ca: core-ca.pem                # "none" when no core is trusted
 ```
 
 | ID | Rule |
 |---|---|
-| ICD-LOC-001 | Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Each `location` key must be the `location_key` of some functional identity in the loaded profile, and a cell may appear once. Any defect refuses startup, and all defects are reported together. |
+| ICD-NET-001 | Every key above is required, and no other is accepted. An empty list or `none` is how a deployment says it has nothing there. `name` and `version` are strings of letters, digits, `.`, `_` and `-`. `plmns` is a non-empty list of distinct six-digit PLMN identities. Any defect refuses startup, and all defects are reported together. |
+| ICD-NET-002 | The file and the core CA certificate are hashed together (SHA-256 over the canonical form, as PLT-PRF-011 does for the service profile). `name/version/hash[:16]` is the network identifier. It joins the service profile identifier and the release in every audit record (`<profile>+<release>+<network>`, extending PLT-REL-005) and appears in the health document. |
+| ICD-NET-003 | `trusted_cores` lists fully qualified DNS names. A non-empty list needs `core_ca`: a file, relative to the network profile, holding exactly one certificate, and only CERTIFICATE PEM blocks. The core CA must be self-signed, have `pathLenConstraint` 0, have keyCertSign if it has keyUsage, and be valid at startup. When SIP is enabled it must not share a key or a subject name with any CA in `MCX_SIP_TLS_CA` (which also may hold only CERTIFICATE blocks), and must not have issued any of them. |
+| ICD-NET-004 | The TLS listener trusts the core CA certificate as parsed and hashed at startup, not the file re-read. A peer is a trusted core when the core CA issued its certificate directly and the certificate carries a DNS name in `trusted_cores`. It may then assert any identity (RFC 3325 trust domain). A peer whose certificate the core CA issued asserts nothing else: no URI in it is a user's identity, so a core removed from the list asserts nothing at all. |
+| ICD-LOC-001 | Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Its first six digits must be one of `plmns`. Each `location` key must be the `location_key` of some functional identity in the loaded service profile, and a cell may appear once. |
 | ICD-LOC-002 | The core reads the serving cell from the report. It prefers the NCGI, which Rel-18 carries in `<anyExt>`, to the ECGI. The cell becomes `LocationContext.cell_id`. Neighbour cells, coordinates and the rest are not read. |
 | ICD-LOC-003 | A location is advisory, never a reason to refuse. A missing, malformed or non-report body, a DOCTYPE, or a cell sent with `type="Encrypted"` (the platform holds no key, F.3.3) all leave the request without a location. |
 | ICD-LOC-004 | Before step 1 of §8.1, the core adds the mapped attributes of a reported cell to the request's location. Attributes the request already carries are kept, and an unmapped cell adds nothing. |
-| ICD-LOC-005 | `MCX_CELLS_FILE` is required, with no default, when the profile has location-dependent identities; `none` states that there is no map. Without a map, their criteria would match nobody on any call from a native client, and nothing would say so. A profile without location-dependent identities needs no setting. |
+| ICD-LOC-005 | *Superseded by ICD-NET-001.* `cells` is always required, so every deployment states its map, or `[]`. Before 0.12 `MCX_CELLS_FILE` was required only when the service profile had location-dependent identities. |
+
+The **core CA must issue only core certificates**. The platform cannot check
+this. A core CA that also issues other certificates makes those holders cores
+if they carry a listed name.
+
+**Deployment requirements that follow**:
+- The core CA's private key is as sensitive as the ability to assert any
+  identity. Whoever holds it can make a core.
+- `MCX_CELLS_FILE` and `MCX_SIP_TRUSTED_PEERS` are refused if set, rather than
+  ignored, so an operator who sets one learns that it no longer applies.
 
 ---
 
@@ -605,10 +623,11 @@ environmental condition.
 | ICD-OP-05 | Confirm that no profile requires a floor-control transition change (§5.3 INV-2). If one does, the core state machine is wrong. | R2 exit |
 | ICD-OP-06 | Floor control across a gateway: TETRA and P25 PTT models do not map cleanly onto 24.380 grant, queue, override and revoke. Decide which are unsupported over IF-IWF rather than discovering it at interop. | R4 start |
 | ICD-OP-07 | Media anchoring for a routed session: does the platform stay in the media path or hand off to the gateway? Affects recording obligations (PLT-OAM-008) for interworked calls. | R4 start |
-| ICD-OP-08 | **CLOSED 2026-09-25 in its R1 form (decided: certificate identity plus trusted cores).** A request may assert only an identity its TLS connection authenticated (PLT-IDM-004 without OpenID Connect, which is R2). A peer whose verified certificate carries a DNS name listed in `MCX_SIP_TRUSTED_PEERS` (required, no default; `none`, or fully qualified names) is a SIP core that authenticated its users itself, and may assert any identity (RFC 3325 trust domain). Every other peer may assert only a `sip:` URI in its certificate's subjectAltName. The check runs on REGISTER (the AoR) and INVITE (the initiator, from P-Asserted-Identity or From), and a mismatch is 403 `identity-not-authenticated`. The scheme and host are compared without case and the user part exactly (RFC 3261 19.1.4). The independent review found that binding identity alone left calls open to other peers, so a dialog is now also bound to the connection it was set up on: a response must arrive on its request's connection and carry its Call-ID; branches are unguessable; a BYE for the call must come from the caller's connection with the caller's tag, and a BYE for a leg from that leg's connection; an ACK must come on its INVITE's connection, and so must a CANCEL; and a new INVITE may not reuse a live call's Call-ID. **Deployment requirements that follow**, which the platform cannot check: a trusted core must itself authenticate every user and police P-Asserted-Identity (strip it from untrusted sources); and core certificates must come from a CA that issues trusted DNS names only to cores (see ICD-OP-10). The interop Kamailio meets neither: it tests the trust mechanism, not a secure core. Originally: **From v0.7.** Admission now authorises on `initiator.roles`, and the initiator is taken from P-Asserted-Identity or From. PLT-IDM-004 (bind the authenticated identity to the request) is not enforced on the SIP path, so on a direct TLS connection a caller can assert someone else's identity and so their roles. Before v0.7 the role check failed closed for everyone, so the exposure is new in effect, but the weakness is older. Resolving it is PLT-IDM-004 work: bind the TLS client identity to the registered AoR. | closed |
+| ICD-OP-08 | **CLOSED 2026-09-25 in its R1 form (decided: certificate identity plus trusted cores).** A request may assert only an identity its TLS connection authenticated (PLT-IDM-004 without OpenID Connect, which is R2). A peer whose verified certificate carries a DNS name listed in `MCX_SIP_TRUSTED_PEERS` (required, no default; `none`, or fully qualified names; since v0.12 `sip.trusted_cores` in the network profile, §2.8) is a SIP core that authenticated its users itself, and may assert any identity (RFC 3325 trust domain). Every other peer may assert only a `sip:` URI in its certificate's subjectAltName. The check runs on REGISTER (the AoR) and INVITE (the initiator, from P-Asserted-Identity or From), and a mismatch is 403 `identity-not-authenticated`. The scheme and host are compared without case and the user part exactly (RFC 3261 19.1.4). The independent review found that binding identity alone left calls open to other peers, so a dialog is now also bound to the connection it was set up on: a response must arrive on its request's connection and carry its Call-ID; branches are unguessable; a BYE for the call must come from the caller's connection with the caller's tag, and a BYE for a leg from that leg's connection; an ACK must come on its INVITE's connection, and so must a CANCEL; and a new INVITE may not reuse a live call's Call-ID. **Deployment requirements that follow**, which the platform cannot check: a trusted core must itself authenticate every user and police P-Asserted-Identity (strip it from untrusted sources); and core certificates must come from a CA that issues trusted DNS names only to cores (see ICD-OP-10). The interop Kamailio meets neither: it tests the trust mechanism, not a secure core. Originally: **From v0.7.** Admission now authorises on `initiator.roles`, and the initiator is taken from P-Asserted-Identity or From. PLT-IDM-004 (bind the authenticated identity to the request) is not enforced on the SIP path, so on a direct TLS connection a caller can assert someone else's identity and so their roles. Before v0.7 the role check failed closed for everyone, so the exposure is new in effect, but the weakness is older. Resolving it is PLT-IDM-004 work: bind the TLS client identity to the registered AoR. | closed |
 | ICD-OP-09 | **From v0.7.** Resolution runs before admission (§8.1), so an unauthorised caller can tell "nobody matches" (187, 404) from "not allowed" (403, 100), and learn whether a user exists or a role is currently held. TS 24.379 17.4.2.2 authorises first (steps 4 and 5). The same was true for prearranged groups before ad hoc calls existed. | R2 |
-| ICD-OP-10 | **From v0.9.** SIP cores and users share one trust anchor (`MCX_SIP_TLS_CA`). A core is recognised by a DNS name in its certificate, so any certificate from that CA carrying the name is trusted. That includes a user certificate, if enrolment lets a user choose DNS names. Options: a separate CA for cores; or certificate pinning; or an extended key usage or policy OID that marks a core. | before any deployment |
+| ICD-OP-10 | **CLOSED 2026-09-25 (decided: a separate CA for cores, in the network profile).** The core CA is named by the network profile (§2.8), must be a self-signed root with `pathLenConstraint` 0, and must be kept apart from the users' anchors in `MCX_SIP_TLS_CA` (by key, by name, and by issuance). A trusted core needs both a certificate the core CA issued directly and a listed DNS name, and a certificate the core CA issued asserts no user identity (ICD-NET-003, -004). The independent review found three defects in the first version, all fixed before delivery: an intermediate under the users' root was accepted as the core CA; a TRUSTED CERTIFICATE block in the core CA file became an anchor unchecked and unhashed; and core-CA certificates could also authenticate user URIs. Originally: **From v0.9.** SIP cores and users share one trust anchor (`MCX_SIP_TLS_CA`). A core is recognised by a DNS name in its certificate, so any certificate from that CA carrying the name is trusted. That includes a user certificate, if enrolment lets a user choose DNS names. | closed |
 | ICD-OP-11 | **From v0.9.** The inbound guard records a request's (Call-ID, CSeq) before the identity check runs. A refused, spoofed request therefore uses up that pair, and a genuine request that later carries the same pair is answered 482. This matters only if Call-IDs can be predicted. | R2 |
+| ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. | before a two-digit-MNC deployment |
 
 ---
 
@@ -616,6 +635,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.12 | 2026-09-25 | §2.8 becomes the network profile (`MCX_NETWORK_FILE`, NET-OP-01): PLMNs, the cell map, and the trusted SIP cores with a CA of their own (ICD-NET-001 to 004; ICD-LOC-001 gains the PLMN check; ICD-LOC-005 superseded). The network identifier joins the audit identity. ICD-OP-10 closed; ICD-OP-12 opened. `MCX_CELLS_FILE` and `MCX_SIP_TRUSTED_PEERS` are withdrawn and refused. A minor change: no hook or parameter object changes. |
 | 0.11 | 2026-09-25 | §2.8: the cell map is deployment data (`MCX_CELLS_FILE`), not a profile section (PRF-OP-03). It is required when the profile has location-dependent identities (ICD-LOC-005). The profile schema is back to what it was before 0.10. |
 | 0.10 | 2026-09-25 | §2.8 added: the cell map `identity.cells` (ICD-LOC-001 to 004). The core reads the client's location report (annex F.3) and applies the map, so location-dependent identities resolve from a native client's call. A minor change: an optional profile section, and no hook change. |
 | 0.9 | 2026-09-25 | ICD-OP-08 closed in its R1 form: certificate identity plus trusted cores (`MCX_SIP_TRUSTED_PEERS`), and each dialog bound to its connection. ICD-OP-10 (shared trust anchor) and ICD-OP-11 (guard order) opened. The ICD surface is unchanged; this is a host requirement. |

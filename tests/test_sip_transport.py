@@ -31,6 +31,7 @@ from service.config import SipConfig  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
 from service.sip_core import SipCore, dialog_target  # noqa: E402
 from tests import mcpttinfo_fixture as mcf  # noqa: E402
+from tests.network_fixture import network_yaml  # noqa: E402
 from service.sip_tls import TlsListener  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
@@ -50,7 +51,7 @@ class Clock:
 class Flow:
     """Records every message the core sends on it."""
 
-    def __init__(self, name="flow", uris=None, dns=()):
+    def __init__(self, name="flow", uris=None, dns=(), core=False):
         self.name = name
         self.sent = []
         # What a verified client certificate would authenticate (ICD-OP-08):
@@ -58,6 +59,7 @@ class Flow:
         from core.sip import canonical_uri
         self.peer_uris = tuple(uris) if uris is not None else (canonical_uri(name),)
         self.peer_dns = tuple(dns)
+        self.peer_is_core = core          # issued by the core CA (ICD-OP-10)
 
     def send(self, text):
         self.sent.append(text)
@@ -127,9 +129,25 @@ def pki(tmp_path_factory):
     write("ca", ca_key, ca)
     k, c = make("mcx-server", ca.subject, ca_key, san=True)
     write("server", k, c)
-    # plays a SIP core: trusted by DNS name in sip_env (MCX_SIP_TRUSTED_PEERS)
-    k, c = make("core-client", ca.subject, ca_key, dns=("core-client.example",))
+    # The cores' own CA (ICD-OP-10), named by the network profile in sip_env.
+    core_key = ec.generate_private_key(ec.SECP256R1())
+    core_ca = (x509.CertificateBuilder().subject_name(name("core-ca"))
+               .issuer_name(name("core-ca")).public_key(core_key.public_key())
+               .serial_number(x509.random_serial_number())
+               .not_valid_before(now - datetime.timedelta(minutes=1))
+               .not_valid_after(now + datetime.timedelta(days=1))
+               .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
+               .sign(core_key, hashes.SHA256()))
+    write("core-ca", core_key, core_ca)
+    # plays a SIP core: issued by the core CA, and trusted by DNS name
+    k, c = make("core-client", core_ca.subject, core_key, dns=("core-client.example",))
     write("client", k, c)
+    # the ICD-OP-10 case: the users' CA issued a certificate with the core's name
+    k, c = make("impostor", ca.subject, ca_key, dns=("core-client.example",))
+    write("impostor", k, c)
+    # a certificate from the core CA whose name is not a trusted core
+    k, c = make("other-core", core_ca.subject, core_key, dns=("other-core.example",))
+    write("other-core", k, c)
     # a directly attached user: may assert only its own URI
     k, c = make("u0", ca.subject, ca_key, uris=(U[0],))
     write("u0", k, c)
@@ -159,8 +177,10 @@ GROUPS_YAML = f"groups:\n  - id: 'grp:alpha'\n    members: {json.dumps(U)}\n"
 def sip_env(tmp_path, pki, **over):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
+    net = network_yaml(tmp_path, trusted_cores=["core-client.example"],
+                       core_ca=pki / "core-ca.crt")
     env = {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100", "MCX_CELLS_FILE": "none",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": str(net),
            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
            "MCX_HTTP_PORT": "0",
            "MCX_SIP_LISTEN": "127.0.0.1:0", "MCX_SIP_URI": LOCAL,
@@ -169,7 +189,6 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_TLS_CA": str(pki / "ca.crt"),
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
-           "MCX_SIP_TRUSTED_PEERS": "core-client.example",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
     env.update(over)
     return env
@@ -1594,50 +1613,48 @@ def test_scheme_and_host_ignore_case_the_user_part_does_not(core):
 
 
 def test_a_trusted_core_may_assert_any_identity(core, world):
-    """RFC 3325: a peer whose certificate carries a DNS name listed in
-    MCX_SIP_TRUSTED_PEERS authenticated its users itself."""
-    proxy = Flow("proxy", uris=(), dns=("core-client.example",))
+    """RFC 3325: a peer the core CA issued, carrying a DNS name the network
+    profile lists in sip.trusted_cores, authenticated its users itself."""
+    proxy = Flow("proxy", uris=(), dns=("core-client.example",), core=True)
     core.on_bytes(_reg(U[3], n=7), proxy)        # n: not the fixture's REGISTER
     core.on_bytes(invite("tc1", U[0], U[1], "private"), proxy)
     assert 200 in proxy.codes() and world[U[1]].requests("INVITE")
 
 
-@pytest.mark.parametrize("dns, uris", [(("other-core.example",), ()),
-                                       ((), ()),
-                                       (("core-client.example.evil",), ())])
-def test_an_untrusted_peer_without_the_identity_asserts_nothing(core, dns, uris):
-    f = Flow("peer", uris=uris, dns=dns)
+@pytest.mark.parametrize("dns, uris, is_core", [
+    (("other-core.example",), (), True),       # the core CA's, but not listed
+    ((), (), True),
+    (("core-client.example.evil",), (), True),
+    (("core-client.example",), (), False),     # ICD-OP-10: the name, from the users' CA
+    ((), (), False)])
+def test_an_untrusted_peer_without_the_identity_asserts_nothing(core, dns, uris, is_core):
+    f = Flow("peer", uris=uris, dns=dns, core=is_core)
     core.on_bytes(_reg(U[1]), f)
     assert f.codes() == [403]
 
 
-# -- configuration ---------------------------------------------------------------------
+def test_a_flow_that_does_not_say_is_not_a_core(core):
+    """A flow without the attribute (any transport other than TlsFlow) is
+    not a trusted core, whatever names it carries."""
+    class Bare:
+        peer_dns = ("core-client.example",)
+        sent = []
+
+        def send(self, text):
+            self.sent.append(text)
+    f = Bare()
+    core.on_bytes(_reg(U[1]), f)
+    assert parse_message(f.sent[-1].encode()).code == 403
 
 
-@pytest.mark.parametrize("value", [None, "", "a,,b", "bad name!", "-x.example", ",",
-                                   "localhost", "kamailio", "none,core.example",
-                                   "a" * 64 + ".example",
-                                   ".".join(["abcdefghij"] * 24) + ".example",
-                                   "*.example"])
-def test_trusted_peers_must_be_stated(tmp_path, pki, value):
-    from service.config import Config
-    env = sip_env(tmp_path, pki)
-    env.pop("MCX_SIP_TRUSTED_PEERS")
-    if value is not None:
-        env["MCX_SIP_TRUSTED_PEERS"] = value
-    with pytest.raises(StartupRefused) as exc:
-        Config.from_env(env)
-    assert "MCX_SIP_TRUSTED_PEERS" in str(exc.value)
-
-
-@pytest.mark.parametrize("value, parsed", [
-    ("none", ()), ("NONE", ()),
-    ("B.example, a.example,b.example", ("a.example", "b.example")),
-])
-def test_trusted_peers_are_parsed(tmp_path, pki, value, parsed):
-    from service.config import Config
-    cfg = Config.from_env(sip_env(tmp_path, pki, MCX_SIP_TRUSTED_PEERS=value))
-    assert cfg.sip.trusted_peers == parsed
+@pytest.mark.parametrize("dns", [("other-core.example",), ()])
+def test_a_core_ca_certificate_asserts_no_user_identity(core, dns):
+    """The core CA vouches for cores only (review of NET-OP-01): a URI in a
+    certificate it issued is not a user's, so a core taken off the list, or
+    any other element holding such a certificate, asserts nothing."""
+    f = Flow("peer", uris=(U[1],), dns=dns, core=True)
+    core.on_bytes(_reg(U[1]), f)
+    assert f.codes() == [403]
 
 
 # -- over real TLS -----------------------------------------------------------------------
@@ -1665,6 +1682,66 @@ def test_a_certificate_naming_nobody_asserts_nothing(server, pki):
         assert w.recv().code == 403
     finally:
         w.close()
+
+
+@pytest.mark.parametrize("cert, code, is_core", [
+    ("client", 200, True),        # the core CA's certificate, with a listed name
+    ("impostor", 403, False),     # ICD-OP-10: the listed name, from the users' CA
+    ("other-core", 403, True),    # the core CA's, with a name nobody listed
+])
+def test_a_trusted_core_is_its_name_and_its_ca(server, pki, cert, code, is_core):
+    """Over real TLS: the handshake verifies against either anchor, and the
+    flow records which one issued the peer's certificate."""
+    rt, core, listener = server
+    w = Wire(listener.bound_port, pki, cert=cert)
+    try:
+        w.send(_reg(U[2]))
+        assert w.recv().code == code
+        [flow] = [f for f in listener._flows]
+        assert flow.peer_is_core is is_core
+    finally:
+        w.close()
+
+
+def test_the_listener_trusts_the_core_ca_that_was_checked_not_the_file(tmp_path, pki):
+    """The core CA reaches the TLS context as the parsed certificate: what
+    the network profile's check saw and its hash covers is what is trusted,
+    even if the file changes after startup (review of NET-OP-01)."""
+    import shutil
+    anchor = tmp_path / "anchor.pem"
+    shutil.copy(pki / "core-ca.crt", anchor)
+    net = network_yaml(tmp_path, trusted_cores=["core-client.example"],
+                       core_ca=anchor, fname="anchored.yaml")
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(net)),
+                       lambda: __import__("time").time_ns() // 1_000_000,
+                       platform=Platform())
+    anchor.write_text("gone")
+    from service.clock import utc_ms
+    listener = TlsListener(SipCore(rt, LOCAL, utc_ms), rt.config.sip)
+    listener.start()
+    try:
+        w = Wire(listener.bound_port, pki, cert="client")
+        w.send(_reg(U[2]))
+        assert w.recv().code == 200
+        w.close()
+    finally:
+        listener.stop()
+        rt.close()
+
+
+def test_issued_by_needs_the_certificate_and_the_ca(pki):
+    from cryptography import x509 as X
+    from service.sip_tls import issued_by
+    der = X.load_pem_x509_certificate((pki / "client.crt").read_bytes()).public_bytes(
+        __import__("cryptography.hazmat.primitives.serialization",
+                   fromlist=["Encoding"]).Encoding.DER)
+    core_ca = X.load_pem_x509_certificate((pki / "core-ca.crt").read_bytes())
+    user_ca = X.load_pem_x509_certificate((pki / "ca.crt").read_bytes())
+    assert issued_by(der, core_ca) is True
+    assert issued_by(der, user_ca) is False            # another issuer
+    assert issued_by(None, core_ca) is False            # no certificate
+    assert issued_by(der, None) is False                # no core CA configured
+    assert issued_by(b"not der", core_ca) is False
 
 
 def test_the_flow_records_what_the_certificate_authenticates(server, pki):

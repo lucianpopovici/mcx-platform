@@ -24,6 +24,7 @@ from core.sip import ReceivedResponse  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
 from service.sip_core import SipCore  # noqa: E402
 from tests import mcpttinfo_fixture as mcf  # noqa: E402
+from tests.network_fixture import network_yaml  # noqa: E402
 from tests.test_sip_transport import (  # noqa: E402,F401  (pki is a fixture)
     LOCAL, SDP, Clock, Flow, answer, msg, pki, register, sip_env)
 from core.session import Platform  # noqa: E402
@@ -43,19 +44,22 @@ def list_max():
 
 
 @pytest.fixture
-def cells_file():
-    """MCX_CELLS_FILE for the frmcs runtime: none unless a test says so."""
-    return "none"
+def cells():
+    """The network profile's cell map for the frmcs runtime: empty unless a
+    test says so."""
+    return []
 
 
 @pytest.fixture
-def rt(tmp_path, pki, clock, list_max, cells_file):
+def rt(tmp_path, pki, clock, list_max, cells):
     g = tmp_path / "frmcs-groups.yaml"
     g.write_text(f"groups:\n  - id: 'grp:yard'\n    members: {json.dumps(F[1:3])}\n"
                  f"users: {json.dumps(F)}\n")
     env = sip_env(tmp_path, pki, MCX_PROFILE="frmcs", MCX_RELEASE="19",
                   MCX_GROUPS_FILE=str(g), MCX_ADHOC_LIST_MAX=list_max,
-                  MCX_CELLS_FILE=cells_file)
+                  MCX_NETWORK_FILE=str(network_yaml(
+                      tmp_path, cells=cells, trusted_cores=["core-client.example"],
+                      core_ca=pki / "core-ca.crt", fname="frmcs-network.yaml")))
     r = build_runtime(env, clock, platform=Platform())
     resolver = r.loaded.hooks.identity_resolver
     resolver.bind("shunting-team-leader", F[0], YARD)   # may start shunting calls

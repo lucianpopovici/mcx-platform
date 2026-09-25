@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from core import loader
@@ -23,7 +22,7 @@ from core.session import (Platform, Refusal, Session, SessionManager, Signal)
 from core import mcinfo
 
 from .config import BEARER_STUB, IDMS_STUB, RECORDER_STUB, Config
-from .cells import NONE as CELLS_NONE, load_cells
+from .network import Network, load_network
 from .groups import GroupDirectory, load_groups, load_users
 from .store import SessionStore, SqliteStore
 
@@ -65,6 +64,7 @@ class Health:
         self._profile: Optional[str] = None
         self._name = self._version = self._hash = None
         self._release: Optional[str] = None
+        self._network: Optional[dict] = None
         self._lock = threading.Lock()
         self._extra: Callable[[], dict] = lambda: {}
         self._call_types: dict = {}
@@ -81,6 +81,12 @@ class Health:
         with self._lock:
             self._name, self._version = p.name, p.version
             self._hash, self._profile = p.content_hash, p.identifier()
+
+    def set_network(self, network: Network) -> None:
+        with self._lock:
+            self._network = {"name": network.name, "version": network.version,
+                             "hash": network.content_hash,
+                             "identifier": network.identifier()}
 
     def set_release(self, release) -> None:
         """PLT-REL-001. An operator looking at a running instance must be able
@@ -105,6 +111,7 @@ class Health:
                                 "hash": self._hash,
                                 "identifier": self._profile},
                     "release": self._release,
+                    "network": self._network,
                     "call_types": self._call_types,
                     **self._extra()}
 
@@ -113,6 +120,7 @@ class Health:
 class Runtime:
     config: Config
     loaded: LoadedProfile
+    network: Network
     store: SessionStore
     auditor: Auditor
     manager: SessionManager
@@ -173,30 +181,14 @@ def role_functions(config: Config) -> Mapping[str, str]:
     return out
 
 
-def _cell_map(config, loaded):
-    """PRF-OP-03 (decided 2026-09-25): the cell map is deployment data.
-
-    Required, with no default, when the profile has location-dependent
-    identities: without a map their criteria match nobody on any call from
-    a native client, and nothing would say so. "none" states that on
-    purpose. A profile with none may still name a file, which is then
-    checked like any other (and every key in it will be unknown).
-    """
+def _network(config: Config, loaded: LoadedProfile) -> Network:
+    """NET-OP-01: the network profile, checked against the service profile
+    (every cell's attributes must be location keys some identity reads) and,
+    when SIP is enabled, against the users' trust anchor (ICD-OP-10)."""
     keys = {f.location_key for f in loaded.profile.identity.functional
             if f.location_key}
-    setting = config.cells
-    if setting is None:
-        if keys:
-            raise StartupRefused(
-                "MCX_CELLS_FILE is not set: profile "
-                f"{loaded.profile.identifier()} has location-dependent identities "
-                f"(keys: {', '.join(sorted(keys))}), which a native client's call "
-                "can reach only through a cell map. Give a file, or 'none' to "
-                "state that there is none")
-        return {}
-    if setting.lower() == CELLS_NONE:
-        return {}
-    return load_cells(Path(setting), keys)
+    return load_network(config.network, keys,
+                        config.sip.ca if config.sip is not None else None)
 
 
 def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
@@ -235,14 +227,20 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     # someone asks months later why this deployment put subtype 14 on the
     # wire, "which release was it speaking" has to be answerable from the
     # record, not from whoever remembers the deployment.
-    identifier = f"{loaded.profile.identifier()}+{config.release}"
-    log.info("profile loaded: %s (3GPP %s)",
-             loaded.profile.identifier(), config.release)
+    #
+    # NET-OP-01: and so does the network profile. Which cells meant which
+    # track section, and which cores could assert any identity, are facts of
+    # the day a call was made, not of the day someone asks.
+    network = _network(config, loaded)
+    health.set_network(network)
+    identifier = (f"{loaded.profile.identifier()}+{config.release}"
+                  f"+{network.identifier()}")
+    log.info("profile loaded: %s (3GPP %s) on network %s",
+             loaded.profile.identifier(), config.release, network.identifier())
 
     store = store or SqliteStore(config.data_dir)
     recovered = sum(1 for s in store.sessions() if s.get("state") == "established")
     auditor = Auditor(store, identifier, clock=clock)
-    cells = _cell_map(config, loaded)
     manager = SessionManager(loaded, auditor,
                              platform=platform or fail_closed_platform(
                                  config.recorder == RECORDER_STUB,
@@ -250,7 +248,7 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                              clock=clock, functions=role_functions(config),
                              defer_floor_start=config.sip is not None,
                              adhoc_list_max=config.adhoc_list_max,
-                             cells=cells)
+                             cells=network.cells)
 
     groups = GroupDirectory(load_groups(config.groups_file),
                             load_users(config.groups_file))
@@ -293,6 +291,7 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
         log.warning("%d session record(s) were established when the previous "
                     "process stopped; their signalling state is not recovered "
                     "(SVC-OP-02)", recovered)
-    return Runtime(config=config, loaded=loaded, store=store, auditor=auditor,
+    return Runtime(config=config, loaded=loaded, network=network,
+                   store=store, auditor=auditor,
                    manager=manager, groups=groups, health=health, clock=clock,
                    recovered=recovered)

@@ -22,6 +22,7 @@ Exit status is 0 only if every PASS/FAIL step passed.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -127,6 +128,12 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         f"users: [\"{U1}\", \"{U2}\"]\n")
     data = work / f"data-{recorder}"
     data.mkdir(exist_ok=True)
+    network = work / f"network-{recorder}.yaml"
+    cores = [] if trusted == "none" else [trusted]
+    network.write_text(json.dumps({
+        "name": "interop", "version": "1", "plmns": ["001010"], "cells": [],
+        "sip": {"trusted_cores": cores,
+                "core_ca": str(work / "pki/core-ca.crt") if cores else "none"}}))
     env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
     env.update({
         "MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
@@ -140,8 +147,9 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         "MCX_SIP_CLIENT_AUTH": "optional",
         "MCX_SIP_ROLES": "participating,controlling",
         # The core under test authenticates its users; by its certificate's
-        # DNS name it may assert their identities (ICD-OP-08).
-        "MCX_SIP_TRUSTED_PEERS": trusted,
+        # DNS name and issuer it may assert their identities (ICD-OP-08,
+        # ICD-OP-10). Both are network data.
+        "MCX_NETWORK_FILE": str(network),
         "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0",
     })
     proc = Proc("platform", [sys.executable, "-m", "service"],
@@ -185,7 +193,7 @@ def start_kamailio(work: Path, core_port: int, platform_port: int) -> Proc:
                              ["kamailio", "-f", str(cfg), "-DD", "-E",
                               "-w", str(work), "-P", str(work / "kamailio.pid")]),
                 work / "kamailio.log")
-    wait_tls(core_port, work / "pki/ca.crt")
+    wait_tls(core_port, work / "pki/core-ca.crt")
     return proc
 
 
@@ -224,7 +232,7 @@ def start_asterisk(work: Path, core_port: int, platform_port: int) -> Proc:
     proc = Proc("asterisk", _core_argv("asterisk", work,
                              ["asterisk", "-C", str(_asterisk_conf(work)), "-f", "-n", "-vvv"]),
                 work / "asterisk.log")
-    wait_tls(core_port, work / "pki/ca.crt", timeout=30)
+    wait_tls(core_port, work / "pki/core-ca.crt", timeout=30)
     asterisk_cli(work, "pjsip set logger on")
     return proc
 
@@ -607,7 +615,7 @@ def main() -> int:
     work = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="mcx-interop-"))
     work.mkdir(parents=True, exist_ok=True)
     pki.make(work / "pki", ("platform", "ua", "kamailio", "asterisk", "u1", "u2"),
-             uris={"u1": [U1], "u2": [U2]})
+             uris={"u1": [U1], "u2": [U2]}, cores=("kamailio", "asterisk"))
 
     report, uas, procs = Report(), [], []
     platform_port, core_port = free_port(), free_port()
