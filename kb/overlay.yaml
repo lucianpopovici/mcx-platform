@@ -8,17 +8,6 @@
 #   owner: who resolves it — "lucian" (product/owner call), "agent" (implementation),
 #          "3gpp-ct1" / "uic" (external body; the platform only records it)
 
-FC-OP-04:
-  trap: >-
-    Two different open points share this id in PLT-VP-R1 §11. The closed one (SHAPE rewritten,
-    CONF-AUDIT 4.16-4.18) is FC-OP-04 in the registry; the open one (floor control on a separate
-    m=application UDP stream) is FC-OP-04~2. Cite by line until the repo renumbers one of them.
-  owner: lucian
-FC-OP-05:
-  trap: >-
-    Two different open points share this id in PLT-VP-R1 §11: the Message Sequence Number counter
-    scope (FC-OP-05) and IF-PRI having no participant-specific input (FC-OP-05~2).
-  owner: lucian
 VP1-BND-006:
   note: >-
     Decided 2026-09-25 (decisions/0002): one release image per profile, core hash identical
