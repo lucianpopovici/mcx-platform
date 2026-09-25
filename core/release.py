@@ -221,3 +221,42 @@ def supports_sip_warning(release: Release, code: int) -> bool:
     """
     introduced = SIP_WARNING_INTRODUCED.get(code)
     return introduced is not None and release >= introduced
+
+
+# TS 24.379 annex F.1, the MCPTT info body (PLT-CONF-AUDIT CA-20). Read from
+# all seven published versions in docs/3GPP/TS24.379 (13.19, 14.16, 15.16,
+# 16.14, 17.15, 18.13, 20.0) by counting where each value is used by a
+# procedure; the first version that uses it is the one that introduced it.
+#
+# The consequence worth knowing: ad hoc group calls, and the ad hoc emergency
+# indication, do not exist before Rel-18. A profile whose call types are
+# declared with the ad hoc session type cannot be requested by any client at
+# an earlier release; service startup reports which call types are affected.
+SESSION_TYPE_INTRODUCED: Mapping[str, Release] = {
+    "prearranged": Release.REL_13,
+    "chat": Release.REL_13,
+    "private": Release.REL_13,
+    "first-to-answer": Release.REL_14,
+    "ambient-listening": Release.REL_14,
+    "adhoc": Release.REL_18,
+}
+
+MC_INDICATOR_INTRODUCED: Mapping[str, Release] = {
+    "emergency-ind": Release.REL_13,
+    "imminentperil-ind": Release.REL_13,
+    "broadcast-ind": Release.REL_13,
+    "adhoc-emergency-ind": Release.REL_18,
+    # Not an indication but an <anyExt> element with the same history: the
+    # ad hoc participant criteria (17.2.2.1.1 item 12), Rel-18 onwards.
+    "call-participants-criterias": Release.REL_18,
+}
+
+
+def supports_session_type(release: Release, session_type: str) -> bool:
+    introduced = SESSION_TYPE_INTRODUCED.get(session_type)
+    return introduced is not None and release >= introduced
+
+
+def supports_mc_indicator(release: Release, name: str) -> bool:
+    introduced = MC_INDICATOR_INTRODUCED.get(name)
+    return introduced is not None and release >= introduced

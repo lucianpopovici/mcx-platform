@@ -103,7 +103,9 @@ def check_imports(root: Path) -> List[str]:
 # The methods each hook interface declares. A call on a hook object outside
 # this set means the core is using an undeclared capability.
 HOOK_METHODS = {
-    "identity_resolver": {"resolve", "bind", "unbind", "identities_of"},
+    # determine_participants: PLT-ICD-001 0.7 section 3.5 (ad hoc criteria).
+    "identity_resolver": {"resolve", "bind", "unbind", "identities_of",
+                          "determine_participants"},
     "priority_policy": {"evaluate", "compare"},
     "session_policy": {"admit", "decide", "floor_policy"},
     "bearer_selector": {"select", "on_path_event"},

@@ -195,13 +195,31 @@ def test_auto_answer_renders_answer_mode():
     assert not manual.headers.has("Priv-Answer-Mode")
 
 
-def test_invite_asserts_the_initiator_identity():
-    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
+def test_invite_asserts_the_participating_function_not_the_caller():
+    """TS 24.379 6.3.2.2.6.2 item 7. This test used to assert the opposite --
+    that the INVITE carried the caller's identity -- and so pinned the defect
+    (PLT-CONF-AUDIT CA-20). The caller goes in <mcptt-calling-user-id>."""
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19,
+                      _declared(("x", ("private",))))
     ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
     req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
                          target="t", call_type="x", media=(MediaKind.VOICE,))
     msg = adapter.render(Signal(SignalType.INVITE, target="sip:u1@x"), ctx, req)
+    assert msg.headers.get("P-Asserted-Identity") == "<sip:server@mcptt.example>"
+    assert "<mcpttURI>sip:u0@mcptt.example</mcpttURI>" in msg.body
+
+
+def test_without_an_mcptt_body_the_caller_is_still_asserted():
+    """A gateway leg, or a call type declared with no signature, carries no
+    MCPTT info body, so P-Asserted-Identity is the only place the caller can
+    travel. The first CA-20 fix moved it for these too (found by review)."""
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
+    ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
+    req = SessionRequest(request_id="c1", initiator="sip:u0@mcptt.example",
+                         target="t", call_type="undeclared", media=(MediaKind.VOICE,))
+    msg = adapter.render(Signal(SignalType.INVITE, target="sip:gw@x"), ctx, req)
     assert msg.headers.get("P-Asserted-Identity") == "<sip:u0@mcptt.example>"
+    assert msg.headers.get("Content-Type") == "application/sdp"
 
 
 # --------------------------------------------------------------------------
@@ -362,12 +380,43 @@ def test_parse_invite_builds_a_session_request():
     assert parsed.request_id == "c1"
 
 
-def test_parse_invite_reads_call_type_from_mc_info():
-    adapter = Adapter("sip:server@mcptt.example", Release.REL_19)
-    body = "<mcptt-call_type>prearranged-group</mcptt-call_type>"
-    msg = well_formed(body=body, content_type="multipart/mixed")
-    parsed = adapter.parse_invite(msg)
-    assert parsed.call_type == "prearranged-group"
+def _declared(*pairs):
+    """Call types as the adapter sees them: an id and a signature, nothing else."""
+    from types import SimpleNamespace
+    from core.mcinfo import Signature
+    return [SimpleNamespace(id=i, mc_signature=Signature(*sig)) for i, sig in pairs]
+
+
+def test_parse_invite_selects_the_call_type_declaring_the_signature():
+    """TS 24.379 annex F.1 body in, the declaring call type out (PLT-ICD-001 2.6).
+    The body is literal text, not rendered by the module under test."""
+    from tests import mcpttinfo_fixture as mcf
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19, _declared(
+        ("grp", ("prearranged",)), ("emg", ("prearranged", True)), ("p2p", ("private",))))
+    sdp = build_offer([AMR_WB])
+    for xml, want in (
+            (mcf.mcinfo_xml("prearranged", "sip:g@x"), "grp"),
+            (mcf.mcinfo_xml("prearranged", "sip:g@x", emergency=True), "emg"),
+            (mcf.mcinfo_xml("private", "sip:u9@x"), "p2p"),
+            (mcf.mcinfo_xml("chat", "sip:g@x"), ""),               # declared by nobody
+            (mcf.mcinfo_xml("prearranged", "sip:g@x", imminent_peril=True), "")):
+        parsed = adapter.parse_invite(well_formed(body=mcf.multipart(sdp, xml),
+                                                  content_type=mcf.CONTENT_TYPE))
+        assert parsed.call_type == want, xml
+    assert parsed.target == "sip:g@x"      # from <mcptt-request-uri>, not the R-URI
+
+
+def test_ad_hoc_does_not_exist_before_rel_18():
+    """An ad hoc request at Rel-17 selects nothing, even where a call type
+    declares it: TS 24.379 has no ad hoc group call before Rel-18."""
+    from tests import mcpttinfo_fixture as mcf
+    body = mcf.multipart(build_offer([AMR_WB]),
+                         mcf.mcinfo_xml("adhoc", "sip:g@x", adhoc_emergency=True))
+    for release, want in ((Release.REL_17, ""), (Release.REL_18, "rec")):
+        adapter = Adapter("sip:server@mcptt.example", release,
+                          _declared(("rec", ("adhoc", True))))
+        parsed = adapter.parse_invite(well_formed(body=body, content_type=mcf.CONTENT_TYPE))
+        assert parsed.call_type == want, release
 
 
 def test_parse_invite_leaves_unknown_call_type_empty_for_policy_to_refuse():
@@ -550,6 +599,11 @@ def test_every_specification_warning_code_is_in_the_specification_table():
         "call-type-not-permitted": (100, "function not allowed due to local policy"),
         "partner-not-permitted":
             (179, "service not authorized with the interconnected system"),
+        # Rel-18 onwards: table 4.4.2-2 of V18.13.0 and V20.0.0.
+        "adhoc-participants-undetermined":
+            (187, "can't determine the adhoc group participants"),
+        "adhoc-too-many-participants":
+            (189, "maximum number of allowed adhoc group participants exceeded"),
     }
 
 
@@ -731,3 +785,47 @@ def test_no_refusal_emits_an_interworking_warning_code():
             assert int(head) < 300, (
                 f"{reason} at Rel-{release} emits MC code {head}, which is in "
                 f"the interworking range TS 29.379 owns")
+
+
+def test_timer_b_on_a_ringing_invite_asks_for_a_cancel_instead_of_ending():
+    """SIP-OP-15: in 'Proceeding' the INVITE is kept for 64*T1 after the
+    CANCEL it now needs (RFC 3261 9.1); in 'Calling' Timer B ends it."""
+    from core.sip import Headers, Request
+    from service.sip_txn import ClientTransactions
+    now = [0]
+    txns = ClientTransactions(lambda: now[0], t1=500)
+
+    def inv(branch):
+        return Request("INVITE", "sip:b@x", Headers([
+            ("Via", f"SIP/2.0/TLS x;branch={branch}"), ("CSeq", "1 INVITE")]))
+    ringing, silent = txns.start(inv("z9hG4bKa"), None), txns.start(inv("z9hG4bKb"), None)
+    txns.proceed(ringing)
+    now[0] = 32_000
+    fired = txns.tick()
+    assert set(map(id, fired)) == {id(ringing), id(silent)}
+    assert silent.done and not ringing.done and ringing.cancelled
+    assert txns.find("z9hG4bKa", "INVITE") is ringing
+    now[0] = 63_999
+    assert txns.tick() == [] and not ringing.done
+    now[0] = 64_000
+    assert txns.tick() == [ringing] and ringing.done
+
+
+def test_the_ring_limit_replaces_timer_b_once_the_invite_is_proceeding():
+    from core.sip import Headers, Request
+    from service.sip_txn import ClientTransactions
+    now = [0]
+    txns = ClientTransactions(lambda: now[0], t1=500)
+    req = Request("INVITE", "sip:b@x", Headers([
+        ("Via", "SIP/2.0/TLS x;branch=z9hG4bKra"), ("CSeq", "1 INVITE")]))
+    t = txns.start(req, None, answer_by=90_000)
+    assert t.expires_at == 32_000                  # Timer B while 'Calling'
+    now[0] = 1_000
+    txns.proceed(t)
+    assert t.expires_at == 90_000
+    txns.proceed(t)                                # a second 1xx changes nothing
+    assert t.expires_at == 90_000
+    now[0] = 89_999
+    assert txns.tick() == []
+    now[0] = 90_000
+    assert txns.tick() == [t] and t.cancelled and not t.done

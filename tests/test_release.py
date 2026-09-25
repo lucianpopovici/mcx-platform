@@ -172,7 +172,8 @@ def test_health_reports_the_release_the_process_is_speaking():
 def test_config_refuses_a_deployment_that_did_not_state_a_release():
     """PLT-REL-002, at the configuration boundary rather than the parser."""
     from service.config import Config
-    base = {"MCX_PROFILE": "mcx", "MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none",
+    base = {"MCX_PROFILE": "mcx", "MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
+            "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": "/tmp/x/network.yaml",
             "MCX_DATA_DIR": "/tmp/x"}
     with pytest.raises(StartupRefused) as exc:
         Config.from_env(base)
@@ -183,7 +184,8 @@ def test_config_refuses_a_deployment_that_did_not_state_a_release():
 def test_the_release_is_independent_of_the_profile():
     """PLT-REL-003. The whole point: these are two axes, not one."""
     from service.config import Config
-    base = {"MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none",
+    base = {"MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
+            "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": "/tmp/x/network.yaml",
             "MCX_DATA_DIR": "/tmp/x"}
     seen = set()
     for profile in ("mcx", "frmcs", "utility"):
@@ -276,3 +278,19 @@ def test_the_three_interworking_codes_are_not_in_table_4_4_2_2():
         # ...and the rest of the range 24.379 reserved was never allocated.
         for code in (303, 325, 350):
             assert supports_sip_warning(Release(release), code) is False
+
+
+def test_session_types_and_indications_by_release():
+    """PLT-CONF-AUDIT CA-20. Tabulated from all seven versions of TS 24.379 in
+    docs/3GPP by where each value is first used; spelled out, not imported.
+    Ad hoc group calls begin at Rel-18, with their own emergency indication."""
+    from core.release import supports_mc_indicator, supports_session_type
+    first = {"prearranged": 13, "chat": 13, "private": 13, "first-to-answer": 14,
+             "ambient-listening": 14, "adhoc": 18}
+    for release in RELEASES:
+        for value, introduced in first.items():
+            assert supports_session_type(Release(release), value) is (release >= introduced)
+        for ind in ("emergency-ind", "imminentperil-ind", "broadcast-ind"):
+            assert supports_mc_indicator(Release(release), ind) is True
+        assert supports_mc_indicator(Release(release), "adhoc-emergency-ind") is (release >= 18)
+        assert supports_session_type(Release(release), "conference") is False

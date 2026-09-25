@@ -84,6 +84,16 @@ class SessionRequest:
     urgency: Optional[UrgencyId] = None
     location: Optional[LocationContext] = None
     attributes: Mapping[str, str] = field(default_factory=dict)
+    # An ad hoc group call (TS 24.379 clause 17) names no group: the members
+    # are listed by the caller (`participants`, from an RFC 5366 URI list) or
+    # described by criteria that the profile evaluates (`participant_criteria`,
+    # from <call-participants-criterias>). PLT-ICD-001 section 3.5.
+    adhoc: bool = False
+    participants: Sequence[MCServiceId] = ()
+    participant_criteria: Optional[str] = None
+    # <adhoc-grp-emg-alert-grp-ind> true: the call follows an ad hoc
+    # emergency alert and names that alert's group (17.4.2.2 step 7A).
+    adhoc_alert_group: bool = False
 
 
 @dataclass(frozen=True)
@@ -215,6 +225,16 @@ class IdentityResolver(Protocol):
     def unbind(self, identity: str, service_id: MCServiceId) -> None: ...
 
     def identities_of(self, service_id: MCServiceId) -> Sequence[str]: ...
+
+    def determine_participants(
+        self, criteria: str, request: SessionRequest
+    ) -> Resolution:
+        """Who meets the caller's criteria for an ad hoc group call (TS 24.379
+        17.4.2.2 step 12 ii: "based on the local policy"). The criteria string
+        is opaque to the core; what it means is the profile's. Returns a GROUP
+        resolution, or raises with `adhoc-participants-undetermined`
+        (PLT-ICD-001 section 3.5)."""
+        ...
 
 
 @runtime_checkable

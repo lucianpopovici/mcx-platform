@@ -30,6 +30,7 @@ from core.session import Platform, SignalType  # noqa: E402
 from service import groups as groups_mod  # noqa: E402
 from service.http import Server  # noqa: E402
 from service.runtime import Health, build_runtime, fail_closed_platform  # noqa: E402
+from tests.network_fixture import network_yaml  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
 GROUPS_YAML = f"""
@@ -54,7 +55,8 @@ def env(tmp_path):
     g = tmp_path / "groups.yaml"
     g.write_text(GROUPS_YAML)
     return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
-            "MCX_RECORDER": "none", "MCX_BEARER": "none",
+            "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100",
+            "MCX_NETWORK_FILE": str(network_yaml(tmp_path)),
             "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
             "MCX_HTTP_PORT": "0"}
 
@@ -262,8 +264,10 @@ def test_vp1_oam_003_admission_refusal_establishment_release_audited(env):
         # PLT-OAM-001 + PLT-REL-005: the record names the profile AND the
         # release. Either alone leaves an unanswerable question months later
         # -- the same profile at two releases does not put the same bytes on
-        # the wire.
-        ident = f"{rt.loaded.profile.identifier()}+Rel-19"
+        # the wire. NET-OP-01 adds the network profile: which cells meant
+        # which location, and which cores could assert any identity.
+        ident = (f"{rt.loaded.profile.identifier()}+Rel-19"
+                 f"+test-net/1/{rt.network.content_hash[:16]}")
         assert all(r["profile"] == ident for r in rt.store.audit_records())
         assert rt.loaded.profile.identifier() in ident and "Rel-19" in ident
     finally:
@@ -547,3 +551,95 @@ def test_a_production_indicator_refuses_every_stub(env):
     assert fail_closed_platform().reserve_qos(None) is False
     assert fail_closed_platform(True, True).recording_available() is True
     assert fail_closed_platform(True, True).reserve_qos(None) is True
+
+
+def test_health_says_which_call_types_no_client_can_request(env):
+    """PLT-ICD-001 2.6. Declared-unrequestable and release-unreachable call
+    types are reported, so the gap is visible before the first refusal."""
+    rt = build_runtime({**env, "MCX_RELEASE": "17"}, _clock())
+    report = rt.health.snapshot()["call_types"]
+    assert set(report) == {"strict_release", "not_requestable_by_mcptt_clients",
+                           "unreachable_at_release"}
+    assert report["strict_release"] is False
+    assert "sds" in report["not_requestable_by_mcptt_clients"]
+    assert report["unreachable_at_release"] == {}      # mcx declares no ad hoc call type
+
+
+
+# -- MCX_STRICT_RELEASE (REL-OP-02, decided 2026-09-24) -------------------------
+
+def _frmcs(env, release, strict):
+    """The railway profile, whose group calls are ad hoc and so exist in
+    TS 24.379 only from Rel-18. No groups file: its members are mcx users."""
+    e = {k: v for k, v in env.items() if k != "MCX_GROUPS_FILE"}
+    e.update({"MCX_PROFILE": "frmcs", "MCX_RELEASE": release,
+              "MCX_STRICT_RELEASE": strict})
+    return e
+
+
+def test_strict_release_refuses_a_release_that_cannot_carry_the_profile(env):
+    """true: the railway profile at Rel-17 does not start, and the refusal
+    names the call types and the reason."""
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(_frmcs(env, "17", "true"), _clock())
+    text = str(exc.value)
+    assert "MCX_STRICT_RELEASE=true" in text
+    assert "rec-broadcast" in text and "shunting-group" in text
+    assert "adhoc" in text
+
+
+def test_non_strict_release_starts_and_reports_what_it_cannot_carry(env, caplog):
+    """false: the same deployment starts, logs a warning per call type, and
+    the health document says which ones and that strictness is off."""
+    with caplog.at_level("WARNING", logger="mcx.service"):
+        rt = build_runtime(_frmcs(env, "17", "false"), _clock())
+    report = rt.health.snapshot()["call_types"]
+    assert report["strict_release"] is False
+    assert set(report["unreachable_at_release"]) == {"rec-broadcast", "shunting-group"}
+    warned = [r.getMessage() for r in caplog.records if "cannot be requested" in r.getMessage()]
+    assert len(warned) == 2 and all("MCX_STRICT_RELEASE=false" in w for w in warned)
+
+
+@pytest.mark.parametrize("release", ["19", "20"])
+def test_strict_release_starts_where_every_call_type_is_carried(env, release):
+    rt = build_runtime(_frmcs(env, release, "true"), _clock())
+    report = rt.health.snapshot()["call_types"]
+    assert report["strict_release"] is True and report["unreachable_at_release"] == {}
+
+
+@pytest.mark.parametrize("value", [None, "", "yes", "1", "TRUE-ish"])
+def test_strict_release_must_be_stated_as_true_or_false(env, value):
+    """Required with no default, like MCX_RELEASE: a silent false would let
+    a deployment accept unreachable emergency calls nobody chose to accept."""
+    e = {k: v for k, v in env.items() if k != "MCX_STRICT_RELEASE"}
+    if value is not None:
+        e["MCX_STRICT_RELEASE"] = value
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, _clock())
+    assert "MCX_STRICT_RELEASE" in str(exc.value)
+
+
+def test_strict_release_values_are_case_insensitive(env):
+    for value in ("TRUE", "False"):
+        build_runtime({**env, "MCX_STRICT_RELEASE": value}, _clock())
+
+
+# -- MCX_ADHOC_LIST_MAX (ADHOC-OP-04, decided 2026-09-25) ----------------------
+
+@pytest.mark.parametrize("value", [None, "", "  ", "0", "-3", "1.5", "ten", "+5"])
+def test_the_ad_hoc_list_cap_must_be_stated_as_a_positive_integer(env, value):
+    """Required with no default: an unbounded list is unbounded work done
+    before the caller is authorised."""
+    e = {k: v for k, v in env.items() if k != "MCX_ADHOC_LIST_MAX"}
+    if value is not None:
+        e["MCX_ADHOC_LIST_MAX"] = value
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, _clock())
+    assert "MCX_ADHOC_LIST_MAX" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["1", "250", " 7 "])
+def test_the_stated_ad_hoc_list_cap_reaches_the_session_layer(env, value):
+    rt = build_runtime({**env, "MCX_ADHOC_LIST_MAX": value}, _clock())
+    assert rt.config.adhoc_list_max == int(value)
+    assert rt.manager._adhoc_list_max == int(value)

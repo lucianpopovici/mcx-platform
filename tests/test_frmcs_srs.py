@@ -420,3 +420,34 @@ def test_the_worked_example_from_the_appendix_actually_works():
     assert ato.preemption_vulnerability, "an ATO session must be pre-emptible"
     assert rec.scope == ato.scope, "cross-scope pairs never pre-empt"
     assert rec.level > ato.level
+
+
+# ---------------------------------------------------------------- CA-20: signatures
+
+def test_railway_call_types_have_the_signatures_the_srs_gives_them():
+    """UIC FRMCS SRS 10.2.2.1: REC-Voice is "MCPTT ad hoc group communication
+    for emergency group call". SRS 21.4.4 lists only ad hoc group procedures
+    (communication and emergency alert), private call and MCData IP
+    connectivity; no prearranged group call occurs anywhere in the SRS.
+    Spelled out, not read back from the profile under test."""
+    with PROFILE.open() as fh:
+        declared = {c["id"]: c["mc_signature"] for c in yaml.safe_load(fh)["call_types"]}
+    assert declared == {
+        "rec-broadcast": {"session_type": "adhoc", "emergency": True},
+        "shunting-group": {"session_type": "adhoc"},
+        "driver-controller": {"session_type": "private"},
+        "etcs-ipcon": None,
+    }
+
+
+def test_railway_group_calls_do_not_exist_before_rel_18():
+    """Ad hoc group calls are Rel-18 (TS 24.379 V18). At Rel-17 no client can
+    ask for a REC, and the process must say so at startup rather than let an
+    operator find out from refused emergency calls."""
+    from core import loader, mcinfo
+    from core.release import Release
+    loaded = loader.startup(["frmcs"], ROOT / "profiles", {})
+    for release, blocked in ((Release.REL_17, ["rec-broadcast", "shunting-group"]),
+                             (Release.REL_18, []), (Release.REL_20, [])):
+        _, cannot = mcinfo.reachability(loaded.profile.call_types, release)
+        assert [cid for cid, _ in cannot] == blocked, release
