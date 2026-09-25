@@ -4,6 +4,11 @@ Read this before touching anything. It is the shared context for every task in
 this repository; individual task briefs are in `CLAUDE-1-service.md`,
 `CLAUDE-2-sip-transport.md` and `CLAUDE-3-media.md`.
 
+**Then read `kb/AGENT.md`.** `kb/` is this project's memory for agents: what is
+open, what was decided and why (`kb/decisions/`), and what the last session left
+(`kb/handover/`). Run `python3 kb/tools/kb.py build` first: `kb/STATE.md` is
+generated, git-ignored, and the only place test and gate counts are kept current.
+
 ## What this is
 
 A 3GPP mission-critical services platform (MCPTT / MCData) that runs as either a

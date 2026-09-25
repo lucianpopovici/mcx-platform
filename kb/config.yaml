@@ -1,0 +1,3 @@
+# Path to the repository. Relative paths are relative to this folder.
+# Leave unset to use the folder that contains the KB.
+repo: ..

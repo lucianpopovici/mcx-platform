@@ -1,0 +1,52 @@
+# overlay.yaml — hand-written annotations the repository cannot hold.
+#
+# Keyed by an id that exists in registry/ (OP, CA or VP1 id). `kb.py check` fails on
+# an id nothing defines. Keep entries to things an agent needs and the docs don't say:
+# who decides, a known trap, or a link across documents. Status stays in the repo.
+#
+# Fields (all optional): owner, note, trap, see.
+#   owner: who resolves it — "lucian" (product/owner call), "agent" (implementation),
+#          "3gpp-ct1" / "uic" (external body; the platform only records it)
+
+FC-OP-04:
+  trap: >-
+    Two different open points share this id in PLT-VP-R1 §11. The closed one (SHAPE rewritten,
+    CONF-AUDIT 4.16-4.18) is FC-OP-04 in the registry; the open one (floor control on a separate
+    m=application UDP stream) is FC-OP-04~2. Cite by line until the repo renumbers one of them.
+  owner: lucian
+FC-OP-05:
+  trap: >-
+    Two different open points share this id in PLT-VP-R1 §11: the Message Sequence Number counter
+    scope (FC-OP-05) and IF-PRI having no participant-specific input (FC-OP-05~2).
+  owner: lucian
+VP1-BND-006:
+  note: >-
+    Decided 2026-09-25 (decisions/0002): one release image per profile, core hash identical
+    across images. Built by tools/package.py; never add a per-profile build file.
+  see: [decisions/0002-deployment-images.md]
+PRF-OP-01:
+  owner: lucian
+  note: Profile-owner call. TS 24.379 cannot distinguish two pairs of call types; do not invent a signature.
+OP-06:
+  owner: lucian
+  note: Same question as VP-OP-03 and MED-OP-01 (codec set per profile). Blocks VP1-MED-001.
+  see: [VP-OP-03, MED-OP-01]
+VP-OP-05:
+  owner: lucian
+  note: The production indicator. Three requirements (PLT-GEN-005, PLT-IDM-007, PLT-SEC-008) depend on it.
+FRMCS-OP-01:
+  owner: uic
+  note: >-
+    The FRMCS profile is a STUB with placeholder values, not reconciled with the UIC FRS/SRS.
+    Never use it as safety-case input.
+SHUNT-OP-01:
+  owner: uic
+FC-OP-10:
+  owner: 3gpp-ct1
+IWF-OP-01:
+  owner: 3gpp-ct1
+SIP-OP-12:
+  note: Travels with the VP1-SIG-001 verdict (decisions/0005). Any claim that SIG-001 passed must carry it.
+ICD-OP-12:
+  owner: lucian
+  note: Must be settled before any deployment on a network with a two-digit MNC.
