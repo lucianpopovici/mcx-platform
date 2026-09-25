@@ -146,6 +146,8 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         "MCX_SIP_TLS_CA": str(work / "pki/ca.crt"),
         "MCX_SIP_CLIENT_AUTH": "optional",
         "MCX_SIP_ROLES": "participating,controlling",
+        # RFC 4028 (SIP-OP-17): short, so a run can see a refresh.
+        "MCX_SESSION_EXPIRES": "90",
         # The core under test authenticates its users; by its certificate's
         # DNS name and issuer it may assert their identities (ICD-OP-08,
         # ICD-OP-10). Both are network data.
@@ -353,6 +355,29 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                  not retrans,
                  f"remote target {d1.remote_target}, route set {d1.route_set or '[]'}; "
                  f"{len(retrans)} 200 OK after the ACK")
+
+    # SIP-OP-17 / CA-20b: the 200 OK carries the session timer and the focus
+    # Contact, and a refresh travels the dialog's route set through the core.
+    report.check("CA-20b: the 200 OK carries a session timer (RFC 4028)",
+                 bool(header(final, "Session-Expires")),
+                 f"Session-Expires: {header(final, 'Session-Expires') or '(none)'}; "
+                 f"Require: {header(final, 'Require') or '(none)'}")
+    report.check("CA-20b: the 200 OK Contact is the session identity, with isfocus",
+                 ";gr=" in (header(final, "Contact") or "")
+                 and "isfocus" in (header(final, "Contact") or ""),
+                 header(final, "Contact") or "(none)")
+    u1.in_dialog(d1, "UPDATE", extra=["Supported: timer", "Session-Expires: 90;refresher=uac"])
+    try:
+        upd = u1.wait(r"^SIP/2\.0 [2-6]\d\d", timeout=5, call_id=inv["call_id"],
+                      method="UPDATE")
+        report.check("SIP-OP-17: a session refresh (UPDATE) through the core is answered",
+                     first_line(upd).startswith("SIP/2.0 200")
+                     and (header(upd, "Session-Expires") or "").startswith("90"),
+                     f"{first_line(upd)} / Session-Expires: "
+                     f"{header(upd, 'Session-Expires') or '(none)'}")
+    except TimeoutError:
+        report.check("SIP-OP-17: a session refresh (UPDATE) through the core is answered",
+                     False, "no response within 5 s")
 
     # 3. Teardown -- observed, not judged by VP1-SIG-001.
     u1.in_dialog(d1, "BYE")

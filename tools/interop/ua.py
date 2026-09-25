@@ -233,6 +233,9 @@ class UA:
             f"From: <{self.aor}>;tag={self.tag}", f"To: <{ruri}>",
             f"Call-ID: {cid}", "CSeq: 1 INVITE", "Max-Forwards: 70",
             f"Contact: {self.contact}", f"P-Asserted-Identity: <{self.aor}>",
+            # TS 24.379 10.1.1.2.1.1 / 11.1.1.2.1.1: a client supports RFC
+            # 4028 session timers (SIP-OP-17).
+            "Supported: timer",
             "Accept-Contact: *;+g.3gpp.mcptt;require;explicit",
             f'Accept-Contact: *;+g.3gpp.icsi-ref="{ICSI}";require;explicit',
             f"Content-Type: multipart/mixed;boundary={boundary}",
@@ -281,7 +284,8 @@ class UA:
                       headers(request, "Record-Route"),
                       int((header(request, "CSeq") or "0").split()[0]))
 
-    def in_dialog(self, d: Dialog, method: str, cseq: Optional[int] = None) -> str:
+    def in_dialog(self, d: Dialog, method: str, cseq: Optional[int] = None,
+                  extra: Optional[List[str]] = None) -> str:
         """RFC 3261 §12.2.1.1: Request-URI is the remote target, Route is the
         route set. Loose routing only (every route entry here carries ;lr)."""
         if cseq is None:
@@ -293,7 +297,7 @@ class UA:
         lines += [f"From: <{d.local_uri}>;tag={d.local_tag}",
                   f"To: <{d.remote_uri}>;tag={d.remote_tag}",
                   f"Call-ID: {d.call_id}", f"CSeq: {cseq} {method}",
-                  "Max-Forwards: 70"]
+                  "Max-Forwards: 70"] + list(extra or [])
         return self.send(lines)
 
     def respond(self, request: str, code: int, phrase: str, body: str = "") -> str:
