@@ -243,6 +243,33 @@ LOCAL_WARNING_TEXTS: Mapping[str, str] = {
     PARTNER_UNAVAILABLE: "partner system unavailable",
 }
 
+# The same two refusals of an ad hoc group call, when step 0 (authorisation,
+# PLT-ICD-001 §5.0) refused it (TS 24.379 17.4.2.2 steps 4 and 5; PLT-VP-R1
+# ADHOC-OP-05). Rel-18 onwards; texts from table 4.4.2-2 of V18.13.0 and
+# V20.0.0, which agree. The steps spell 185 "user is not authorised"; the
+# table is followed, as for 187.
+#
+# 185: "The MCPTT user identified by the MCPTT ID is not authorised to
+# initiate the adhoc group call" -- authorise's `not-authorised`. 186: "The
+# MCPTT system doesn't support the adhoc group call" -- only when the profile
+# declares no ad hoc call type at all. A profile that has some, asked for an
+# ad hoc call of a kind it lacks, does support ad hoc calls; that stays
+# 100 "local policy", which is true (review of ADHOC-OP-05).
+ADHOC_WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
+    NOT_AUTHORISED: (185, "user not authorised to initiate the adhoc group call"),
+    CALL_TYPE_NOT_PERMITTED: (186, "the MCPTT system do not support adhoc group call"),
+}
+
+# Step 3A (6.3.3.1.25): an ad hoc call may carry <adhoc-emergency-ind> or
+# <imminentperil-ind>, not both.
+INVALID_COMBINATION = (150, "invalid combinations of data received in MIME body")
+
+# Steps 3B and 3C answer with a body and skip steps 4 and 5, so no MC code
+# goes with it: 185 would say the user may not start ad hoc calls at all,
+# which a caller authorised for ordinary ones is not (review of ADHOC-OP-05).
+# A plain RFC 3261 warn-text keeps the trace readable (see LOCAL_WARNING_TEXTS).
+PRIORITY_ADHOC_REFUSED = "priority adhoc group call not authorised"
+
 REFUSALS_WITHOUT_WARNING_TEXT: Mapping[str, str] = {
     # 141 ("user unknown to the participating function": it cannot associate
     # the public user identity with an MCPTT ID) is the nearest. Here the
@@ -629,6 +656,8 @@ class Adapter:
             if sig is not None:
                 self._by_signature[sig] = ct.id
                 self._signature_of[ct.id] = sig
+        # Step 5 (186) is for a system with no ad hoc call type at all.
+        self._any_adhoc = any(sig.session_type == "adhoc" for sig in self._by_signature)
         # PLT-REL-009. Table 4.4.2-2 grew from 44 codes in Rel-13 to 95 in
         # Rel-20, and one of the three this platform emits (179) does not
         # exist before Rel-17 (PLT-CONF-AUDIT CA-12).
@@ -736,7 +765,9 @@ class Adapter:
         return Request(method="INVITE", uri=signal.target or "",
                        headers=headers, body=body)
 
-    def reject(self, reason_code: str, context: DialogContext) -> Response:
+    def reject(self, reason_code: str, context: DialogContext,
+               invite: Optional[Request] = None,
+               authorisation: bool = False) -> Response:
         """Refuse, with the Warning header shape of TS 24.379 clause 4.4.1.
 
             Warning: 399 mcptt.example "100 function not allowed due to ..."
@@ -744,10 +775,34 @@ class Adapter:
         399 is the RFC 3261 warn-code, the host name is this server's, and the
         MC 3-digit code lives inside the quoted warn-text. A refusal with no
         specification-defined code carries no Warning at all.
+
+        `invite` is the refused INVITE and `authorisation` says step 0
+        refused it. Such a refusal of an ad hoc call is answered as TS 24.379
+        17.4.2.2 orders it (ADHOC-OP-05): steps 3B and 3C when it asked for
+        emergency or imminentperil-ind (a body, no MC code), else step 4
+        (185) or step 5 (186).
         """
         status = REASON_TO_STATUS.get(reason_code, Status.SERVER_ERROR)
         headers = self._common(context)
+        info = self._adhoc_info(invite) if authorisation else None
+        if info is not None and (info.emergency or info.imminent_peril) and \
+                reason_code in ADHOC_WARNING_TEXTS:
+            # Steps 3B (6.3.3.1.13.11) and 3C (6.3.3.1.13.12): not authorised
+            # for that kind of ad hoc call -- including when the profile has
+            # no such call type, so nobody is -- and told so in the body, so
+            # the client does not believe itself in that state.
+            refused = mcinfo.McInfo(
+                emergency=False if info.emergency else None,
+                imminent_peril=False if info.imminent_peril else None)
+            headers.add("Warning", f'{WARNING_CODE_MISC} {self._host} '
+                                   f'"{PRIORITY_ADHOC_REFUSED}"')
+            headers.set("Content-Type", CT_MC_INFO)
+            return Response(status=status, headers=headers,
+                            body=mcinfo.render(refused, self._release, adhoc=True))
         warning = WARNING_TEXTS.get(reason_code)
+        if info is not None and (reason_code != CALL_TYPE_NOT_PERMITTED
+                                 or not self._any_adhoc):
+            warning = ADHOC_WARNING_TEXTS.get(reason_code, warning)
         if warning is not None:
             code, text = warning
             if supports_sip_warning(self._release, code):
@@ -767,6 +822,37 @@ class Adapter:
                 headers.add("Warning",
                             f'{WARNING_CODE_MISC} {self._host} "{local}"')
         return Response(status=status, headers=headers)
+
+    def invalid_adhoc_indications(self, invite: Request) -> bool:
+        """17.4.2.2 step 3A (6.3.3.1.25): an ad hoc INVITE carrying
+        <imminentperil-ind> together with <adhoc-emergency-ind>, whatever
+        their values (encrypted counts as carried)."""
+        info = self._adhoc_info(invite)
+        if info is None:
+            return False
+        imminent = info.imminent_peril is not None or \
+            "imminentperil-ind" in info.encrypted
+        return imminent and info.emergency is not None
+
+    def reject_invalid_combination(self, context: DialogContext) -> Response:
+        code, text = INVALID_COMBINATION
+        headers = self._common(context)
+        headers.add("Warning", f'{WARNING_CODE_MISC} {self._host} "{code} {text}"')
+        return Response(status=Status.FORBIDDEN, headers=headers)
+
+    def _adhoc_info(self, invite: Optional[Request]) -> Optional["mcinfo.McInfo"]:
+        """The MCPTT info of `invite` when it asks for an ad hoc group call
+        this release understands, else None. The INVITE was parsed once
+        already, successfully; a failure here only means no ad hoc refusal."""
+        if invite is None or not supports_session_type(self._release, "adhoc"):
+            return None
+        try:
+            raw = mcinfo.mcinfo_of(invite.headers.get("Content-Type") or "",
+                                   invite.body)
+            info = mcinfo.parse(raw) if raw is not None else None
+        except mcinfo.McInfoError:
+            return None
+        return info if info is not None and info.session_type == "adhoc" else None
 
     def _feature_tags(self, media: Sequence[MediaKind]) -> Tuple[str, ...]:
         tags = []

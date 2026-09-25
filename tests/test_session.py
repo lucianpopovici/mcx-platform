@@ -230,10 +230,12 @@ def test_invocation_order_matches_icd_section_8_1(manager, sink):
     calls = [(r.detail["interface"], r.detail["method"])
              for r in sink.of_type(RecordType.HOOK_INVOCATION)]
     assert calls == [
+        # PLT-ICD-001 0.13 §8.1 step 0 (ICD-OP-09): the initiator's roles,
+        # then authorisation, before anything about the target is looked up.
+        ("IF-IDR", "identities_of"),
+        ("IF-SES", "authorise"),
         ("IF-IDR", "resolve"),
         ("IF-PRI", "evaluate"),
-        # PLT-ICD-001 0.7 §8.1 step 4a: the initiator's roles, for admission.
-        ("IF-IDR", "identities_of"),
         ("IF-SES", "admit"),
         ("IF-SES", "decide"),
         ("IF-SES", "floor_policy"),
@@ -247,14 +249,16 @@ def test_external_target_inserts_the_interworking_call(manager, sink):
     calls = [(r.detail["interface"], r.detail["method"])
              for r in sink.for_session("ext")
              if r.type is RecordType.HOOK_INVOCATION]
-    assert calls[:2] == [("IF-IDR", "resolve"), ("IF-IWF", "route")]
+    assert calls[2:4] == [("IF-IDR", "resolve"), ("IF-IWF", "route")]
 
 
 def test_sequence_stops_at_first_failure(manager, sink):
     """No hook after the failing one is invoked, and none is compensated."""
     manager.establish(req(target="grp:nonexistent"))
-    calls = [r.detail["interface"] for r in sink.of_type(RecordType.HOOK_INVOCATION)]
-    assert calls == ["IF-IDR"]
+    calls = [(r.detail["interface"], r.detail["method"])
+             for r in sink.of_type(RecordType.HOOK_INVOCATION)]
+    assert calls == [("IF-IDR", "identities_of"), ("IF-SES", "authorise"),
+                     ("IF-IDR", "resolve")]
 
 
 def test_vp1_hook_001_hook_exception_fails_session(mcx, sink):
@@ -333,7 +337,7 @@ def test_vp1_hook_002_contract_violation_is_distinguished(mcx, sink):
 def test_vp1_hook_003_every_invocation_audited(manager, sink):
     manager.establish(req())
     records = sink.of_type(RecordType.HOOK_INVOCATION)
-    assert len(records) == 7
+    assert len(records) == 8
     for r in records:
         assert r.detail["interface"].startswith("IF-")
         assert "elapsed_ms" in r.detail
@@ -576,3 +580,160 @@ def test_start_floor_is_a_no_op_for_a_session_without_a_floor(manager):
                                           media=(MediaKind.DATA,)))
     assert session.floor is None
     assert manager.start_floor("s1") == ()
+
+
+# -- ICD-OP-09: IF-SES.authorise, before the target is looked up (§8.1 step 0) --
+
+
+def _with_policy(mcx, sink, **override):
+    """The mcx hooks, with the session policy's methods replaced by `override`."""
+    base = mcx.hooks.session_policy
+
+    class Policy:
+        def __getattr__(self, name):
+            return override.get(name) or getattr(base, name)
+
+    for i in range(4):
+        mcx.hooks.identity_resolver.register_user(f"sip:u{i}@mcptt.example")
+    hooks = loader.LoadedHooks(
+        identity_resolver=mcx.hooks.identity_resolver,
+        priority_policy=mcx.hooks.priority_policy,
+        session_policy=Policy(),
+        bearer_selector=mcx.hooks.bearer_selector,
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
+    lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+
+
+def test_a_refused_authorisation_stops_before_resolution(mcx, sink):
+    from core.hooks import Admission
+    mgr = _with_policy(mcx, sink, authorise=lambda r: Admission(False, "not-authorised"))
+    session, _, refusal = mgr.establish(req(call_type="private",
+                                            target="sip:u1@mcptt.example"))
+    assert session is None and refusal.reason_code == "not-authorised"
+    calls = [r.detail["method"] for r in sink.of_type(RecordType.HOOK_INVOCATION)]
+    assert calls == ["identities_of", "authorise"]
+
+
+def test_authorise_sees_the_roles_the_core_looked_up_not_the_requests(mcx, sink):
+    seen = {}
+
+    def authorise(r):
+        from core.hooks import Admission
+        seen.update(r.attributes)
+        seen["_request"] = r
+        return Admission(True, "")
+    mgr = _with_policy(mcx, sink, authorise=authorise)
+    mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
+                      attributes={"initiator.roles": "dispatcher"}))
+    assert seen["initiator.roles"] == ""        # u0 holds no functional identity
+    assert "core.active_sessions" not in seen   # capacity is admit's, not authorise's
+
+
+def test_authorise_cannot_see_who_is_called(mcx, sink):
+    """§5.0 INV-1, structural: every field naming or selecting the called
+    party is emptied before authorise sees the request (review of ICD-OP-09)."""
+    seen = []
+
+    def authorise(r):
+        from core.hooks import Admission
+        seen.append(r)
+        return Admission(True, "")
+    mgr = _with_policy(mcx, sink, authorise=authorise)
+    mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
+                      participants=("sip:u2@mcptt.example",),
+                      participant_criteria="anyone", adhoc_alert_group=True))
+    (r,) = seen
+    assert (r.target, tuple(r.participants), r.participant_criteria,
+            r.adhoc_alert_group) == ("", (), None, False)
+    assert (r.initiator, r.call_type) == ("sip:u0@mcptt.example", "private")
+
+
+def test_no_hook_sees_roles_the_request_carried(mcx, sink):
+    """The core writes `initiator.roles` once, before step 0; every hook after
+    that sees the core's value (review of ICD-OP-09: resolve and decide used
+    to see the client's)."""
+    from core.hooks import Admission
+    seen = {}
+    r_ = mcx.hooks.identity_resolver
+    orig = r_.resolve
+
+    def resolve(target, request):
+        seen["resolve"] = request.attributes.get("initiator.roles")
+        return orig(target, request)
+    r_.resolve = resolve
+    base = mcx.hooks.session_policy
+
+    def decide(request, res):
+        seen["decide"] = request.attributes.get("initiator.roles")
+        return base.decide(request, res)
+    mgr = _with_policy(mcx, sink, decide=decide)
+    session, _, _ = mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
+                                      attributes={"initiator.roles": "dispatcher"}))
+    assert seen == {"resolve": "", "decide": ""}
+    assert session.request.attributes["initiator.roles"] == ""
+
+
+def test_admit_on_an_undeclared_call_type_is_a_contract_violation(mcx):
+    """A subclass whose authorise lets through what the table lacks is a
+    profile defect, reported as one (review of ICD-OP-09)."""
+    res = Resolution(kind=ResolutionKind.USER, members=("sip:a@mcptt.example",))
+    prio = mcx.hooks.priority_policy.evaluate(req(call_type="private"), res)
+    with pytest.raises(HookContractViolation) as exc:
+        mcx.hooks.session_policy.admit(req(call_type="nope"), res, prio)
+    assert "undeclared call type 'nope'" in str(exc.value)
+
+
+@pytest.mark.parametrize("method", ["authorise", "admit"])
+@pytest.mark.parametrize("permitted, code", [
+    (True, "not-authorised"),        # a permission carrying a code
+    (False, ""),                     # a refusal without one
+    (False, "made-up-code"),         # a refusal with a code nobody declared
+])
+def test_an_ill_formed_admission_is_a_contract_violation(mcx, sink, method, permitted, code):
+    """§5.1 POST-2 and POST-3, checked by the core for both methods."""
+    from core.errors import HOOK_CONTRACT_VIOLATION
+    from core.hooks import Admission
+    bad = lambda *a: Admission(permitted, code)      # noqa: E731
+    mgr = _with_policy(mcx, sink, **{method: bad})
+    session, _, refusal = mgr.establish(req(call_type="private",
+                                            target="sip:u1@mcptt.example"))
+    assert session is None and refusal.reason_code == HOOK_CONTRACT_VIOLATION
+
+
+def test_the_table_policy_splits_authorisation_from_admission():
+    """authorise: the call type and the initiator's roles. admit: what
+    depends on the target. Pinned for the frmcs shunting call type."""
+    from core.hooks import Admission
+    frmcs = loader.load(PROFILES / "frmcs")
+    policy = frmcs.hooks.session_policy
+
+    def r(roles):
+        return req(call_type="shunting-group", target="adhoc",
+                   attributes={"initiator.roles": roles})
+    assert policy.authorise(r("")) == Admission(False, "not-authorised")
+    assert policy.authorise(r("train-driver,x")) == Admission(False, "not-authorised")
+    assert policy.authorise(r("shunting-team-leader")) == Admission(True, "")
+    assert policy.authorise(req(call_type="nope")) == \
+        Admission(False, "call-type-not-permitted")
+    # admit no longer re-checks roles: authorise did.
+    res = Resolution(kind=ResolutionKind.GROUP, group_id="g",
+                     members=("sip:a@frmcs.example",))
+    prio = frmcs.hooks.priority_policy.evaluate(r(""), res)
+    assert policy.admit(r(""), res, prio) == Admission(True, "")
+
+
+def test_admit_sees_the_same_roles_and_the_capacity(mcx, sink):
+    """§5.1: admission keeps the roles authorisation saw (a profile may still
+    read them there), and gains the session count."""
+    seen = {}
+    base = mcx.hooks.session_policy
+
+    def admit(r, res, prio):
+        seen.update(r.attributes)
+        return base.admit(r, res, prio)
+    mgr = _with_policy(mcx, sink, admit=admit)
+    mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
+                      attributes={"initiator.roles": "forged"}))
+    assert seen["initiator.roles"] == "" and seen["core.active_sessions"] == "0"

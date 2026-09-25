@@ -264,7 +264,7 @@ class Config:
                 "MCX_ADHOC_LIST_MAX is not set: state how many entries an ad hoc "
                 "caller's participant list may hold (a positive integer); there "
                 "is no default, because an unbounded list is unbounded work "
-                "before the caller is authorised")
+                "before any participant is resolved")
         if not raw_max.isdigit() or int(raw_max) < 1:
             raise StartupRefused(
                 f"MCX_ADHOC_LIST_MAX={raw_max!r} must be a whole number of at least 1")

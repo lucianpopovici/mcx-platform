@@ -345,7 +345,8 @@ def test_a_caller_without_the_role_is_still_refused(core, world):
                       body=mcf.adhoc_body(SDP, mcf.adhoc_xml(), mcf.resource_list([F[1]])),
                       ctype=mcf.CONTENT_TYPE), world[F[2]])
     code, warning = refusal(world[F[2]])
-    assert code == 403 and "user authorisation" in warning
+    assert (code, warning) == (403, '399 mcptt.example "185 user not authorised '
+                                    'to initiate the adhoc group call"')
     assert world[F[1]].requests("INVITE") == []
 
 
@@ -458,11 +459,12 @@ def test_ad_hoc_is_not_understood_before_rel_18(tmp_path, pki, clock):
         c.on_bytes(adhoc_invite("rv7", mcf.adhoc_xml(criteria="train-driver")),
                    flows[F[0]])
         code, warning = refusal(flows[F[0]])
-        # The ordinary path: resolution of the request's target fails first
-        # (404, 145), as for any session type the release lacks. (An ad hoc
-        # refusal would be 403 -- its 187 text is suppressed before Rel-18,
-        # so the status is what tells the paths apart.)
-        assert code == 404 and "145 " in warning
+        # The ordinary path: no call type of the profile is this one, so
+        # authorisation refuses it (403, 100) before anything is looked up
+        # (ICD-OP-09), as for any session type the release lacks. Not an ad
+        # hoc refusal: no 187, and no participant was resolved.
+        assert code == 403 and "100 function not allowed" in warning
+        assert "187" not in warning
     finally:
         c.close()
         r.close()
@@ -546,3 +548,195 @@ def test_the_cap_does_not_limit_criteria(core, rt, world):
     core.on_bytes(adhoc_invite("cap4", mcf.adhoc_xml(criteria="train-driver")),
                   world[F[0]])
     assert all(world[u].requests("INVITE") for u in many)
+
+
+# ============================================================ ICD-OP-09: authorise first
+
+
+def _unauthorised_adhoc(core, world, cid, xml, rl=None):
+    """F1 holds no role; the shunting call type needs shunting-team-leader."""
+    core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[1], LOCAL,
+                      body=mcf.adhoc_body(SDP, xml, rl), ctype=mcf.CONTENT_TYPE),
+                  world[F[1]])
+    return refusal(world[F[1]])
+
+
+def _refusal_and_lookups(rt, flow, cid):
+    looked_up = [r["detail"]["method"] for r in rt.store.audit_records(cid)
+                 if r["type"] == "hook-invocation"]
+    refused = [r["detail"]["reason_code"] for r in rt.store.audit_records(cid)
+               if r["type"] == "session-refused"]
+    return refusal(flow), looked_up, refused
+
+
+def test_an_unauthorised_ad_hoc_caller_learns_nothing_about_the_target(core, rt, world):
+    """TS 24.379 17.4.2.2 authorises (steps 4, 5) before it checks the list
+    length (step 6) or determines who to call (step 12). One answer, however
+    the target is given, and nobody is looked up, let alone invited."""
+    cases = [
+        (mcf.adhoc_xml(criteria="train-driver"), None),         # matches F3
+        (mcf.adhoc_xml(criteria="no-such-role"), None),         # matches nobody
+        (mcf.adhoc_xml(), mcf.resource_list([F[2], F[3]])),     # real users
+        (mcf.adhoc_xml(), mcf.resource_list(["sip:ghost@frmcs.example"])),
+        # over the call type's limit (30) and the deployment cap (100):
+        # would be 189 for an authorised caller
+        (mcf.adhoc_xml(), mcf.resource_list(
+            [f"sip:x{i}@frmcs.example" for i in range(101)])),
+        (mcf.adhoc_xml(criteria="train-driver"), mcf.resource_list([F[2]])),
+    ]
+    seen = set()
+    for n, (xml, rl) in enumerate(cases):
+        world[F[1]].sent.clear()
+        cid = f"ua{n}"
+        core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[1], LOCAL,
+                          body=mcf.adhoc_body(SDP, xml, rl), ctype=mcf.CONTENT_TYPE),
+                      world[F[1]])
+        (code, warning), looked_up, refused = _refusal_and_lookups(rt, world[F[1]], cid)
+        assert code == 403 and looked_up == ["identities_of", "authorise"], n
+        assert refused == ["not-authorised"], n
+        seen.add(warning)
+    assert len(seen) == 1                    # the same words every time
+    assert all(not world[u].requests("INVITE") for u in F if u != F[1])
+
+
+def test_an_unauthorised_private_caller_learns_nothing_about_the_target(core, rt, world):
+    """The same for a restricted call type that is not ad hoc (frmcs
+    driver-controller, for train drivers and controllers). F1 holds neither."""
+    targets = [F[2], "sip:ghost@frmcs.example", "sip:x@other.example"]
+    seen = set()
+    for n, target in enumerate(targets):
+        world[F[1]].sent.clear()
+        cid = f"up{n}"
+        core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[1], LOCAL,
+                          body=mcf.body_for("private", target, SDP),
+                          ctype=mcf.CONTENT_TYPE), world[F[1]])
+        (code, warning), looked_up, refused = _refusal_and_lookups(rt, world[F[1]], cid)
+        assert code == 403 and looked_up == ["identities_of", "authorise"], target
+        assert refused == ["not-authorised"], target
+        seen.add(warning)
+    assert len(seen) == 1
+    # For contrast: the train driver, authorised, is told the target is unknown.
+    core.on_bytes(msg("INVITE", LOCAL, "up-ok", 1, F[3], LOCAL,
+                      body=mcf.body_for("private", "sip:ghost@frmcs.example", SDP),
+                      ctype=mcf.CONTENT_TYPE), world[F[3]])
+    (code, _), looked_up, _ = _refusal_and_lookups(rt, world[F[3]], "up-ok")
+    assert code == 404 and "resolve" in looked_up
+
+
+# ============================================================ ADHOC-OP-05: 3A-3C, 185, 186
+
+
+def _imminent(xml):
+    """The ad hoc body with <imminentperil-ind> true (annex F.1 order: after
+    session-type and the URIs, before anyExt)."""
+    flag = ('<imminentperil-ind type="Normal"><mcpttBoolean>true</mcpttBoolean>'
+            "</imminentperil-ind>")
+    return xml.replace("</session-type>", "</session-type>" + flag, 1)
+
+
+def _final(flow):
+    (resp,) = [m for m in flow.messages() if isinstance(m, ReceivedResponse)
+               and m.code >= 300]
+    return resp
+
+
+def _send(core, world, cid, sender, xml, rl=None):
+    core.on_bytes(msg("INVITE", LOCAL, cid, 1, sender, LOCAL,
+                      body=mcf.adhoc_body(SDP, xml, rl), ctype=mcf.CONTENT_TYPE),
+                  world[sender])
+    return _final(world[sender])
+
+
+PRIORITY = '399 mcptt.example "priority adhoc group call not authorised"'
+
+
+def test_an_unauthorised_emergency_ad_hoc_call_is_told_it_is_not_one(core, world):
+    """Step 3B: rec-broadcast is for train drivers and controllers; F1 is
+    neither. The body says the emergency was not granted; no MC code, since
+    3B skips step 4 (185)."""
+    resp = _send(core, world, "x3b", F[1], mcf.adhoc_xml(criteria="rec-area", emergency=True))
+    assert (resp.code, resp.headers.get("Warning")) == (403, PRIORITY)
+    assert resp.headers.get("Content-Type") == mcf.CT_MCINFO
+    assert "<anyExt><adhoc-emergency-ind>false</adhoc-emergency-ind></anyExt>" in resp.body
+    assert "<session-type>" not in resp.body and "<emergency-ind" not in resp.body
+    assert all(not world[u].requests("INVITE") for u in F if u != F[1])
+
+
+def test_a_caller_authorised_for_ordinary_ad_hoc_calls_is_not_told_185(core, world):
+    """The shunting team leader may start ad hoc calls, just not emergency
+    ones. 185 would tell it otherwise (review of ADHOC-OP-05)."""
+    resp = _send(core, world, "x3b2", F[0], mcf.adhoc_xml(criteria="rec-area", emergency=True))
+    assert (resp.code, resp.headers.get("Warning")) == (403, PRIORITY)
+    assert "185" not in resp.headers.get("Warning")
+
+
+def test_an_ad_hoc_kind_nobody_may_start_is_answered_3c(core, world):
+    """Step 3C (6.3.3.1.13.12): frmcs declares no imminent peril ad hoc call
+    type, so nobody is authorised for one, and 3C comes before step 5."""
+    resp = _send(core, world, "x3c", F[3], _imminent(mcf.adhoc_xml(criteria="train-driver")))
+    assert (resp.code, resp.headers.get("Warning")) == (403, PRIORITY)
+    assert '<imminentperil-ind type="Normal"><mcpttBoolean>false</mcpttBoolean>' in resp.body
+
+
+@pytest.mark.parametrize("emergency", [True, False])
+def test_both_indications_are_an_invalid_combination(core, rt, world, emergency):
+    """Step 3A (6.3.3.1.25), before authorisation: <imminentperil-ind> with
+    <adhoc-emergency-ind>, whatever its value. Nothing is looked up."""
+    xml = _imminent(mcf.adhoc_xml(criteria="train-driver", emergency=emergency))
+    resp = _send(core, world, f"x3a{emergency}", F[0], xml)
+    assert (resp.code, resp.headers.get("Warning")) == (
+        403, '399 mcptt.example "150 invalid combinations of data received in MIME body"')
+    assert not resp.body and rt.store.audit_records(f"x3a{emergency}") == []
+
+
+def test_an_ad_hoc_kind_the_profile_lacks_without_an_indication_is_local_policy(core, world):
+    """frmcs supports ad hoc calls, so 186 ("the system does not support
+    them") would be false for a kind it lacks. <broadcast-ind> makes such a
+    kind: no frmcs ad hoc call type declares it."""
+    xml = mcf.adhoc_xml(criteria="train-driver").replace(
+        "</session-type>", "</session-type><broadcast-ind>true</broadcast-ind>", 1)
+    resp = _send(core, world, "x100", F[0], xml)
+    assert (resp.code, resp.headers.get("Warning")) == (
+        403, '399 mcptt.example "100 function not allowed due to local policy"')
+
+
+def test_an_unauthorised_ordinary_ad_hoc_call_carries_no_body(core, world):
+    resp = _send(core, world, "x185", F[1], mcf.adhoc_xml(criteria="train-driver"))
+    assert "185 " in resp.headers.get("Warning") and not resp.body
+    assert resp.headers.get("Content-Type") is None
+
+
+def test_an_ad_hoc_system_without_ad_hoc_is_refused_186(tmp_path, pki, clock):
+    """Step 5: the mcx profile declares no ad hoc call type at all."""
+    from service.runtime import build_runtime
+    from service.sip_core import SipCore
+    U0 = "sip:u0@mcptt.example"
+    r = build_runtime(sip_env(tmp_path, pki), clock, platform=Platform())
+    c = SipCore(r, LOCAL, clock)
+    try:
+        f = Flow(U0)
+        register(c, U0, f)
+        f.sent.clear()
+        c.on_bytes(msg("INVITE", LOCAL, "x186", 1, U0, LOCAL,
+                       body=mcf.adhoc_body(SDP, mcf.adhoc_xml(criteria="anyone")),
+                       ctype=mcf.CONTENT_TYPE), f)
+        resp = _final(f)
+        assert (resp.code, resp.headers.get("Warning")) == (
+            403, '399 mcptt.example "186 the MCPTT system do not support adhoc group call"')
+    finally:
+        c.close()
+        r.close()
+
+
+def test_the_ad_hoc_codes_are_for_authorisation_refusals_only(core, rt, world):
+    """A later step's `not-authorised` (here a criteria resolver that raises
+    it) is not step 4, so it is not 185 (review of ADHOC-OP-05)."""
+    from profiles.common.tables import ResolutionFailure
+    resolver = rt.loaded.hooks.identity_resolver
+
+    def refuse(criteria, request):
+        raise ResolutionFailure("not-authorised", "criteria not addressable")
+    resolver.determine_participants = refuse
+    resp = _send(core, world, "xlate", F[0], mcf.adhoc_xml(criteria="train-driver"))
+    assert resp.code == 403 and "185" not in resp.headers.get("Warning")
+    assert "100 function not allowed due to user authorisation" in resp.headers.get("Warning")
