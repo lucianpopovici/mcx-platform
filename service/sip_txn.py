@@ -137,6 +137,13 @@ class ServerTransactions:
         txn.expires_at = self._now() + 64 * self._t1
         return txn
 
+    def unconfirm(self, txn: ServerTxn) -> None:
+        """Undo absorb_ack for an ACK the core refused (foreign tags) on an
+        INVITE's 2xx: the 2xx goes on being retransmitted, and the genuine ACK
+        still matches."""
+        txn.state = ACCEPTED
+        txn.expires_at = self._now() + 64 * self._t1
+
     # -- timers ----------------------------------------------------------
 
     def tick(self) -> ServerEvents:

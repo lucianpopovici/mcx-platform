@@ -17,6 +17,7 @@ into messages and messages into requests.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import re
 import secrets
@@ -25,16 +26,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import dataclasses
 import threading
+import uuid
+import weakref
 
 from core.errors import IDENTITY_NOT_AUTHENTICATED, NOT_AUTHORISED
 from core.hooks import MediaKind
 from core.invoke import Invoker
 from core.session import Session, Signal, SignalType
 from core.sip import (
-    Adapter, DialogContext, Headers, InboundGuard, ReceivedResponse, Request,
+    ALLOW, Adapter, DialogContext, Headers, InboundGuard, ReceivedResponse, Request,
     RegistrationStore, Response, SipError, Status, build_sdp, canonical_uri,
     negotiate,
     parse_message, parse_sdp,
+    OPTION_TIMER, SUPPORTED_ON_ANSWER, SUPPORTED_ON_PROVISIONAL, allows,
+    parse_min_se, uac_session_timer, uas_session_timer,
 )
 
 from core import mcinfo
@@ -42,12 +47,13 @@ from core.mcinfo import sdp_of
 
 from .media import MediaSession, UdpMediaPlane
 from .runtime import Runtime
+from .session_timer import DialogTimer
 from .sip_txn import (ClientTransactions, ClientTxn, ServerTransactions,
                       ServerTxn, cseq_of, top_branch)
 
 log = logging.getLogger("mcx.sip")
 
-ALLOWED = "INVITE, ACK, BYE, CANCEL, REGISTER, OPTIONS"
+ALLOWED = ALLOW          # core/sip.py: UPDATE added for RFC 4028 refresh
 _ECHOED = ("via", "from", "to", "call-id", "cseq")
 _STATUS_BY_CODE = {s.code: s for s in Status}
 _EXPIRES_PARAM = re.compile(r";\s*expires=(\d+)", re.I)
@@ -75,6 +81,20 @@ class Leg:
     # RFC 3261 9.1: "" -- not cancelled; "pending" -- owed a CANCEL, which
     # waits for a provisional response; "sent".
     cancel: str = ""
+    # RFC 4028 (CA-20b, SIP-OP-17). What the leg's INVITE offered and asked
+    # for, the answer it got, and the dialog's session timer once answered.
+    sig: Any = None
+    offer_sdp: str = ""
+    remote_sdp: str = ""
+    session_expires: int = 0
+    min_se: int = 0
+    answer_by: Optional[int] = None
+    timer: Optional[DialogTimer] = None
+    refresh: Any = None                # a Refresh the platform sent, pending
+    remote_cseq: int = 0               # the callee's last in-dialog CSeq
+    peer_allows_update: bool = False
+    awaiting_answer: bool = False      # our offer (offerless re-INVITE) awaits the ACK
+    retired: Any = field(default_factory=weakref.WeakSet)   # connections it left
 
 
 @dataclass
@@ -97,6 +117,41 @@ class Call:
     # RFC 3261 12.1.1, from the INVITE: where requests toward the initiator go.
     remote_target: str = ""
     route_set: List[str] = field(default_factory=list)
+    # TS 24.379 clause 4.5: a GRUU (RFC 5627) hosted here, unique to this
+    # session, carrying neither MCPTT ID nor group ID. It is the Contact of
+    # every dialog of the call (CA-20b).
+    session_uri: str = ""
+    # RFC 4028: the timer negotiated on the INVITE, and the dialog's timer
+    # once the 200 OK is sent; the SDP the platform answered with.
+    st: Any = None
+    timer: Optional[DialogTimer] = None
+    refresh: Any = None
+    remote_cseq: int = 0
+    peer_allows_update: bool = False
+    answer_sdp: str = ""
+    awaiting_answer: bool = False
+    retired: Any = field(default_factory=weakref.WeakSet)
+
+
+@dataclass
+class Refresh:
+    """A session refresh the platform sent on one dialog (RFC 4028 section
+    10): the call, the leg (None: the initiator's dialog), and the ACK sent
+    for a re-INVITE's 2xx, re-sent for each retransmission of it."""
+    call: Call
+    leg: Optional[Leg]
+    seconds: int
+    ack: str = ""
+    method: str = "UPDATE"
+    txn: Any = None
+
+
+@dataclass
+class AwaitingAnswer:
+    """An offerless re-INVITE the platform answered with an offer: the ACK
+    carries the peer's answer (RFC 3261 14.2)."""
+    call: Call
+    leg: Optional[Leg]
 
 
 def _header_values(values) -> List[str]:
@@ -201,8 +256,16 @@ def _offer_of(invite: Request) -> str:
         raise SipError(str(exc)) from None
 
 
+_TAG_KEY = secrets.token_bytes(32)
+
+
 def _tag(seed: str) -> str:
-    return "mcx-" + hashlib.sha1(seed.encode()).hexdigest()[:10]
+    """The platform's tag for a dialog it answers. Keyed with a per-process
+    secret: a plain hash of the Call-ID could be computed by any callee,
+    which learns the caller's Call-ID from its own leg's, and so could forge
+    the caller's side of the dialog on a shared (core) connection (review of
+    SIP-OP-17)."""
+    return "mcx-" + hmac.new(_TAG_KEY, seed.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 class SipCore:
@@ -235,6 +298,11 @@ class SipCore:
         self.server = ServerTransactions(clock, t1=t1)
         self.client = ClientTransactions(clock, t1=t1)
         self.flows_by_user: Dict[str, Any] = {}
+        sip_cfg = runtime.config.sip
+        if sip_cfg is None:
+            raise ValueError("SIP requires MCX_SIP_* configuration")
+        # RFC 4028: the interval asked for, and the cap on a longer one.
+        self._session_expires = sip_cfg.session_expires
         # From the network profile (ICD-OP-08, ICD-OP-10).
         self._trusted_cores = set(runtime.network.trusted_cores)
         self.calls: Dict[str, Call] = {}
@@ -256,7 +324,14 @@ class SipCore:
             log.warning("dropped unparseable message: %s", exc)
             return
         if isinstance(message, ReceivedResponse):
-            self._on_response(message, flow)
+            try:
+                self._on_response(message, flow)
+            except Exception:  # noqa: BLE001 - one bad response, not the flow
+                # Requests are guarded in _on_request; a fault here would
+                # otherwise end the reader of this connection, and with a
+                # trusted core that is every user behind it (review of
+                # SIP-OP-17).
+                log.exception("fault handling a %s response", message.code)
         else:
             self._on_request(message, flow)
 
@@ -267,9 +342,29 @@ class SipCore:
     def _on_request(self, req: Request, flow: Any) -> None:
         # 1 — retransmission?
         if req.method == "ACK":
-            if self.server.absorb_ack(req, flow) is None:
+            acked = self.server.absorb_ack(req, flow)
+            if acked is None:
                 log.info("stray ACK dropped call-id=%s",
                          req.headers.get("Call-ID"))
+            elif isinstance(acked.user, AwaitingAnswer):
+                waiting = acked.user
+                if self._dialog_for(req, flow, acking=True) != (waiting.call, waiting.leg):
+                    # absorb_ack matched Call-ID, CSeq and connection, not the
+                    # tags; on a shared core connection that is not enough to
+                    # let this ACK move anyone's media (review of SIP-OP-17).
+                    # Nor to confirm the transaction: the genuine ACK must
+                    # still match it (re-review of SIP-OP-17).
+                    self.server.unconfirm(acked)
+                    log.warning("ACK with foreign tags for call-id=%s ignored",
+                                req.headers.get("Call-ID"))
+                    return
+                acked.user = None
+                state = waiting.leg if waiting.leg is not None else waiting.call
+                state.awaiting_answer = False
+                try:
+                    self._apply_answer(waiting.call, waiting.leg, req)
+                except Exception:  # noqa: BLE001
+                    log.exception("fault applying an ACK answer")
             return
         seen = self.server.match(req)
         if seen is not None:
@@ -287,6 +382,7 @@ class SipCore:
         # 3 — dispatch
         handler = {"REGISTER": self._register, "INVITE": self._invite,
                    "BYE": self._bye, "CANCEL": self._cancel,
+                   "UPDATE": self._in_dialog,
                    "OPTIONS": self._options}.get(req.method)
         if handler is None:
             resp = Response(Status.NOT_IMPLEMENTED,
@@ -321,7 +417,9 @@ class SipCore:
         # into each response that can create a dialog. Without it the
         # initiator has no route set, and its ACK and BYE reach the proxy
         # with no Route header -- which Kamailio, correctly, dropped.
-        if req.method == "INVITE" and 100 < resp.status.code < 300:
+        if req.method == "INVITE" and 100 < resp.status.code < 300 \
+                and not _tag_of(req.headers.get("To")):
+            # A re-INVITE does not change the route set (12.2).
             for v in _header_values(req.headers.get_all("Record-Route")):
                 h.add("Record-Route", v)
         for n, v in resp.headers.items():
@@ -395,6 +493,9 @@ class SipCore:
         return canonical_uri(identity) in getattr(flow, "peer_uris", ())
 
     def _invite(self, req: Request, txn: ServerTxn, flow: Any) -> None:
+        if _tag_of(req.headers.get("To")):
+            # A To tag: a request within a dialog, a re-INVITE (SIP-OP-17).
+            return self._in_dialog(req, txn, flow)
         sr = self.adapter.parse_invite(req)
         if not self._authenticated_as(flow, sr.initiator):
             # Checked before anything is established or anyone invited: the
@@ -413,10 +514,19 @@ class SipCore:
             # request alone, before authorisation, as the step order says.
             ctx = DialogContext(call_id=txn.call_id, local_uri=self.local_uri)
             return self._final(txn, self.adapter.reject_invalid_combination(ctx))
+        # RFC 4028 section 9, before anything is established: an interval
+        # below 90 s is answered 422 with the Min-SE (CA-20b).
+        st = uas_session_timer(req.headers, self._session_expires)
+        if isinstance(st, int):
+            return self._final(txn, Response(Status.SESSION_INTERVAL_TOO_SMALL,
+                                             Headers([("Min-SE", str(st))])))
         call = Call(cid=sr.request_id, invite=req, sr=sr, txn=txn, flow=flow,
                     initiator=sr.initiator,
                     remote_target=_addr_uri(req.headers.get("Contact") or "") or sr.initiator,
-                    route_set=_header_values(req.headers.get_all("Record-Route")))
+                    route_set=_header_values(req.headers.get_all("Record-Route")),
+                    session_uri=self._session_identity(), st=st,
+                    remote_cseq=cseq_of(req.headers)[0],
+                    peer_allows_update=allows(req.headers, "UPDATE"))
         self._provisional(txn, Response(Status.TRYING))
         self._pending[call.cid] = call
         try:
@@ -513,8 +623,11 @@ class SipCore:
             return
         target = sig.target or ""
         flow = self.flows_by_user.get(target)
-        leg = Leg(uri=target, call_id=f"{call.cid}.leg{len(call.legs) + 1}",
-                  flow=flow)
+        # Random, not "<call>.legN": every member would otherwise know the
+        # caller's Call-ID and every other leg's, and with them the platform's
+        # tag on each ("<Call-ID>-l"). The tags are part of what binds a dialog
+        # to its party (review of the reconnect decision, SIP-OP-18 item 6).
+        leg = Leg(uri=target, call_id=f"mcx-{secrets.token_hex(12)}", flow=flow)
         if flow is None:
             # Unregistered, or its flow is gone: the leg is dead on arrival.
             leg.state = "failed"
@@ -524,18 +637,38 @@ class SipCore:
         if call.media is not None:
             call.media.add(target)
             sdp = self._relay_sdp(call, target)
-        ctx = DialogContext(call_id=leg.call_id, local_uri=self.local_uri,
-                            sdp=sdp)
-        leg.invite_cseq = leg.cseq = ctx.cseq
-        req = self.adapter.render(sig, ctx, call.sr)
-        req = self._with_branch(req)
         secs = self._no_answer_s.get(call.sr.call_type)
-        leg.txn = self.client.start(
-            req, flow, user=leg,
-            answer_by=self.clock() + secs * 1000 if secs else None)
+        leg.sig, leg.offer_sdp = sig, sdp
+        leg.session_expires = self._session_expires
+        leg.answer_by = self.clock() + secs * 1000 if secs else None
         call.legs[leg.call_id] = leg
         self._dialogs[leg.call_id] = call
-        flow.send(req.render())
+        self._send_leg_invite(call, leg, cseq=1)
+
+    def _send_leg_invite(self, call: Call, leg: Leg, cseq: int) -> None:
+        """The leg's INVITE: the focus Contact with the session identity,
+        Supported: timer and Session-Expires (6.3.3.1.2 items 1, 6, 7), and
+        the Min-SE a 422 imposed on a retry (RFC 4028 7.4)."""
+        ctx = DialogContext(call_id=leg.call_id, local_uri=self.local_uri,
+                            cseq=cseq, sdp=leg.offer_sdp,
+                            session_uri=call.session_uri,
+                            session_expires=leg.session_expires,
+                            min_se=leg.min_se)
+        leg.invite_cseq = leg.cseq = ctx.cseq
+        req = self._with_branch(self.adapter.render(leg.sig, ctx, call.sr))
+        leg.state = "inviting"
+        leg.txn = self.client.start(req, leg.flow, user=leg,
+                                    answer_by=leg.answer_by)
+        leg.flow.send(req.render())
+
+    def _session_identity(self) -> str:
+        """A public GRUU on the server's own address of record, its `gr`
+        value an opaque instance identifier (RFC 5627 3.1; TS 24.379 4.5)."""
+        return f"{self.local_uri};gr=urn:uuid:{uuid.uuid4()}"
+
+    def _contact(self, call: Call) -> str:
+        media = tuple(getattr(call.sr, "media", ()) or ()) or (MediaKind.VOICE,)
+        return self.adapter.focus_contact(call.session_uri, media)
 
     def _with_branch(self, req: Request) -> Request:
         # Unique AND unguessable: responses are matched to transactions by
@@ -554,6 +687,13 @@ class SipCore:
         if txn is None:
             log.info("response with no transaction dropped code=%s", resp.code)
             return
+        if txn.flow is not flow and isinstance(txn.user, Refresh) and \
+                flow in (txn.user.leg or txn.user.call).retired:
+            # The platform's refresh went out on a connection the dialog has
+            # since left, and is answered there (RFC 3261 18.2.2); its 2xx is
+            # ACKed there too, and otherwise ignored (review of SIP-OP-18
+            # item 6, N4).
+            txn.flow = flow
         if txn.flow is not flow or resp.headers.get("Call-ID") != \
                 txn.request.headers.get("Call-ID"):
             # A response belongs to the connection its request went out on,
@@ -563,6 +703,8 @@ class SipCore:
             log.warning("response from another flow or Call-ID dropped code=%s",
                         resp.code)
             return
+        if isinstance(txn.user, Refresh):
+            return self._refresh_response(txn, resp)
         if txn.user is None:
             # A BYE that ended a stray forked dialog: nothing waits on it.
             if resp.code >= 200:
@@ -609,10 +751,16 @@ class SipCore:
             if resp.code >= 200:
                 self.client.finish(txn)
             return
+        if txn.method == "INVITE" and resp.code == 422 \
+                and self._retry_leg_422(call, leg, resp):
+            return
         if resp.code < 200:
             leg.state = "ringing"
             if resp.code in (180, 183) and not call.answered:
-                self._provisional(call.txn, Response(Status.RINGING))
+                # 6.3.2.1.5.1 items 1-2, 6.3.3.2.3.1 items 3-4.
+                self._provisional(call.txn, Response(Status.RINGING, Headers([
+                    ("Contact", self._contact(call)),
+                    ("Supported", ", ".join(SUPPORTED_ON_PROVISIONAL))])))
             return
         if resp.code < 300:
             self.client.accept(txn)
@@ -626,6 +774,9 @@ class SipCore:
         leg.to_tag, leg.remote_target, leg.route_set = self._dialog_of(leg, resp)
         leg.state = "confirmed"
         self._send_ack(call, leg)
+        leg.remote_sdp = resp.body
+        leg.peer_allows_update = allows(resp.headers, "UPDATE")
+        self._start_leg_timer(leg, resp)
         body = resp.body
         if call.media is not None:
             try:
@@ -647,17 +798,77 @@ class SipCore:
             body = self._relay_sdp(call, call.initiator)
         if not call.answered:
             call.answered = True
-            headers = Headers([("Contact", f"<{self.local_uri}>")])
+            call.answer_sdp = body
+            headers = self._answer_headers(call)
             ctype = "application/sdp" if body else ""
             if call.sr.adhoc:
                 ctype, body = self._adhoc_answer(call, body)
             if body:
                 headers.add("Content-Type", ctype)
             self._final(call.txn, Response(Status.OK, headers, body))
+            if call.st is not None:
+                # RFC 4028 section 9: the timer runs from the 2xx.
+                call.timer = DialogTimer.start(self.clock(), call.st.seconds,
+                                               call.st.refresher == "uas",
+                                               own=not call.st.peer_supports)
             if call.media is not None:
                 # The floor starts now, when the call is answered, not when it
                 # was admitted: its timers must not run while callees ring.
                 call.media.apply(self.rt.manager.start_floor(call.cid))
+
+    def _answer_headers(self, call: Call) -> Headers:
+        """The 200 OK to the originator: 6.3.3.2.3.2 items 2-3 and 5-10,
+        6.3.2.1.5.2 items 1-5 (CA-20b)."""
+        h = Headers([("Contact", self._contact(call)),
+                     ("Supported", ", ".join(SUPPORTED_ON_ANSWER)),
+                     ("Allow", ALLOW)])
+        self._timer_headers(h, call.st)
+        return h
+
+    @staticmethod
+    def _timer_headers(h: Headers, st: Any) -> None:
+        """RFC 4028 section 9: Session-Expires with the refresher, and
+        Require: timer when the peer supports it (never otherwise)."""
+        if st is None:
+            return
+        h.add("Session-Expires", f"{st.seconds};refresher={st.refresher}")
+        if st.peer_supports:
+            h.add("Require", OPTION_TIMER)
+
+    def _start_leg_timer(self, leg: Leg, resp: ReceivedResponse) -> None:
+        """RFC 4028 section 7.2: the callee's 2xx says who refreshes. No
+        Session-Expires: the callee runs no timer, and the dialog has none."""
+        try:
+            st = uac_session_timer(resp.headers)
+        except SipError as exc:
+            log.warning("unusable Session-Expires from %s: %s", leg.uri, exc)
+            st = None
+        if st is None:
+            # RFC 4028 7.2: the callee runs no timer. The platform keeps one
+            # of its own and refreshes at the deployment's interval, so a
+            # callee that vanished is still found out (review of SIP-OP-17).
+            leg.timer = DialogTimer.start(self.clock(), self._session_expires,
+                                          True, min_se=leg.min_se, own=True)
+        else:
+            leg.timer = DialogTimer.start(self.clock(), st.seconds,
+                                          st.refresher == "uac", min_se=leg.min_se)
+
+    def _retry_leg_422(self, call: Call, leg: Leg, resp: ReceivedResponse) -> bool:
+        """RFC 4028 7.4: a 422 asks for at least its Min-SE; the INVITE is
+        re-sent once, with that interval and that Min-SE. The 422 was ACKed
+        by the transaction already."""
+        if call is None or call.ended or leg.cancel or leg.min_se \
+                or leg.flow is None:
+            return False
+        try:
+            min_se = parse_min_se(resp.headers.get("Min-SE"))
+        except SipError:
+            return False
+        if not min_se or min_se <= leg.session_expires or min_se > 86_400:
+            return False
+        leg.session_expires = leg.min_se = min_se
+        self._send_leg_invite(call, leg, cseq=leg.cseq + 1)
+        return True
 
     def _adhoc_answer(self, call: Call, sdp: str) -> Tuple[str, str]:
         """TS 24.379 17.4.2.2: the 200 OK to an ad hoc caller carries an MCPTT
@@ -860,11 +1071,22 @@ class SipCore:
         # A dialog's BYE comes from its remote party, on its connection, with
         # its tag (RFC 3261 12.2.2). Call-ID alone let any invited member --
         # who learns the call's Call-ID from its own leg's -- end the call.
-        if call_id == call.cid and (flow is not call.flow or
-                                    _tag_of(req.headers.get("From")) !=
-                                    _tag_of(call.invite.headers.get("From"))):
+        # ... or on a connection that authenticates the same party, after a
+        # reconnect (decided 2026-09-25, SIP-OP-18 item 6).
+        if call_id == call.cid and (
+                not self._may_act(flow, call.flow, call.initiator, True, call.retired) or
+                _tag_of(req.headers.get("From")) !=
+                _tag_of(call.invite.headers.get("From")) or
+                # From another connection, both tags (review of the reconnect
+                # decision): the platform's is keyed, so only the dialog's
+                # party knows it.
+                (flow is not call.flow and
+                 _tag_of(req.headers.get("To")) != _tag(call.cid))):
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
-        if leg is not None and flow is not leg.flow:
+        if leg is not None and (
+                not self._may_act(flow, leg.flow, leg.uri, True, leg.retired) or
+                (flow is not leg.flow and
+                 _tag_of(req.headers.get("To")) != f"{leg.call_id}-l")):
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
         if leg is not None:
             # RFC 3261 12.2.2: a request belongs to a dialog by Call-ID AND
@@ -947,6 +1169,449 @@ class SipCore:
                 leg.txn = self.client.start(req, leg.flow, user=leg)
                 leg.flow.send(req.render())
 
+    # -- in-dialog UPDATE and re-INVITE (SIP-OP-17, RFC 4028) ---------------------
+
+    def _dialog_for(self, req: Request, flow: Any, moving: bool = False,
+                    acking: bool = False):
+        """(call, leg) for a request within one of the call's dialogs, or
+        None. RFC 3261 12.2.2: Call-ID AND both tags, and -- as for BYE since
+        the ICD-OP-08 review -- the connection the dialog is bound to.
+        leg None: the initiator's dialog.
+
+        `moving`: a request may also come on another connection, if that
+        connection authenticates the dialog's remote party (its certificate,
+        or a trusted core). Decided 2026-09-25 (PLT-VP-R1 SIP-OP-18 item 6):
+        a client that reconnects keeps its calls, rather than losing them at
+        the next session expiry.
+
+        `acking`: an ACK completes a transaction on the connection the
+        request came on, which may be one the dialog has since left."""
+        cid = req.headers.get("Call-ID") or ""
+        call = self._dialogs.get(cid)
+        if call is None or call.ended:
+            return None
+        remote, local = _tag_of(req.headers.get("From")), _tag_of(req.headers.get("To"))
+        if cid == call.cid:
+            ok = local == _tag(call.cid) and \
+                remote == _tag_of(call.invite.headers.get("From")) and \
+                (self._may_act(flow, call.flow, call.initiator, moving, call.retired)
+                 or (acking and flow in call.retired))
+            return (call, None) if ok else None
+        leg = call.legs.get(cid)
+        if leg is None or leg.state != "confirmed" \
+                or remote != leg.to_tag or local != f"{leg.call_id}-l" \
+                or not (self._may_act(flow, leg.flow, leg.uri, moving, leg.retired)
+                        or (acking and flow in leg.retired)):
+            return None
+        return call, leg
+
+    def _may_act(self, flow: Any, bound: Any, party: str, moving: bool,
+                 retired: Any = ()) -> bool:
+        """The dialog's own connection, or -- when moving is allowed -- a new
+        one that proves the same party, and that the dialog has not moved away
+        from (a dropped connection stays dropped).
+
+        "Proves the same party" is narrower than `_authenticated_as`: a
+        trusted core may assert any identity, but it may not take over a dialog
+        from a user's own connection -- that would hand any core the media of
+        any directly attached user (review of SIP-OP-18 item 6). So:
+          * to a user's connection: its certificate names the party;
+          * to a core's connection: only from a connection of the same core
+            (both issued by the core CA, sharing a trusted DNS name).
+        """
+        if flow is bound:
+            return True
+        if not moving or flow in retired:
+            return False
+        if getattr(flow, "peer_is_core", False):
+            shared = set(getattr(flow, "peer_dns", ())) & \
+                set(getattr(bound, "peer_dns", ())) & self._trusted_cores
+            return bool(getattr(bound, "peer_is_core", False) and shared)
+        return canonical_uri(party) in getattr(flow, "peer_uris", ())
+
+    def _rebind(self, call: Call, leg: Optional[Leg], flow: Any) -> None:
+        """Move a dialog to the connection its party now uses. The old
+        connection is dropped from it for good: nothing it sends acts on the
+        dialog any more, even though it authenticates the same party, and
+        nothing the platform sends goes to it. A refresh the platform had
+        outstanding on the old connection is abandoned; the request that moved
+        the dialog is itself a refresh (decided 2026-09-25, SIP-OP-18)."""
+        state = leg if leg is not None else call
+        if state.flow is flow:
+            return
+        log.warning("call %s: %s dialog moves to a new connection (%s)", call.cid,
+                    "leg " + leg.uri if leg else "initiator",
+                    leg.uri if leg else call.initiator)
+        r = state.refresh
+        if r is not None:
+            if r.txn is not None:
+                if r.method == "INVITE":
+                    # Its 2xx must still be ACKed, or the peer ends the
+                    # session (RFC 3261 13.3.1.4); it now comes on the new
+                    # connection. _refresh_response ACKs it and ignores it,
+                    # the refresh no longer being the current one.
+                    r.txn.flow = flow
+                else:
+                    self.client.finish(r.txn)
+            state.refresh = None
+            if state.timer is not None:
+                state.timer.pending = False
+        state.retired.add(state.flow)
+        state.flow = flow
+
+    def _in_dialog(self, req: Request, txn: ServerTxn, flow: Any) -> None:
+        """An UPDATE (RFC 3311) or re-INVITE on a dialog of a call: a session
+        refresh (RFC 4028), and possibly a new offer.
+
+        The platform does not renegotiate media across the call, so an offer
+        is accepted when it keeps the call's codec: the relay then sends to
+        the address the offer gives, and answers with the same relay SDP. Any
+        other offer is 488, which leaves the session as it was (RFC 3261 14.2).
+        """
+        found = self._dialog_for(req, flow, moving=True)
+        if found is None:
+            return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
+        call, leg = found
+        state = leg if leg is not None else call
+        if leg is None and not call.answered:
+            # Early dialog: the platform has no answer to refresh yet.
+            return self._final(txn, Response(Status.REQUEST_PENDING))
+        cseq = cseq_of(req.headers)[0]
+        if state.remote_cseq and cseq <= state.remote_cseq:
+            return self._final(txn, Response(Status.SERVER_ERROR, Headers(
+                [("Warning", '399 mcx "CSeq lower than the dialog\'s last"')])))
+        state.remote_cseq = cseq
+        moving = flow is not state.flow
+        offer = self._offer_in(req)
+        if state.refresh is not None and not moving and (
+                offer or req.method == "INVITE" or state.refresh.method == "INVITE"):
+            # (Not when the request moves the dialog: the platform's refresh
+            # went to a connection the party has left.)
+            # RFC 3261 14.2 / RFC 3311 5.2: an offer crossing ours, or an
+            # INVITE crossing our INVITE. Two offerless UPDATEs do not.
+            return self._final(txn, Response(Status.REQUEST_PENDING))
+        if state.awaiting_answer and (offer or req.method == "INVITE"):
+            # Our offer still awaits its answer in an ACK (RFC 3311 5.2).
+            return self._final(txn, Response(Status.REQUEST_PENDING))
+        st = uas_session_timer(req.headers, self._session_expires)
+        if isinstance(st, int):
+            return self._final(txn, Response(Status.SESSION_INTERVAL_TOO_SMALL,
+                                             Headers([("Min-SE", str(st))])))
+        body, ctype = "", ""
+        if offer:
+            body = self._answer_offer(call, leg, offer)
+            if body is None:
+                return self._final(txn, Response(Status.NOT_ACCEPTABLE_HERE, Headers(
+                    [("Warning", '399 mcx "media change within a call is not supported"')])))
+            ctype = "application/sdp"
+        elif req.method == "INVITE":
+            # Offerless re-INVITE: the 2xx carries our offer, the ACK the
+            # answer (RFC 3261 14.2).
+            body, ctype = self._our_sdp(call, leg), "application/sdp"
+            txn.user = AwaitingAnswer(call, leg)
+            state.awaiting_answer = True
+        contact = _addr_uri(req.headers.get("Contact") or "")
+        if contact:                                  # target refresh (12.2.2)
+            state.remote_target = contact
+        if req.headers.get_all("Allow"):
+            state.peer_allows_update = allows(req.headers, "UPDATE")
+        h = Headers([("Contact", self._contact(call)), ("Allow", ALLOW),
+                     ("Supported", ", ".join(SUPPORTED_ON_ANSWER) if leg is None
+                      else OPTION_TIMER)])
+        self._timer_headers(h, st)
+        if body:
+            h.add("Content-Type", ctype)
+        if moving:
+            # Everything checked, and the answer is 200: the dialog is on
+            # this connection from now on (SIP-OP-18 item 6). A refused
+            # request moves nothing (review of the reconnect decision).
+            self._rebind(call, leg, flow)
+        self._final(txn, Response(Status.OK, h, body or ""))
+        old = state.timer
+        state.timer = DialogTimer.start(
+            self.clock(), st.seconds, st.refresher == "uas",
+            min_se=old.min_se if old else 0,
+            own=(old.own if old else False) or not st.peer_supports)
+
+    @staticmethod
+    def _offer_in(message) -> str:
+        if not message.body:
+            return ""
+        try:
+            return sdp_of(message.headers.get("Content-Type") or "", message.body)
+        except ValueError:
+            return ""
+
+    def _our_sdp(self, call: Call, leg: Optional[Leg]) -> str:
+        """The SDP the platform last gave that party: its answer to the
+        initiator, or its offer to a callee."""
+        if call.media is not None:
+            return self._relay_sdp(call, leg.uri if leg else call.initiator)
+        return leg.offer_sdp if leg is not None else call.answer_sdp
+
+    def _answer_offer(self, call: Call, leg: Optional[Leg], offer: str) -> Optional[str]:
+        """The answer to an in-dialog offer, or None (488)."""
+        if call.media is not None:
+            if not self._accept_remote(call, leg, offer):
+                return None
+            return self._our_sdp(call, leg)
+        original = leg.remote_sdp if leg is not None else _offer_of(call.invite)
+        return self._our_sdp(call, leg) if _same_sdp(offer, original) else None
+
+    def _accept_remote(self, call: Call, leg: Optional[Leg], sdp: str) -> bool:
+        """Point the relay at the address `sdp` gives, if it keeps the
+        call's codec (there is no transcoding)."""
+        try:
+            info = parse_sdp(sdp)
+        except SipError:
+            return False
+        if call.payload_type not in info.payload_types:
+            return False
+        call.media.set_remote(                               # type: ignore[union-attr]
+            leg.uri if leg else call.initiator, (info.address, info.audio_port),
+            (info.address, info.floor_port) if info.floor_port else None)
+        return True
+
+    def _apply_answer(self, call: Call, leg: Optional[Leg], message) -> None:
+        """The answer in an ACK, or in the 2xx to a re-INVITE the platform
+        sent. One the relay cannot use changes nothing: the session goes on
+        as it was, and the refusal is logged."""
+        sdp = self._offer_in(message)
+        if not sdp or call.ended or call.media is None:
+            return
+        if not self._accept_remote(call, leg, sdp):
+            log.warning("unusable SDP answer on call %s ignored", call.cid)
+
+    def _send_refresh(self, call: Call, leg: Optional[Leg]) -> None:
+        """RFC 4028 section 10: the platform refreshes. UPDATE when the peer
+        allows it (no offer: nothing about the media changes), else a
+        re-INVITE offering the SDP it already has."""
+        state = leg if leg is not None else call
+        timer = state.timer
+        flow = leg.flow if leg is not None else call.flow
+        if timer is None or flow is None or getattr(flow, "closed", False):
+            return
+        method = "UPDATE" if state.peer_allows_update else "INVITE"
+        if leg is None:
+            call.cseq_out += 1
+            n = call.cseq_out
+            h = Headers([("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};"
+                                 "branch=z9hG4bK-replaced"),
+                         ("From", f"<{self.local_uri}>;tag={_tag(call.cid)}"),
+                         ("To", call.invite.headers.get("From") or f"<{call.initiator}>"),
+                         ("Call-ID", call.cid)])
+            target, routes = call.remote_target or call.initiator, call.route_set
+        else:
+            leg.cseq += 1
+            n = leg.cseq
+            h = Headers([("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};"
+                                 "branch=z9hG4bK-replaced"),
+                         ("From", f"<{self.local_uri}>;tag={leg.call_id}-l"),
+                         ("To", f"<{leg.uri}>;tag={leg.to_tag}"),
+                         ("Call-ID", leg.call_id)])
+            target, routes = leg.remote_target or leg.uri, leg.route_set
+        h.add("CSeq", f"{n} {method}")
+        h.add("Max-Forwards", "70")
+        ruri, route_hdrs = dialog_target(target, routes)
+        for r in route_hdrs:
+            h.add("Route", r)
+        h.add("Contact", self._contact(call))
+        h.add("Supported", OPTION_TIMER)
+        h.add("Allow", ALLOW)
+        h.add("Session-Expires", f"{timer.seconds};refresher=uac")
+        if timer.min_se:
+            h.add("Min-SE", str(timer.min_se))             # RFC 4028 7.4
+        body = ""
+        if method == "INVITE":
+            body = self._our_sdp(call, leg)
+            if body:
+                h.add("Content-Type", "application/sdp")
+        req = self._with_branch(Request(method, ruri, h, body))
+        timer.pending = True
+        state.refresh = Refresh(call, leg, timer.seconds, method=method)
+        state.refresh.txn = self.client.start(req, flow, user=state.refresh)
+        flow.send(req.render())
+
+    def _refresh_response(self, txn: ClientTxn, resp: ReceivedResponse) -> None:
+        r: Refresh = txn.user
+        call, leg = r.call, r.leg
+        state = leg if leg is not None else call
+        if txn.method == "INVITE" and resp.code >= 300:
+            self._ack_non_2xx(txn, resp)
+        if resp.code < 200:
+            return
+        if 200 <= resp.code < 300:
+            if txn.method == "INVITE":
+                if txn.accepted:
+                    if r.ack:                       # 2xx again: the same ACK
+                        txn.flow.send(r.ack)
+                    return
+                self.client.accept(txn)
+                contact = _addr_uri(resp.headers.get("Contact") or "")
+                if contact and state.refresh is r:
+                    # The target refresh first: the ACK goes to it (12.2.1.1).
+                    state.remote_target = contact
+                r.ack = self._ack_refresh(txn, state, leg is None)
+            else:
+                self.client.finish(txn)
+            if state.refresh is not r or call.ended:
+                return
+            state.refresh = None
+            if txn.method == "INVITE":
+                self._apply_answer(call, leg, resp)
+            contact = _addr_uri(resp.headers.get("Contact") or "")
+            if contact:
+                state.remote_target = contact
+            try:
+                st = uac_session_timer(resp.headers)
+            except SipError:
+                st = None
+            old = state.timer
+            if st is None and old is not None and old.own:
+                # A peer that runs no timer answers without Session-Expires;
+                # the platform's own timer goes on (review of SIP-OP-17).
+                state.timer = DialogTimer.start(self.clock(), old.seconds, True,
+                                                min_se=old.min_se, own=True)
+            elif st is None:
+                # RFC 4028 7.2: the peer turned the timer off.
+                state.timer = None
+            else:
+                state.timer = DialogTimer.start(
+                    self.clock(), st.seconds, st.refresher == "uac",
+                    min_se=old.min_se if old else 0,
+                    own=old.own if old else False)
+            return
+        self.client.finish(txn)
+        if state.refresh is not r or call.ended:
+            return
+        state.refresh = None
+        self._refresh_failed(call, leg, resp.code, resp)
+
+    def _refresh_failed(self, call: Call, leg: Optional[Leg], code: int,
+                        resp: Optional[ReceivedResponse] = None) -> None:
+        state = leg if leg is not None else call
+        timer = state.timer
+        if timer is None:
+            return
+        now = self.clock()
+        if code in (408, 481):
+            # RFC 5057 / RFC 4028 10: the dialog is gone.
+            return self._dialog_gone(call, leg, "refresh-failed")
+        if timer.own and code not in (422, 491):
+            # The platform's own timer only asks whether the peer is still
+            # there, and any final response says it is (re-review of
+            # SIP-OP-17: a peer that never ran a timer and refuses the
+            # refresh method must not lose its call for it).
+            state.timer = DialogTimer.start(now, timer.seconds, True,
+                                            min_se=timer.min_se, own=True)
+            return
+        if code == 422 and resp is not None:
+            try:
+                min_se = parse_min_se(resp.headers.get("Min-SE"))
+            except SipError:
+                min_se = None
+            if min_se and timer.seconds < min_se <= 86_400:
+                timer.seconds = timer.min_se = min_se
+                timer.pending = False
+                return self._send_refresh(call, leg)
+        if code == 491:
+            # RFC 3261 14.1: glare. The owner of the dialog's Call-ID waits
+            # 2.1-4 s, the other side 0-2 s. The initiator chose its dialog's
+            # Call-ID; the platform chose each leg's.
+            timer.pending = False
+            timer.refresh_at = now + (secrets.randbelow(2_000) if leg is None
+                                      else 2_100 + secrets.randbelow(1_900))
+            return
+        timer.retry_later(now)
+
+    def _ack_refresh(self, txn: ClientTxn, state: Any, initiator: bool) -> str:
+        """The ACK for the 2xx to a re-INVITE the platform sent: in the
+        dialog, its own transaction, CSeq number of the re-INVITE (13.2.2.4),
+        addressed to the dialog's remote target as the 2xx left it
+        (12.2.1.1; review of SIP-OP-17)."""
+        inv: Request = txn.request
+        h = Headers([("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};"
+                             f"branch=z9hG4bKmcxrack{secrets.token_hex(8)}"),
+                     ("From", inv.headers.get("From") or ""),
+                     ("To", inv.headers.get("To") or ""),
+                     ("Call-ID", inv.headers.get("Call-ID") or ""),
+                     ("CSeq", f"{cseq_of(inv.headers)[0]} ACK"),
+                     ("Max-Forwards", "70")])
+        target = state.remote_target or (state.initiator if initiator else state.uri)
+        ruri, routes = dialog_target(target, state.route_set)
+        for r in routes:
+            h.add("Route", r)
+        text = Request("ACK", ruri, h).render()
+        txn.flow.send(text)
+        return text
+
+    def _dialog_gone(self, call: Call, leg: Optional[Leg], cause: str) -> None:
+        """A dialog whose session expired, or whose refresh said it no longer
+        exists: the initiator's ends the call; a callee's ends that leg, and
+        the call when no callee is left (as a callee's BYE does)."""
+        if call.ended:
+            return
+        if leg is None:
+            log.warning("session %s: initiator dialog %s", call.cid, cause)
+            return self._end(call, cause=cause)
+        log.warning("session %s: leg %s %s", call.cid, leg.uri, cause)
+        self._bye_leg(call, Signal(SignalType.BYE, target=leg.uri))
+        leg.state, leg.timer, leg.refresh = "failed", None, None
+        if not any(l.state == "confirmed" for l in call.legs.values()):
+            self._end(call, cause=cause, skip=leg.uri)
+
+    def _force_remove(self, call: Call) -> None:
+        """Last resort when ending a call faulted: forget it, so that it is
+        not retried on every tick. Each step on its own, so one fault does not
+        stop the others."""
+        call.ended = True
+        try:
+            self.rt.release(call.cid, "session-timer-fault")
+        except Exception:  # noqa: BLE001
+            log.exception("release fault on call %s", call.cid)
+            try:
+                self.rt.abandon(call.cid, "session-timer fault")
+            except Exception:  # noqa: BLE001
+                log.exception("abandon fault on call %s", call.cid)
+        try:
+            self.media.close(call.cid)
+        except Exception:  # noqa: BLE001
+            log.exception("media close fault on call %s", call.cid)
+        self.calls.pop(call.cid, None)
+        for k in [k for k, c in self._dialogs.items() if c is call]:
+            del self._dialogs[k]
+
+    def _session_timers(self) -> None:
+        """What each dialog's RFC 4028 timer says is due now."""
+        now = self.clock()
+        for call in list(self.calls.values()):
+            dialogs = [(call, None)] + [(l, l) for l in list(call.legs.values())
+                                        if l.state == "confirmed"]
+            for state, leg in dialogs:
+                if call.ended:
+                    break
+                timer = state.timer
+                if timer is None:
+                    continue
+                try:
+                    if timer.expired(now):
+                        # RFC 4028 section 10: BYE when the session expires.
+                        self._dialog_gone(call, leg, "session-expired")
+                    elif timer.refresh_due(now):
+                        self._send_refresh(call, leg)
+                except Exception:  # noqa: BLE001
+                    # Contained: the transaction timers in the same tick, and
+                    # every other dialog, still run. Nothing is retried in a
+                    # loop: a refresh is pushed back, and an expiry that could
+                    # not be carried out removes the call's state (review and
+                    # re-review of SIP-OP-17).
+                    log.exception("session timer fault on call %s", call.cid)
+                    timer.pending = False
+                    timer.refresh_at = None
+                    if timer.expired(now):
+                        self._force_remove(call)
+                        break
+
     # -- timers ---------------------------------------------------------------------
 
     def close(self) -> None:
@@ -954,10 +1619,19 @@ class SipCore:
 
     def tick(self) -> None:
         self.media.tick()
+        self._session_timers()
         events = self.server.tick()
         for txn, text in events.retransmit:
             txn.flow.send(text)
         for txn in events.unacknowledged:
+            if _tag_of(txn.request.headers.get("To")):
+                # A re-INVITE's 2xx: the dialog was confirmed long ago, and an
+                # ACK lost (or sent on a connection the party then left) is no
+                # reason to end the call (review of the reconnect decision).
+                if isinstance(txn.user, AwaitingAnswer):
+                    w = txn.user
+                    (w.leg if w.leg is not None else w.call).awaiting_answer = False
+                continue
             call = self.calls.get(txn.call_id)
             if call is not None and not call.ended:
                 log.warning("no ACK for 2xx call-id=%s: ending session",
@@ -966,6 +1640,13 @@ class SipCore:
         for ctxn in self.client.tick():
             if ctxn.accepted:
                 continue          # Timer M: the 2xx window closed, not a failure
+            if isinstance(ctxn.user, Refresh):
+                r = ctxn.user
+                state = r.leg if r.leg is not None else r.call
+                if state.refresh is r and not r.call.ended:
+                    state.refresh = None
+                    self._refresh_failed(r.call, r.leg, 408)
+                continue
             leg = ctxn.user
             if leg is not None and ctxn.cancelled and not ctxn.done \
                     and not leg.cancel:
@@ -987,6 +1668,15 @@ def _quoted(text: object) -> str:
     in it used to end the warn-text early (found by review)."""
     clean = "".join(c if c >= " " and c != "\x7f" else " " for c in str(text))
     return clean.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _same_sdp(a: str, b: str) -> bool:
+    """Two SDP bodies that describe the same session: equal but for the
+    origin line (o=, whose version a re-offer may bump) and line endings."""
+    def norm(text: str) -> List[str]:
+        return [l.strip() for l in text.splitlines()
+                if l.strip() and not l.startswith("o=")]
+    return norm(a) == norm(b)
 
 
 def _tag_of(value: Optional[str]) -> str:

@@ -15,6 +15,7 @@ from typing import List, Mapping, Optional, Tuple
 
 from core.errors import StartupRefused
 from core.release import Release, parse as parse_release
+from core.sip import MIN_SE_S
 
 DEFAULT_PROFILES_ROOT = Path(__file__).resolve().parents[1] / "profiles"
 IDMS_STUB = "stub"
@@ -76,6 +77,11 @@ class SipConfig:
     roles: Tuple[str, ...]
     # The trusted SIP cores and their CA (ICD-OP-08, ICD-OP-10) are network
     # data: see service/network.py.
+    # SIP-OP-17 / CA-20b (decided 2026-09-25): the RFC 4028 session interval
+    # the platform asks for and caps a longer request to, in seconds. It is
+    # how long a call whose far end vanished without a BYE can outlive it.
+    # Required, no default; at least 90 (RFC 4028's smallest Min-SE).
+    session_expires: int = 0
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -133,7 +139,14 @@ class SipConfig:
             raise StartupRefused(
                 "MCX_SIP_ROLES=participating alone is not supported: the "
                 "controlling function is not reachable remotely (SIP-OP-03)")
-        return SipConfig(host, port, uri, cert, key, ca, auth, roles)
+        raw_se = need("MCX_SESSION_EXPIRES")
+        if not raw_se.isdigit() or len(raw_se) > 6 or int(raw_se) < MIN_SE_S:
+            raise StartupRefused(
+                f"MCX_SESSION_EXPIRES={raw_se!r}: give the RFC 4028 session "
+                f"interval in whole seconds, at least {MIN_SE_S}. It bounds how "
+                "long a call whose far end vanished without a BYE stays up")
+        return SipConfig(host, port, uri, cert, key, ca, auth, roles,
+                         session_expires=int(raw_se))
 
 
 @dataclass(frozen=True)

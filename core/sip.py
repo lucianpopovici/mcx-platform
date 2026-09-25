@@ -22,6 +22,8 @@ to a conformant peer is worse than silence.
 
 from __future__ import annotations
 
+import ipaddress
+
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -85,6 +87,128 @@ FEATURE_TAG_VIDEO = "+g.3gpp.mcvideo"
 MCPTT_ICSI = "urn:urn-7:3gpp-service.ims.icsi.mcptt"
 FEATURE_TAG_ICSI_REF = "+g.3gpp.icsi-ref"
 
+# RFC 3840 base tag (no "+"): the Contact belongs to a conference focus.
+# TS 24.379 6.3.3.1.2 item 1 (INVITEs to callees), 6.3.2.1.5.1 item 1c and
+# 6.3.3.2.3.1 item 4c (provisional responses), 6.3.2.1.5.2 item 3c and
+# 6.3.3.2.3.2 item 6c (the 200 OK to the originator).
+FEATURE_TAG_ISFOCUS = "isfocus"
+
+# RFC 4028 session timers (PLT-CONF-AUDIT CA-20b, PLT-VP-R1 SIP-OP-17).
+# TS 24.379 requires them on every dialog the platform takes part in:
+# `Supported: timer` and a Session-Expires without refresher on INVITEs to
+# callees (6.3.3.1.2 items 6-7); `Require: timer` and Session-Expires on the
+# 200 OK to the originator (6.3.3.2.3.2 items 2-3, 6.3.2.1.5.2 items 1-2).
+# The interval the platform asks for is a deployment setting
+# (MCX_SESSION_EXPIRES); 90 s is the smallest RFC 4028 permits (section 4),
+# and the platform accepts any interval down to it.
+OPTION_TIMER = "timer"
+MIN_SE_S = 90
+# 6.3.3.2.3.2 items 8-10 and 6.3.2.1.5.2 items 4-5: the 200 OK to the
+# originator. All four but "timer" are extensions of REFER, which the
+# platform does not implement (REFER is not in Allow): carried because the
+# specification says "shall", decided 2026-09-25 (PLT-CONF-AUDIT CA-20).
+SUPPORTED_ON_ANSWER = ("timer", "tdialog", "norefersub", "explicitsub", "nosub")
+# 6.3.2.1.5.1 item 2: provisional responses to the originator.
+SUPPORTED_ON_PROVISIONAL = ("norefersub",)
+
+
+@dataclass(frozen=True)
+class SessionExpires:
+    seconds: int
+    refresher: Optional[str] = None       # "uac", "uas", or not stated
+
+
+def parse_session_expires(value: Optional[str]) -> Optional[SessionExpires]:
+    """RFC 4028 section 4: delta-seconds, then parameters; `refresher` is
+    "uac" or "uas". Absent header: None. Malformed: SipError."""
+    if value is None or not value.strip():
+        return None
+    head, *params = [p.strip() for p in value.split(";")]
+    if not head.isdigit() or len(head) > 10:
+        raise SipError(f"Session-Expires {value!r}")
+    refresher = None
+    for p in params:
+        name, _, v = p.partition("=")
+        if name.strip().lower() == "refresher":
+            refresher = v.strip().lower()
+            if refresher not in ("uac", "uas"):
+                raise SipError(f"Session-Expires refresher {v!r}")
+    return SessionExpires(int(head), refresher)
+
+
+def parse_min_se(value: Optional[str]) -> Optional[int]:
+    if value is None or not value.strip():
+        return None
+    head = value.split(";", 1)[0].strip()
+    if not head.isdigit() or len(head) > 10:
+        raise SipError(f"Min-SE {value!r}")
+    return int(head)
+
+
+def has_option(headers: "Headers", name: str, tag: str) -> bool:
+    """Whether a Supported / Require style header lists option-tag `tag`."""
+    return any(t.strip().lower() == tag
+               for v in headers.get_all(name) for t in v.split(","))
+
+
+def allows(headers: "Headers", method: str) -> bool:
+    return any(m.strip().upper() == method
+               for v in headers.get_all("Allow") for m in v.split(","))
+
+
+@dataclass(frozen=True)
+class SessionTimer:
+    """A negotiated session timer, as seen from the request just answered
+    or the 2xx just received. `refresher` is relative to that request:
+    "uac" is whoever sent it, "uas" whoever answered it."""
+    seconds: int
+    refresher: str
+    peer_supports: bool = True
+
+
+def uas_session_timer(headers: "Headers", preferred: int):
+    """RFC 4028 section 9, for a request the platform answers (an initial
+    INVITE, or an UPDATE or re-INVITE on a dialog). Returns the SessionTimer
+    to put in the 2xx, or an int: the Min-SE for a 422 (the request asked for
+    less than RFC 4028 allows).
+
+    The interval is what the request asked for, lowered to the deployment's
+    `preferred` when that is shorter, and never below the request's Min-SE.
+    The refresher is the request's; when it states none, "uac" if the peer
+    supports timers (TS 24.379 6.3.2.1.5.2 item 2, 6.3.3.2.3.2 item 2), and
+    otherwise "uas": the platform refreshes a peer that cannot (section 9).
+    """
+    se = parse_session_expires(headers.get("Session-Expires"))
+    min_se = max(MIN_SE_S, parse_min_se(headers.get("Min-SE")) or 0)
+    supports = has_option(headers, "Supported", OPTION_TIMER) or \
+        has_option(headers, "Require", OPTION_TIMER)
+    if se is not None and se.seconds < MIN_SE_S:
+        return MIN_SE_S
+    if se is None:
+        seconds = max(preferred, min_se)
+    else:
+        seconds = min(se.seconds, max(preferred, min_se))
+    if not supports:
+        refresher = "uas"
+    else:
+        refresher = (se.refresher if se is not None else None) or "uac"
+    return SessionTimer(seconds, refresher, supports)
+
+
+def uac_session_timer(headers: "Headers") -> Optional[SessionTimer]:
+    """RFC 4028 section 7.2, for a 2xx the platform receives. None: the peer
+    runs no session timer on this dialog. A Session-Expires without a
+    refresher is non-conformant; the platform then refreshes itself, which
+    keeps the session alive rather than letting it lapse. An interval below
+    90 s is one RFC 4028 forbids a UAS to choose (section 9); it is taken as
+    90, or a peer answering 1 s would have its call ended, or refreshed
+    twice a second, for ever (review of SIP-OP-17)."""
+    se = parse_session_expires(headers.get("Session-Expires"))
+    if se is None:
+        return None
+    return SessionTimer(max(se.seconds, MIN_SE_S), se.refresher or "uac")
+
+
 # The "+" is required, not stylistic. IETF RFC 3840 clause 5: base tags (audio,
 # video, isfocus and seventeen others) carry no prefix, and for every other tag
 # "a plus sign ('+') MUST be added as the first character". The ABNF makes it
@@ -96,6 +220,10 @@ FEATURE_TAG_ICSI_REF = "+g.3gpp.icsi-ref"
 def _pct(value: str) -> str:
     """Percent-encode a feature tag value as TS 24.379 shows it on the wire."""
     return value.replace(":", "%3A")
+
+# The methods the platform accepts (RFC 3261 20.5). UPDATE (RFC 3311) is
+# here for session refresh (RFC 4028); REFER is not implemented.
+ALLOW = "INVITE, ACK, BYE, CANCEL, UPDATE, REGISTER, OPTIONS"
 
 # Content types carried on MC signalling.
 CT_MC_INFO = "application/vnd.3gpp.mcptt-info+xml"
@@ -129,12 +257,14 @@ class Status(Enum):
     FORBIDDEN = (403, "Forbidden")
     NOT_FOUND = (404, "Not Found")
     REQUEST_TIMEOUT = (408, "Request Timeout")
+    SESSION_INTERVAL_TOO_SMALL = (422, "Session Interval Too Small")
     TEMPORARILY_UNAVAILABLE = (480, "Temporarily Unavailable")
     CALL_DOES_NOT_EXIST = (481, "Call/Transaction Does Not Exist")
     LOOP_DETECTED = (482, "Loop Detected")
     BUSY_HERE = (486, "Busy Here")
     REQUEST_TERMINATED = (487, "Request Terminated")
     NOT_ACCEPTABLE_HERE = (488, "Not Acceptable Here")
+    REQUEST_PENDING = (491, "Request Pending")
     SERVER_ERROR = (500, "Server Internal Error")
     NOT_IMPLEMENTED = (501, "Not Implemented")
     SERVICE_UNAVAILABLE = (503, "Service Unavailable")
@@ -418,7 +548,8 @@ class ReceivedResponse:
 
 
 _COMPACT = {"v": "Via", "f": "From", "t": "To", "i": "Call-ID", "m": "Contact",
-            "c": "Content-Type", "l": "Content-Length", "k": "Supported"}
+            "c": "Content-Type", "l": "Content-Length", "k": "Supported",
+            "x": "Session-Expires"}                    # RFC 4028 section 4
 _REQUEST_LINE = re.compile(r"^([A-Za-z]+) (\S+) SIP/2\.0$")
 _STATUS_LINE = re.compile(r"^SIP/2\.0 (\d{3})(?: (.*))?$")
 
@@ -637,6 +768,13 @@ class DialogContext:
     local_uri: str
     cseq: int = 1
     sdp: str = ""
+    # The MCPTT session identity (TS 24.379 clause 4.5), when the session
+    # has one; the Contact carries it.
+    session_uri: str = ""
+    # RFC 4028 on an INVITE: the interval asked for (0: none), and the Min-SE
+    # a 422 imposed (0: none yet).
+    session_expires: int = 0
+    min_se: int = 0
 
 
 class Adapter:
@@ -685,7 +823,16 @@ class Adapter:
         tags = self._feature_tags(media)
 
         icsi = f'{FEATURE_TAG_ICSI_REF}="{_pct(MCPTT_ICSI)}"'
-        headers.set("Contact", f"<{self._local}>;{';'.join(tags)};{icsi}")
+        headers.set("Contact", self.focus_contact(context.session_uri, media))
+        # 6.3.3.1.2 items 6-7: Supported: timer, and a Session-Expires with
+        # the refresher left to the callee to choose (RFC 4028 section 7.1).
+        # UPDATE is allowed so the callee can refresh without an offer.
+        headers.set("Supported", OPTION_TIMER)
+        headers.set("Allow", ALLOW)
+        if context.session_expires:
+            headers.set("Session-Expires", str(context.session_expires))
+        if context.min_se:
+            headers.set("Min-SE", str(context.min_se))         # RFC 4028 7.4
 
         # TS 24.379 requires TWO Accept-Contact header fields, not one
         # combined value: one carrying the service feature tag and one
@@ -853,6 +1000,20 @@ class Adapter:
         except mcinfo.McInfoError:
             return None
         return info if info is not None and info.session_type == "adhoc" else None
+
+    def focus_contact(self, session_uri: str,
+                      media: Sequence[MediaKind] = (MediaKind.VOICE,)) -> str:
+        """The Contact the platform puts on every dialog it creates or
+        answers as the MCPTT server: the MCPTT session identity (clause 4.5;
+        the server's own URI where no session has one), the service feature
+        tag, the ICSI reference and `isfocus` (6.3.3.1.2 item 1 on INVITEs to
+        callees; 6.3.2.1.5.1 item 1, 6.3.3.2.3.1 item 4 on provisional
+        responses; 6.3.2.1.5.2 item 3, 6.3.3.2.3.2 items 5-6 on the 200 OK).
+        It used to be the bare server URI on responses and lack `isfocus`
+        everywhere (PLT-CONF-AUDIT CA-20b)."""
+        icsi = f'{FEATURE_TAG_ICSI_REF}="{_pct(MCPTT_ICSI)}"'
+        tags = ";".join(self._feature_tags(media))
+        return f"<{session_uri or self._local}>;{tags};{icsi};{FEATURE_TAG_ISFOCUS}"
 
     def _feature_tags(self, media: Sequence[MediaKind]) -> Tuple[str, ...]:
         tags = []
@@ -1074,7 +1235,29 @@ def parse_sdp(body: str) -> SdpInfo:
     address = audio_addr or session_addr
     if not address:
         raise SipError("SDP has no connection address")
+    _check_media_address(address)
+    if not 0 < audio[0] <= 65535:
+        # Port 0 declines the stream (RFC 3264 6); nothing to relay to.
+        raise SipError(f"SDP audio port {audio[0]} is not usable")
+    if floor_port is not None and not 0 < floor_port <= 65535:
+        floor_port = None                     # the floor stream declined
     return SdpInfo(address, audio[0], audio[1], floor_port)
+
+
+def _check_media_address(address: str) -> None:
+    """An address the relay will send a party's media to. Unspecified
+    (0.0.0.0: RFC 2543-style hold, and on Linux delivery to this host),
+    multicast and the limited broadcast address are refused: the relay sends
+    one party's stream to one unicast peer. A name that is not an IP literal
+    is left as it was. Found by the review of SIP-OP-17, where an in-dialog
+    offer could re-point a relay after admission as often as it liked."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return
+    if ip.is_unspecified or ip.is_multicast or \
+            ip == ipaddress.ip_address("255.255.255.255"):
+        raise SipError(f"SDP connection address {address} is not a unicast peer")
 
 
 def build_sdp(address: str, audio_port: int, floor_port: Optional[int],
