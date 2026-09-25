@@ -189,6 +189,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_TLS_CA": str(pki / "ca.crt"),
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
+           "MCX_SESSION_EXPIRES": "1800",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
     env.update(over)
     return env
