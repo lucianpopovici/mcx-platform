@@ -88,6 +88,10 @@ class Signal:
 class Refusal:
     reason_code: str
     detail: str = ""
+    # The §8.1 step that refused, when a transport needs to say more than the
+    # code: "authorise" for step 0 (TS 24.379 17.4.2.2 steps 3B-5 answer an
+    # authorisation refusal of an ad hoc call differently). Empty otherwise.
+    step: str = ""
 
 
 @dataclass
@@ -200,7 +204,8 @@ class SessionManager:
                 self._without_target(request), post=self._check_admission)
             if not authorisation.permitted:
                 return self._refuse(cid, request, authorisation.reason_code,
-                                    "not authorised to start this call type")
+                                    "not authorised to start this call type",
+                                    step="authorise")
 
             # 1 — IF-IDR. An ad hoc group call names no group; its members
             # come from the caller's list or criteria (§3.5).
@@ -709,7 +714,7 @@ class SessionManager:
             raise HookContractViolation("determine_participants returned duplicates")
 
     def _refuse(self, cid: str, request: SessionRequest, reason_code: str,
-                detail: str):
+                detail: str, step: str = ""):
         # PLT-HOK-033: nothing is established, no invitation is sent.
         self._auditor.emit(RecordType.SESSION_REFUSED, cid,
                            call_type=request.call_type,
@@ -718,7 +723,7 @@ class SessionManager:
         return None, (Signal(SignalType.RESPONSE_REJECT,
                              target=request.initiator,
                              detail={"reason_code": reason_code}),), \
-            Refusal(reason_code=reason_code, detail=detail)
+            Refusal(reason_code=reason_code, detail=detail, step=step)
 
     def _fail(self, cid: str, request: SessionRequest, failure: HookFailure):
         self._auditor.emit(RecordType.SESSION_FAILED, cid,

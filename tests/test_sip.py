@@ -829,3 +829,159 @@ def test_the_ring_limit_replaces_timer_b_once_the_invite_is_proceeding():
     assert txns.tick() == []
     now[0] = 90_000
     assert txns.tick() == [t] and t.cancelled and not t.done
+
+
+# --------------------------------------------------------------------------
+# ADHOC-OP-05: the ad hoc refusals (TS 24.379 17.4.2.2 steps 3A-3C, 4, 5)
+# --------------------------------------------------------------------------
+
+
+def _adhoc_invite(xml):
+    from tests import mcpttinfo_fixture as mcf
+    sdp = ("v=0\r\no=- 0 0 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n"
+           "m=audio 49170 RTP/AVP 0\r\n")
+    return Request(method="INVITE", uri="sip:server@mcptt.example",
+                   headers=Headers([("Content-Type", mcf.CONTENT_TYPE)]),
+                   body=mcf.adhoc_body(sdp, xml))
+
+
+def _imminent(xml, typ="Normal"):
+    flag = (f'<imminentperil-ind type="{typ}"><mcpttBoolean>true</mcpttBoolean>'
+            "</imminentperil-ind>")
+    return xml.replace("</session-type>", "</session-type>" + flag, 1)
+
+
+CTX = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
+
+
+class _CT:
+    """What the adapter reads of a call type: id and signature."""
+    def __init__(self, id, session_type):
+        from core.mcinfo import Signature
+        self.id, self.mc_signature = id, Signature(session_type)
+
+
+WITH_ADHOC = (_CT("a", "adhoc"), _CT("p", "private"))
+WITHOUT_ADHOC = (_CT("p", "private"),)
+
+
+@pytest.mark.parametrize("release", [Release.REL_18, Release.REL_19, Release.REL_20])
+@pytest.mark.parametrize("reason, types, code", [
+    ("not-authorised", WITH_ADHOC, 185), ("not-authorised", WITHOUT_ADHOC, 185),
+    ("call-type-not-permitted", WITHOUT_ADHOC, 186),
+    ("call-type-not-permitted", WITH_ADHOC, 100)])
+def test_an_authorisation_refusal_of_an_ad_hoc_call(release, reason, types, code):
+    from tests import mcpttinfo_fixture as mcf
+    r = Adapter("sip:server@mcptt.example", release, types).reject(
+        reason, CTX, _adhoc_invite(mcf.adhoc_xml(criteria="x")), authorisation=True)
+    assert r.status is Status.FORBIDDEN and not r.body
+    assert f'"{code} ' in r.headers.get("Warning")
+
+
+@pytest.mark.parametrize("reason, text", [
+    ("not-authorised", "100 function not allowed due to user authorisation"),
+    ("call-type-not-permitted", "100 function not allowed due to local policy")])
+def test_other_refusals_keep_their_codes(reason, text):
+    """Not step 0, not ad hoc, no INVITE, or a release without clause 17:
+    code 100 as before, and no body."""
+    from tests import mcpttinfo_fixture as mcf
+    pre = Request(method="INVITE", uri="sip:server@mcptt.example",
+                  headers=Headers([("Content-Type", mcf.CONTENT_TYPE)]),
+                  body=mcf.body_for("prearranged", "sip:grp@mcptt.example",
+                                    "v=0\r\nm=audio 1 RTP/AVP 0\r\n"))
+    emergency = _adhoc_invite(mcf.adhoc_xml(emergency=True))
+    for release, invite, step0 in ((Release.REL_19, pre, True),
+                                   (Release.REL_19, None, True),
+                                   (Release.REL_19, emergency, False),
+                                   (Release.REL_17, _adhoc_invite(mcf.adhoc_xml()), True)):
+        r = Adapter("sip:server@mcptt.example", release, WITHOUT_ADHOC).reject(
+            reason, CTX, invite, authorisation=step0)
+        assert text in r.headers.get("Warning"), (release, step0)
+        assert not r.body
+
+
+@pytest.mark.parametrize("release", [Release.REL_18, Release.REL_20])
+@pytest.mark.parametrize("which", ["emergency", "imminent"])
+@pytest.mark.parametrize("reason", ["not-authorised", "call-type-not-permitted"])
+def test_the_step_3b_and_3c_bodies(release, which, reason):
+    from tests import mcpttinfo_fixture as mcf
+    from tests.test_mcinfo import _doc, _schema
+    xml = mcf.adhoc_xml(emergency=True) if which == "emergency" else _imminent(mcf.adhoc_xml())
+    r = Adapter("sip:server@mcptt.example", release, WITH_ADHOC).reject(
+        reason, CTX, _adhoc_invite(xml), authorisation=True)
+    assert r.status is Status.FORBIDDEN
+    assert r.headers.get("Warning") == \
+        '399 mcptt.example "priority adhoc group call not authorised"'
+    assert r.headers.get("Content-Type") == mcf.CT_MCINFO
+    assert ("<adhoc-emergency-ind>false</adhoc-emergency-ind>" in r.body) \
+        is (which == "emergency")
+    assert ('<imminentperil-ind type="Normal"><mcpttBoolean>false</mcpttBoolean>'
+            in r.body) is (which == "imminent")
+    assert "true" not in r.body and "<session-type>" not in r.body
+    schema = _schema(release)
+    assert schema.validate(_doc(r.body)), schema.error_log
+
+
+def test_only_step_0_refusals_get_the_body():
+    """Other refusals of an emergency ad hoc call, and an ad hoc call whose
+    indication is false, have nothing to deny."""
+    from tests import mcpttinfo_fixture as mcf
+    a = Adapter("sip:server@mcptt.example", Release.REL_19, WITH_ADHOC)
+    assert not a.reject("adhoc-participants-undetermined", CTX,
+                        _adhoc_invite(mcf.adhoc_xml(emergency=True)), authorisation=True).body
+    assert not a.reject("not-authorised", CTX,
+                        _adhoc_invite(mcf.adhoc_xml(emergency=False)), authorisation=True).body
+    assert not a.reject("not-authorised", CTX,
+                        _adhoc_invite(mcf.adhoc_xml(emergency=True))).body
+
+
+@pytest.mark.parametrize("xml, invalid", [
+    ("both-true", True), ("emergency-false", True), ("encrypted", True),
+    ("imminent-false", True),
+    ("emergency-only", False), ("imminent-only", False), ("neither", False)])
+def test_step_3a_invalid_combinations(xml, invalid):
+    from tests import mcpttinfo_fixture as mcf
+    body = {
+        "both-true": _imminent(mcf.adhoc_xml(emergency=True)),
+        "emergency-false": _imminent(mcf.adhoc_xml(emergency=False)),
+        "encrypted": _imminent(mcf.adhoc_xml(emergency=True), typ="Encrypted"),
+        "imminent-false": _imminent(mcf.adhoc_xml(emergency=True)).replace(
+            "<mcpttBoolean>true</mcpttBoolean></imminentperil-ind>",
+            "<mcpttBoolean>false</mcpttBoolean></imminentperil-ind>"),
+        "emergency-only": mcf.adhoc_xml(emergency=True),
+        "imminent-only": _imminent(mcf.adhoc_xml()),
+        "neither": mcf.adhoc_xml(),
+    }[xml]
+    a = Adapter("sip:server@mcptt.example", Release.REL_19, WITH_ADHOC)
+    assert a.invalid_adhoc_indications(_adhoc_invite(body)) is invalid
+    # Not ad hoc, or before Rel-18: not this rule's business.
+    assert Adapter("sip:server@mcptt.example", Release.REL_17).invalid_adhoc_indications(
+        _adhoc_invite(_imminent(mcf.adhoc_xml(emergency=True)))) is False
+
+
+def test_the_3a_refusal():
+    r = Adapter("sip:server@mcptt.example", Release.REL_19).reject_invalid_combination(CTX)
+    assert r.status is Status.FORBIDDEN and not r.body
+    assert r.headers.get("Warning") == \
+        '399 mcptt.example "150 invalid combinations of data received in MIME body"'
+
+
+def test_a_body_that_no_longer_parses_is_just_not_ad_hoc():
+    a = Adapter("sip:server@mcptt.example", Release.REL_19, WITH_ADHOC)
+    bad = Request(method="INVITE", uri="sip:server@mcptt.example",
+                  headers=Headers([("Content-Type", "application/vnd.3gpp.mcptt-info+xml")]),
+                  body="<not-xml")
+    r = a.reject("not-authorised", CTX, bad, authorisation=True)
+    assert "100 function not allowed" in r.headers.get("Warning") and not r.body
+    assert a.invalid_adhoc_indications(bad) is False
+
+
+def test_a_step_0_refusal_with_another_code_keeps_that_code():
+    """A profile's authorise may refuse with any code it declares; only the
+    two that mean steps 4 and 5 become 185 and 186."""
+    from tests import mcpttinfo_fixture as mcf
+    r = Adapter("sip:server@mcptt.example", Release.REL_19, WITH_ADHOC).reject(
+        "partner-not-permitted", CTX, _adhoc_invite(mcf.adhoc_xml(criteria="x")),
+        authorisation=True)
+    assert '"179 service not authorized with the interconnected system"' in \
+        r.headers.get("Warning")
