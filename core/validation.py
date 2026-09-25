@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+from . import mcinfo
 from . import model
 from . import qos as qos_spec
 from .errors import CORE_ORIGINATED, ProfileValidationError
@@ -375,10 +376,12 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
         if not c.keys(p, item, allowed=(
                 "id", "label", "media", "session_model", "urgency", "application",
                 "auto_answer", "acknowledgement_required", "recording_required",
-                "max_participants", "initiator_roles", "floor"),
+                "max_participants", "initiator_roles", "floor", "mc_signature",
+                "no_answer_s"),
                 required=("id", "label", "media", "session_model", "urgency",
                           "auto_answer", "acknowledgement_required",
-                          "recording_required", "initiator_roles", "floor")):
+                          "recording_required", "initiator_roles", "floor",
+                          "mc_signature", "no_answer_s")):
             continue
         ident = c.typed(p, item, "id", str, "")
         if ident in seen:
@@ -420,6 +423,16 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                       "must be at least 1; use null for unlimited")
                 maxp = None
 
+        # PLT-ICD-001 2.7: required, a whole number of seconds, at least 1.
+        # No upper bound: how long a member may ring is the service's call.
+        no_answer = item.get("no_answer_s")
+        if isinstance(no_answer, bool) or not isinstance(no_answer, int):
+            if "no_answer_s" in item:
+                c.add(f"{p}.no_answer_s", "bad-type", "expected an integer (seconds)")
+            no_answer = 0
+        elif no_answer < 1:
+            c.add(f"{p}.no_answer_s", "bad-value", "must be at least 1 second")
+
         out.append(model.CallType(
             id=ident,
             label=c.typed(p, item, "label", str, "") or "",
@@ -436,8 +449,42 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
             max_participants=maxp,
             initiator_roles=tuple(parsed_roles),
             floor=_floor(c, f"{p}.floor", item.get("floor")),
+            mc_signature=_mc_signature(c, f"{p}.mc_signature", item.get("mc_signature")),
+            no_answer_s=no_answer,
         ))
+
+    # A signature must name at most one call type, or the core would have to
+    # guess which one a client meant -- and must not (PLT-ICD-001 2.6).
+    claimed: Dict[mcinfo.Signature, str] = {}
+    for ct in out:
+        if ct.mc_signature is None:
+            continue
+        other = claimed.get(ct.mc_signature)
+        if other is not None:
+            c.add("call_types", "ambiguous-signature",
+                  f"{other!r} and {ct.id!r} declare the same mc_signature; TS 24.379 "
+                  f"cannot tell them apart, so at most one of them may have it")
+        else:
+            claimed[ct.mc_signature] = ct.id
     return tuple(out)
+
+
+def _mc_signature(c: _Checker, p: str, node: Any) -> Optional[mcinfo.Signature]:
+    """null, or {session_type, emergency?, imminent_peril?, broadcast?}."""
+    if node is None:
+        return None
+    if not c.keys(p, node, allowed=("session_type", "emergency", "imminent_peril",
+                                    "broadcast"), required=("session_type",)):
+        return None
+    st = c.enum(f"{p}.session_type", node.get("session_type"), mcinfo.SESSION_TYPES)
+    flags = {}
+    for k in ("emergency", "imminent_peril", "broadcast"):
+        val = node.get(k, False)
+        if not isinstance(val, bool):
+            c.add(f"{p}.{k}", "bad-type", "expected true or false")
+            val = False
+        flags[k] = val
+    return mcinfo.Signature(st, **flags) if st else None
 
 
 def _identity(c: _Checker, node: Any) -> model.Identity:
@@ -495,6 +542,7 @@ def _identity(c: _Checker, node: Any) -> model.Identity:
                                RESOLVES_TO) or "",
         ))
     return model.Identity(domains=tuple(parsed_domains), functional=tuple(functional))
+
 
 
 def _identity_consistency(c: _Checker, identity: model.Identity) -> None:

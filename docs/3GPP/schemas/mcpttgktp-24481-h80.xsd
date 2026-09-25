@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Extracted verbatim by tools/spec/extract_xsd.py from 24481-h80.docx
+     (sha256 68e27842b6b47c8e...), targetNamespace urn:3gpp:ns:mcpttGKTP:1.0. Do not edit:
+     re-extract. -->
+<xs:schema
+  targetNamespace="urn:3gpp:ns:mcpttGKTP:1.0"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns:mgktp="urn:3gpp:ns:mcpttGKTP:1.0"
+  elementFormDefault="qualified" attributeFormDefault="unqualified">
+
+  <!-- MCS specific "list-service" child elements -->
+  <xs:element name="GKTPs" type="mgktp:allTypeGKTPsType"/>
+
+  <!-- complex type for GKTPs element -->
+  <xs:complexType name="allTypeGKTPsType">
+    <xs:sequence>
+      <!-- MCPTT specific extensions for regroupedType type defined in release 13 -->
+      <xs:element name="GMK-GKTPs" type="mgktp:singleTypeGKTPsType" minOccurs="0"/>
+      <xs:element name="MKFC-GKTPs" type="mgktp:singleTypeGKTPsType" minOccurs="0"/>
+
+      <xs:element name="anyExt" type="mgktp:anyExtType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <!-- MCS specific extensions for regroupedType type -->
+
+  <!-- MCPTT specific extensions for regroupedType type defined in a release after release 13 -->
+
+  <!-- MCVideo specific extensions for regroupedType type -->
+
+  <!-- MCData specific extensions for regroupedType type  -->
+
+  <!-- complex type for GKTPs element -->
+  <xs:complexType name="singleTypeGKTPsType">
+    <xs:sequence>
+      <xs:element name="GKTP" type="mgktp:GKTPType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="on-network-regrouped-GKTPs" 
+        type="mgktp:on-network-regrouped-GKTPsType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="anyExt" type="mgktp:anyExtType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <!-- complex type for GKTP element -->
+  <xs:complexType name="GKTPType">
+    <xs:simpleContent>
+      <xs:extension base="xs:hexBinary">
+        <xs:attribute name="id" type="xs:string" use="required"/>
+        <xs:anyAttribute namespace="##any" processContents="lax"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <!-- complex type for on-network-regrouped element -->
+  <xs:complexType name="on-network-regrouped-GKTPsType">
+    <xs:sequence>
+      <xs:element name="GKTP" type="mgktp:GKTPType" minOccurs="0" maxOccurs="unbounded"/>
+      <xs:element name="anyExt" type="mgktp:anyExtType" minOccurs="0"/>
+      <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+    <xs:attribute name="temporary-MCPTT-group-ID" type="xs:anyURI" use="required"/>
+    <xs:anyAttribute namespace="##any" processContents="lax"/>
+  </xs:complexType>
+
+  <!-- complex type for any extensions element -->
+  <xs:complexType name="anyExtType">
+    <xs:sequence>
+      <xs:any namespace="##any" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+    </xs:sequence>
+  </xs:complexType>
+
+</xs:schema>

@@ -752,3 +752,75 @@ def test_arp_outside_1_to_15_is_refused(mutate, arp):
     raw = mutate()
     raw["bearer"]["rules"][0]["decision"]["arp_level"] = arp
     expect_defects(raw, path_contains="arp_level")
+
+
+# --------------------------------------------------------------------------
+# mc_signature (PLT-ICD-001 2.6, PLT-CONF-AUDIT CA-20)
+# --------------------------------------------------------------------------
+
+
+def test_every_call_type_must_state_its_mcptt_signature(mutate):
+    """Required, and null is an answer. An absent key would let a profile say
+    nothing about whether a native client can request a call type."""
+    raw = mutate()
+    del raw["call_types"][0]["mc_signature"]
+    expect_defects(raw, path_contains="call_types[0]")
+
+
+def test_two_call_types_may_not_claim_one_signature(mutate):
+    """The core would have to guess which one a client meant."""
+    raw = mutate()
+    sigs = [c["mc_signature"] for c in raw["call_types"]]
+    first = next(i for i, s in enumerate(sigs) if s)
+    other = next(i for i, s in enumerate(sigs) if i != first)
+    raw["call_types"][other]["mc_signature"] = dict(sigs[first])
+    expect_defects(raw, codes=["ambiguous-signature"], path_contains="call_types")
+
+
+@pytest.mark.parametrize("sig, path", [
+    ({"session_type": "conference"}, "session_type"),        # not a TS 24.379 value
+    ({"emergency": True}, "mc_signature"),                   # session_type missing
+    ({"session_type": "private", "emergency": "yes"}, "emergency"),
+    ({"session_type": "private", "priority": 1}, "mc_signature"),
+])
+def test_a_malformed_signature_is_refused(mutate, sig, path):
+    raw = mutate()
+    raw["call_types"][0]["mc_signature"] = sig
+    expect_defects(raw, path_contains=path)
+
+
+# --------------------------------------------------------------------------
+# no_answer_s (PLT-ICD-001 2.7, PLT-VP-R1 SIP-OP-15)
+# --------------------------------------------------------------------------
+
+
+def test_every_call_type_must_state_how_long_a_member_may_ring(mutate):
+    """Required, no default: the 32 s it used to be was Timer B, a transport
+    constant nobody chose for any call type."""
+    raw = mutate()
+    del raw["call_types"][0]["no_answer_s"]
+    expect_defects(raw, codes=["missing-key"], path_contains="call_types[0].no_answer_s")
+
+
+@pytest.mark.parametrize("value, code", [
+    (0, "bad-value"), (-5, "bad-value"), (True, "bad-type"), ("30", "bad-type"),
+    (12.5, "bad-type"), (None, "bad-type"),
+])
+def test_a_bad_ring_limit_is_refused(mutate, value, code):
+    raw = mutate()
+    raw["call_types"][0]["no_answer_s"] = value
+    expect_defects(raw, codes=[code], path_contains="call_types[0].no_answer_s")
+
+
+def test_the_declared_ring_limit_reaches_the_model(mutate):
+    raw = mutate()
+    raw["call_types"][0]["no_answer_s"] = 75
+    prof = build(raw, "test-hash")
+    assert prof.call_types[0].no_answer_s == 75
+
+
+@pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
+def test_every_in_tree_call_type_declares_a_ring_limit(name):
+    loaded = loader.load(PROFILES / name)
+    assert all(isinstance(ct.no_answer_s, int) and ct.no_answer_s >= 1
+               for ct in loaded.profile.call_types)

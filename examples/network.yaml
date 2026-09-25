@@ -1,0 +1,9 @@
+# A network profile (PLT-ICD-001 2.8), for running the process locally.
+# Every key is required; [] and "none" state that there is nothing there.
+name: example
+version: "1"
+plmns: ["001010"]           # 001/01 is the test PLMN; see ICD-OP-12 on two-digit MNCs
+cells: []                   # [{cell: <ECGI or NCGI>, location: {<location_key>: <value>}}]
+sip:
+  trusted_cores: []         # DNS names of SIP cores that may assert any identity
+  core_ca: none             # their CA: a file beside this one, when the list is not empty

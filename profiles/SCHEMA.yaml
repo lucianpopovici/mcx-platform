@@ -63,7 +63,15 @@ call_types:
     acknowledgement_required: bool
     recording_required: bool
     max_participants: int?
+    no_answer_s: int              # REQUIRED, >= 1: seconds an invited member may
+                                  # ring before the core CANCELs it (PLT-ICD-001 2.7)
     initiator_roles: [string]     # empty = any authorised user
+    mc_signature:                 # REQUIRED; null = not requestable by a native
+                                  # MCPTT client (PLT-ICD-001 2.6)
+      session_type: prearranged|chat|private|first-to-answer|ambient-listening|adhoc
+      emergency: bool?            # default false
+      imminent_peril: bool?       # default false
+      broadcast: bool?            # default false
     floor:
       initial_grant_to_initiator: bool
       queueing_enabled: bool

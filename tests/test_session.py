@@ -232,6 +232,8 @@ def test_invocation_order_matches_icd_section_8_1(manager, sink):
     assert calls == [
         ("IF-IDR", "resolve"),
         ("IF-PRI", "evaluate"),
+        # PLT-ICD-001 0.7 §8.1 step 4a: the initiator's roles, for admission.
+        ("IF-IDR", "identities_of"),
         ("IF-SES", "admit"),
         ("IF-SES", "decide"),
         ("IF-SES", "floor_policy"),
@@ -331,7 +333,7 @@ def test_vp1_hook_002_contract_violation_is_distinguished(mcx, sink):
 def test_vp1_hook_003_every_invocation_audited(manager, sink):
     manager.establish(req())
     records = sink.of_type(RecordType.HOOK_INVOCATION)
-    assert len(records) == 6
+    assert len(records) == 7
     for r in records:
         assert r.detail["interface"].startswith("IF-")
         assert "elapsed_ms" in r.detail

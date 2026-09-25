@@ -25,10 +25,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .errors import (
+    ADHOC_PARTICIPANTS_UNDETERMINED,
+    ADHOC_TOO_MANY_PARTICIPANTS,
     CALL_TYPE_NOT_PERMITTED,
+    IDENTITY_NOT_AUTHENTICATED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
@@ -44,8 +47,9 @@ from .errors import (
     RESOLVER_UNAVAILABLE,
     UNKNOWN_TARGET,
 )
-from .hooks import MediaKind, SessionRequest
-from .release import Release, supports_sip_warning
+from .hooks import LocationContext, MediaKind, SessionRequest
+from . import mcinfo
+from .release import Release, supports_session_type, supports_sip_warning
 from .session import Signal, SignalType
 
 # --------------------------------------------------------------------------
@@ -129,6 +133,7 @@ class Status(Enum):
     CALL_DOES_NOT_EXIST = (481, "Call/Transaction Does Not Exist")
     LOOP_DETECTED = (482, "Loop Detected")
     BUSY_HERE = (486, "Busy Here")
+    REQUEST_TERMINATED = (487, "Request Terminated")
     NOT_ACCEPTABLE_HERE = (488, "Not Acceptable Here")
     SERVER_ERROR = (500, "Server Internal Error")
     NOT_IMPLEMENTED = (501, "Not Implemented")
@@ -166,6 +171,10 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     HOOK_TIMEOUT: Status.SERVER_ERROR,
     HOOK_ERROR: Status.SERVER_ERROR,
     HOOK_CONTRACT_VIOLATION: Status.SERVER_ERROR,
+    # TS 24.379 17.4.2.2 steps 6, 7, 7A and 12: both are 403.
+    ADHOC_PARTICIPANTS_UNDETERMINED: Status.FORBIDDEN,
+    ADHOC_TOO_MANY_PARTICIPANTS: Status.FORBIDDEN,
+    IDENTITY_NOT_AUTHENTICATED: Status.FORBIDDEN,
 }
 
 # TS 24.379 clause 4.4.1: the RFC 3261 warn-code is always 399 (miscellaneous
@@ -193,6 +202,15 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     # interconnected system and is rejected in the local system."
     PARTNER_NOT_PERMITTED: (179,
                             "service not authorized with the interconnected system"),
+    # Rel-18 onwards; texts from table 4.4.2-2 of V18.13.0 and V20.0.0, which
+    # agree. "The MCPTT server can not determine the adhoc group participants
+    # based on the input parameters." (Clause 17.4.2.2 step 7A spells it
+    # "cant"; the table is followed.)
+    ADHOC_PARTICIPANTS_UNDETERMINED: (187, "can't determine the adhoc group participants"),
+    # "The maximum number of allowed adhoc group participants exceeded the
+    # configured limit."
+    ADHOC_TOO_MANY_PARTICIPANTS: (189,
+                                  "maximum number of allowed adhoc group participants exceeded"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -208,10 +226,14 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
 # Table 4.4.2-1 defines the MC form with "=/", an ABNF INCREMENTAL ALTERNATIVE:
 # it adds a permitted shape for warn-text, it does not replace RFC 3261's. A
 # warn-text that does not begin with three digits therefore stays legal and
-# cannot be mistaken for a code. This is what keeps PLT-PRI-008's invariant --
-# a policy refusal must be distinguishable from a fault in the trace, and both
-# are 503 for `capacity-exhausted` -- without emitting a false code to buy it.
+# cannot be mistaken for a code. It is what lets a trace tell a policy refusal
+# from a fault when both are 503 (`capacity-exhausted`), without emitting a false
+# code to buy it. That aim is the platform's own and stricter than PLT-PRI-008,
+# which asks only that capacity exhaustion be distinguishable from authorisation
+# failure. It holds at the platform's edge only: a proxy turns a lone 503 into
+# a 500 and drops the Warning, which was accepted (PLT-VP-R1 SIP-OP-10).
 LOCAL_WARNING_TEXTS: Mapping[str, str] = {
+    IDENTITY_NOT_AUTHENTICATED: "asserted identity is not the authenticated one",
     NO_BINDING: "identity has no current holder",
     NO_LOCATION_BINDING: "location required for this identity",
     CAPACITY_EXHAUSTED: "maximum number of sessions reached",
@@ -222,6 +244,12 @@ LOCAL_WARNING_TEXTS: Mapping[str, str] = {
 }
 
 REFUSALS_WITHOUT_WARNING_TEXT: Mapping[str, str] = {
+    # 141 ("user unknown to the participating function": it cannot associate
+    # the public user identity with an MCPTT ID) is the nearest. Here the
+    # identity is associated perfectly well; it is simply not the one this
+    # connection authenticated. Table 4.4.2-2 of V18.13.0 has no such code.
+    IDENTITY_NOT_AUTHENTICATED: "no code for an asserted identity the "
+                                "connection did not authenticate",
     # 141 is the nearest, but it is the opposite direction: it means the
     # participating function could not associate a public user identity with
     # an MCPTT ID. `no-binding` means a known identity that nobody holds.
@@ -587,9 +615,20 @@ class DialogContext:
 class Adapter:
     """Renders abstract signals into TS 24.379 messages and parses inbound ones."""
 
-    def __init__(self, local_uri: str, release: Release) -> None:
+    def __init__(self, local_uri: str, release: Release,
+                 call_types: Sequence[Any] = ()) -> None:
+        """`call_types` are the loaded profile's; the adapter reads only each
+        one's `id` and `mc_signature` (PLT-ICD-001 2.6) and learns nothing
+        else about the profile."""
         self._local = local_uri
         self._host = _host_of(local_uri)
+        self._by_signature: Dict[mcinfo.Signature, str] = {}
+        self._signature_of: Dict[str, mcinfo.Signature] = {}
+        for ct in call_types:
+            sig = getattr(ct, "mc_signature", None)
+            if sig is not None:
+                self._by_signature[sig] = ct.id
+                self._signature_of[ct.id] = sig
         # PLT-REL-009. Table 4.4.2-2 grew from 44 codes in Rel-13 to 95 in
         # Rel-20, and one of the three this platform emits (179) does not
         # exist before Rel-17 (PLT-CONF-AUDIT CA-12).
@@ -657,15 +696,45 @@ class Adapter:
         else:
             headers.set("Answer-Mode", ANSWER_MODE_MANUAL)
 
+        sig = self._signature_of.get(request.call_type) if request else None
         if request is not None:
-            headers.set("P-Asserted-Identity", f"<{request.initiator}>")
+            # TS 24.379 6.3.2.2.6.2 item 7: an INVITE towards a terminating
+            # MCPTT client asserts the PARTICIPATING FUNCTION's identity, and
+            # the caller travels in <mcptt-calling-user-id> (CA-20). Where no
+            # MCPTT body is sent -- a gateway or partner leg, a call type
+            # declared with no signature -- there is nowhere else for the
+            # caller to travel, so the caller is asserted as before. The
+            # first version of this fix changed both (found by review).
+            headers.set("P-Asserted-Identity",
+                        f"<{self._local}>" if sig is not None else f"<{request.initiator}>")
             priority = signal.detail.get("resource_priority")
             if priority:
                 headers.set("Resource-Priority", str(priority))
 
-        headers.set("Content-Type", CT_SDP)
+        if sig is None:
+            # No MCPTT representation (a gateway leg, MCData): SDP alone.
+            headers.set("Content-Type", CT_SDP)
+            return Request(method="INVITE", uri=signal.target or "",
+                           headers=headers, body=context.sdp)
+        # 6.3.2.2.3 item 8 and 6.3.2.2.9: the MCPTT info body goes to the
+        # terminating client. Without it the callee cannot tell which group
+        # is calling or who is (10.1.1.4.1.1 item 4, CA-20).
+        info = mcinfo.McInfo(
+            session_type=sig.session_type,
+            request_uri=signal.target,
+            calling_user_id=request.initiator,
+            calling_group_id=signal.detail.get("group_id"),
+            # 17.4.2.1.1 item 4c.
+            participant_criteria=signal.detail.get("participant_criteria"),
+            emergency=True if sig.emergency else None,
+            imminent_peril=True if sig.imminent_peril else None,
+            broadcast=True if sig.broadcast else None)
+        ctype, body = mcinfo.build_multipart((
+            mcinfo.Part(CT_SDP, context.sdp),
+            mcinfo.Part(CT_MC_INFO, mcinfo.render(info, self._release))))
+        headers.set("Content-Type", ctype)
         return Request(method="INVITE", uri=signal.target or "",
-                       headers=headers, body=context.sdp)
+                       headers=headers, body=body)
 
     def reject(self, reason_code: str, context: DialogContext) -> Response:
         """Refuse, with the Warning header shape of TS 24.379 clause 4.4.1.
@@ -723,9 +792,16 @@ class Adapter:
     def parse_invite(self, message: Request) -> SessionRequest:
         """Build a SessionRequest from an inbound INVITE.
 
-        Nothing profile-specific is inferred: call type arrives in the MC info
-        body, and an absent or unknown value is left for the profile's session
-        policy to refuse.
+        The call type is the profile call type that declares the signature
+        of the MCPTT info body (TS 24.379 annex F.1; PLT-ICD-001 2.6), or ""
+        when none does, the body is absent, or the configured release has no
+        such session type -- and "" is left for the session policy to refuse.
+        Nothing is inferred. The target is <mcptt-request-uri> (10.1.1.2.1.1
+        item 14b for a group, 11.1.1.2.1.1 for a user); the Request-URI of a
+        conformant INVITE is the participating function's own identity.
+
+        A body that is present and malformed raises SipError: a client that
+        sent one is broken, and refusing it is VP1-SIG-004's business.
         """
         if message.method != "INVITE":
             raise SipError(f"expected INVITE, found {message.method}")
@@ -737,7 +813,26 @@ class Adapter:
             raise SipError("INVITE lacks a usable initiator or target")
 
         media = self._media_from_offer(message)
-        info = _parse_mc_info(message.body)
+        content_type = message.headers.get("Content-Type") or ""
+        try:
+            raw = mcinfo.mcinfo_of(content_type, message.body)
+            info = mcinfo.parse(raw) if raw is not None else mcinfo.McInfo()
+            # Clause 17 exists from Rel-18 (core/release.py); before it an
+            # "adhoc" session type is just one no call type can declare.
+            adhoc = info.session_type == "adhoc" and \
+                supports_session_type(self._release, "adhoc")
+            # TS 24.379 17.2.2.1.1 item 11: an ad hoc caller may list the
+            # users to call as an RFC 5366 URI list. Read for ad hoc calls
+            # only: other INVITEs may carry resource lists for other reasons
+            # (clause 4.8), and are none of this code's business.
+            listed = mcinfo.participants_of(content_type, message.body) \
+                if adhoc else None
+        except mcinfo.McInfoError as exc:
+            raise SipError(f"MCPTT info body: {exc}") from None
+        sig = info.signature()
+        call_type = ""
+        if sig is not None and supports_session_type(self._release, sig.session_type):
+            call_type = self._by_signature.get(sig, "")
 
         attributes = {}
         answer_mode = message.headers.get("Answer-Mode")
@@ -752,26 +847,46 @@ class Adapter:
         return SessionRequest(
             request_id=message.headers.get("Call-ID") or "",
             initiator=initiator,
-            target=info.get("target", target),
-            call_type=info.get("call_type", ""),
+            target=_uri(info.request_uri) if info.request_uri else target,
+            call_type=call_type,
             media=media,
-            application=info.get("application"),
-            urgency=info.get("urgency"),
-            location=None,
+            # TS 24.379 has no element for either. The profile's declaration
+            # of the call type supplies both (profiles/common/tables.py).
+            application=None,
+            urgency=None,
+            # 17.2.2.1.1 item 14a (and 10.1.1.2.1.1 for other group calls):
+            # the client's location report, when it sent one. The serving
+            # cell only; what the cell means is the profile's (section 2.8),
+            # applied by the session layer.
+            location=_location(content_type, message.body),
             attributes=attributes,
+            # Clause 17: an ad hoc call's members are listed or described,
+            # never a group the core already knows (PLT-ICD-001 section 3.5).
+            adhoc=adhoc,
+            adhoc_alert_group=bool(adhoc and info.adhoc_alert_group),
+            participants=tuple(_uri(u) for u in listed or ()) if adhoc else (),
+            participant_criteria=info.participant_criteria if adhoc else None,
         )
 
     def _media_from_offer(self, message: Request) -> Tuple[MediaKind, ...]:
-        content_type = (message.headers.get("Content-Type") or "").lower()
-        # MC INVITEs carry SDP inside multipart/mixed alongside the MC info
-        # body (TS 24.379), so a top-level application/sdp is not required.
-        if CT_SDP not in content_type and "multipart" not in content_type:
-            return ()
+        try:
+            sdp = mcinfo.sdp_of(message.headers.get("Content-Type") or "",
+                                message.body)
+        except mcinfo.McInfoError as exc:
+            raise SipError(str(exc)) from None
         kinds: List[MediaKind] = []
-        for line in message.body.splitlines():
+        for line in sdp.splitlines():
             if not line.startswith("m="):
                 continue
-            kind = line[2:].split()[0] if len(line) > 2 else ""
+            fields = line[2:].split()
+            kind = fields[0] if fields else ""
+            # TS 24.380 (V20.0.0 table and example "m=application 20032 udp
+            # MCPTT"): media "application", proto "udp", fmt "MCPTT" is the
+            # floor control channel of a voice call, not data media. Every
+            # conformant MCPTT offer carries it; counting it as DATA made
+            # every real voice call look like voice plus data (CA-20).
+            if kind == "application" and fields[-1:] == ["MCPTT"]:
+                continue
             mapped = {"audio": MediaKind.VOICE, "video": MediaKind.VIDEO,
                       "application": MediaKind.DATA}.get(kind)
             if mapped and mapped not in kinds:
@@ -896,6 +1011,25 @@ def build_sdp(address: str, audio_port: int, floor_port: Optional[int],
 # --------------------------------------------------------------------------
 
 
+def canonical_uri(uri: str) -> str:
+    """A SIP URI for comparison: scheme and host lower-cased, the user part
+    left as it is -- RFC 3261 19.1.4 compares the user part case-sensitively,
+    and so do the directory and the registration store."""
+    uri = uri.strip()
+    scheme, colon, rest = uri.partition(":")
+    if not colon:
+        return uri
+    user, at, host = rest.rpartition("@")
+    return f"{scheme.lower()}:{user}{at}{host.lower()}"
+
+
+def _location(content_type: str, body: str) -> Optional["LocationContext"]:
+    report = mcinfo.location_of(content_type, body)
+    if report is None or report.cell is None:
+        return None
+    return LocationContext(cell_id=report.cell)
+
+
 def _uri(value: str) -> str:
     match = re.search(r"<([^>]+)>", value)
     candidate = match.group(1) if match else value.strip()
@@ -904,18 +1038,3 @@ def _uri(value: str) -> str:
 
 def _host(uri: str) -> str:
     return uri.rpartition("@")[2] or uri
-
-
-def _parse_mc_info(body: str) -> Dict[str, str]:
-    """Extract MC info fields from a multipart body, if present.
-
-    Deliberately forgiving: a missing or unparsable body yields an empty map and
-    the session policy refuses the resulting request, rather than the adapter
-    guessing a call type.
-    """
-    out: Dict[str, str] = {}
-    for field_name in ("call_type", "application", "urgency", "target"):
-        match = re.search(rf"<mcptt-{field_name}>([^<]+)</mcptt-{field_name}>", body)
-        if match:
-            out[field_name] = match.group(1).strip()
-    return out

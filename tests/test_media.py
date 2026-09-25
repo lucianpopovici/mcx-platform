@@ -160,7 +160,7 @@ def test_sdp_round_trip_and_floor_port():
 
 def test_sdp_media_level_address_wins_and_missing_pieces_raise():
     body = ("v=0\r\nc=IN IP4 1.1.1.1\r\nm=audio 4000 RTP/AVP 0\r\n"
-            "c=IN IP4 2.2.2.2\r\n<mcptt-call_type>x</mcptt-call_type>")
+            "c=IN IP4 2.2.2.2\r\nnot an SDP line")
     assert parse_sdp(body).address == "2.2.2.2"
     with pytest.raises(SipError):
         parse_sdp("v=0\r\nc=IN IP4 1.1.1.1\r\n")            # no audio
@@ -181,6 +181,22 @@ def _defects(raw):
     with pytest.raises(ProfileValidationError) as exc:
         build(raw, "h")
     return exc.value.defects
+
+
+def test_in_tree_profiles_state_the_specification_revoke_timers():
+    """PLT-VP-R1 PRF-OP-02, decided 2026-09-24: every profile that sets
+    floor timers states T8 = 1 s and T3 = 3 s, TS 24.380's defaults. The
+    100 ms T8 the profiles carried was written when T8 was (wrongly) the
+    grace period, and would have re-sent the Revoke about 30 times per
+    grace. Literals, not DEFAULT_TIMERS_MS: the decision is pinned, not
+    whatever the default becomes."""
+    for name in ("mcx", "frmcs", "utility"):
+        raw = yaml.safe_load((ROOT / "profiles" / name / "profile.yaml").read_text())
+        for ct in raw["call_types"]:
+            timers = (ct.get("floor") or {}).get("timers_ms") or {}
+            if timers:
+                assert timers.get("T8") == 1000, (name, ct.get("id"))
+                assert timers.get("T3") == 3000, (name, ct.get("id"))
 
 
 def test_every_in_tree_profile_declares_codecs():
