@@ -161,12 +161,9 @@ identity:
       location_key: track_section
       multiplicity: multi
       resolves_to: group
-  # cells: the serving cells a client reports (TS 24.379 annex F.3) mapped to
-  # the location attributes above -- how a REC placed from a native client
-  # finds its area (PLT-ICD-001 2.8). Cell identities are network data; none
-  # are declared here. One entry per cell, for example:
-  #   - {cell: "0010100000000000000000000100100011", location: {track_section: S1}}
-  # (6 digits MCC+MNC, then 28 binary digits for an ECGI or 36 for an NCGI.)
+  # The serving cell a client reports becomes a track_section or yard_id
+  # through the deployment's cell map (MCX_CELLS_FILE, PLT-ICD-001 2.8), not
+  # through this profile: cell identities are network data (PRF-OP-03).
 
 priority:
   default_scope: railway

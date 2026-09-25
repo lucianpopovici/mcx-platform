@@ -43,12 +43,19 @@ def list_max():
 
 
 @pytest.fixture
-def rt(tmp_path, pki, clock, list_max):
+def cells_file():
+    """MCX_CELLS_FILE for the frmcs runtime: none unless a test says so."""
+    return "none"
+
+
+@pytest.fixture
+def rt(tmp_path, pki, clock, list_max, cells_file):
     g = tmp_path / "frmcs-groups.yaml"
     g.write_text(f"groups:\n  - id: 'grp:yard'\n    members: {json.dumps(F[1:3])}\n"
                  f"users: {json.dumps(F)}\n")
     env = sip_env(tmp_path, pki, MCX_PROFILE="frmcs", MCX_RELEASE="19",
-                  MCX_GROUPS_FILE=str(g), MCX_ADHOC_LIST_MAX=list_max)
+                  MCX_GROUPS_FILE=str(g), MCX_ADHOC_LIST_MAX=list_max,
+                  MCX_CELLS_FILE=cells_file)
     r = build_runtime(env, clock, platform=Platform())
     resolver = r.loaded.hooks.identity_resolver
     resolver.bind("shunting-team-leader", F[0], YARD)   # may start shunting calls

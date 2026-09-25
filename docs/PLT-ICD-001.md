@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.10 (draft)
+**Version:** 0.11 (draft)
 **Date:** 2026-09-24
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -145,29 +145,31 @@ All three in-tree profiles declare 32 for every call type, which keeps the
 previous behaviour. The value per call type is the profile owner's choice.
 
 
-### 2.8 Cell map (declared data, not a hook)
+### 2.8 Cell map (deployment data, not a hook and not the profile)
 
 A client may attach its location to an INVITE: an
 `application/vnd.3gpp.mcptt-location-info+xml` body with a `<Report>`
 (TS 24.379 17.2.2.1.1 item 14a for ad hoc calls, 10.1.1.2.1.1 for prearranged
 ones; schema in annex F.3). What it reports is the network's view: the serving
 cell, as an ECGI or NCGI. A functional identity is keyed on a location
-attribute the profile names (`location_key`, e.g. `track_section`). Turning one
-into the other is profile knowledge, so it is declared as data and checked at
-load time. Adopted 2026-09-25 (PLT-VP-R1 ADHOC-OP-03).
+attribute the profile names (`location_key`, e.g. `track_section`). Which cell
+stands for which attribute depends on the radio plan of one network, so the map
+is deployment data, like the groups file. It is not part of the profile. It is
+given by `MCX_CELLS_FILE` and checked at startup against the loaded profile.
+Adopted 2026-09-25 (PLT-VP-R1 ADHOC-OP-03; moved from the profile by PRF-OP-03).
 
 ```yaml
-identity:
-  cells:
-    - {cell: "0010100000000000000000000100100011", location: {track_section: S1}}
+cells:
+  - {cell: "0010100000000000000000000100100011", location: {track_section: S1}}
 ```
 
 | ID | Rule |
 |---|---|
-| ICD-LOC-001 | `identity.cells` is optional. Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Each `location` key must be the `location_key` of some functional identity; a cell may appear once. Anything else is a load error. |
+| ICD-LOC-001 | Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Each `location` key must be the `location_key` of some functional identity in the loaded profile, and a cell may appear once. Any defect refuses startup, and all defects are reported together. |
 | ICD-LOC-002 | The core reads the serving cell from the report. It prefers the NCGI, which Rel-18 carries in `<anyExt>`, to the ECGI. The cell becomes `LocationContext.cell_id`. Neighbour cells, coordinates and the rest are not read. |
 | ICD-LOC-003 | A location is advisory, never a reason to refuse. A missing, malformed or non-report body, a DOCTYPE, or a cell sent with `type="Encrypted"` (the platform holds no key, F.3.3) all leave the request without a location. |
 | ICD-LOC-004 | Before step 1 of §8.1, the core adds the mapped attributes of a reported cell to the request's location. Attributes the request already carries are kept, and an unmapped cell adds nothing. |
+| ICD-LOC-005 | `MCX_CELLS_FILE` is required, with no default, when the profile has location-dependent identities; `none` states that there is no map. Without a map, their criteria would match nobody on any call from a native client, and nothing would say so. A profile without location-dependent identities needs no setting. |
 
 ---
 
@@ -614,6 +616,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.11 | 2026-09-25 | §2.8: the cell map is deployment data (`MCX_CELLS_FILE`), not a profile section (PRF-OP-03). It is required when the profile has location-dependent identities (ICD-LOC-005). The profile schema is back to what it was before 0.10. |
 | 0.10 | 2026-09-25 | §2.8 added: the cell map `identity.cells` (ICD-LOC-001 to 004). The core reads the client's location report (annex F.3) and applies the map, so location-dependent identities resolve from a native client's call. A minor change: an optional profile section, and no hook change. |
 | 0.9 | 2026-09-25 | ICD-OP-08 closed in its R1 form: certificate identity plus trusted cores (`MCX_SIP_TRUSTED_PEERS`), and each dialog bound to its connection. ICD-OP-10 (shared trust anchor) and ICD-OP-11 (guard order) opened. The ICD surface is unchanged; this is a host requirement. |
 | 0.8 | 2026-09-25 | ICD-ADH-001: the deployment-wide list cap `MCX_ADHOC_LIST_MAX` (PLT-VP-R1 ADHOC-OP-04). A minor change: no hook or parameter object changes. |

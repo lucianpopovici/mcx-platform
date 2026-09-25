@@ -10,7 +10,7 @@ them (PLT-PRF-020).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
@@ -86,11 +86,6 @@ class FunctionalIdentity:
 class Identity:
     domains: Tuple[str, ...]
     functional: Tuple[FunctionalIdentity, ...]
-    # Serving cell (ECGI or NCGI, as TS 24.379 annex F.3 writes it) -> the
-    # location attributes it stands for, e.g. {"track_section": "S1"}. How a
-    # reported cell becomes the location a functional identity is keyed on
-    # (PLT-ICD-001 2.8; PLT-VP-R1 ADHOC-OP-03).
-    cells: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

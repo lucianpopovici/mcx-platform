@@ -202,6 +202,9 @@ class Config:
     host: str
     port: int
     groups_file: Optional[Path]
+    # MCX_CELLS_FILE: a path, "none", or unset (None). Whether unset is
+    # allowed depends on the profile, so the runtime decides (PRF-OP-03).
+    cells: Optional[str] = None
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
 
@@ -305,6 +308,7 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             groups_file=Path(groups) if groups else None,
+            cells=(env.get("MCX_CELLS_FILE") or "").strip() or None,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
         )

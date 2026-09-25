@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from core import loader
@@ -22,6 +23,7 @@ from core.session import (Platform, Refusal, Session, SessionManager, Signal)
 from core import mcinfo
 
 from .config import BEARER_STUB, IDMS_STUB, RECORDER_STUB, Config
+from .cells import NONE as CELLS_NONE, load_cells
 from .groups import GroupDirectory, load_groups, load_users
 from .store import SessionStore, SqliteStore
 
@@ -171,6 +173,32 @@ def role_functions(config: Config) -> Mapping[str, str]:
     return out
 
 
+def _cell_map(config, loaded):
+    """PRF-OP-03 (decided 2026-09-25): the cell map is deployment data.
+
+    Required, with no default, when the profile has location-dependent
+    identities: without a map their criteria match nobody on any call from
+    a native client, and nothing would say so. "none" states that on
+    purpose. A profile with none may still name a file, which is then
+    checked like any other (and every key in it will be unknown).
+    """
+    keys = {f.location_key for f in loaded.profile.identity.functional
+            if f.location_key}
+    setting = config.cells
+    if setting is None:
+        if keys:
+            raise StartupRefused(
+                "MCX_CELLS_FILE is not set: profile "
+                f"{loaded.profile.identifier()} has location-dependent identities "
+                f"(keys: {', '.join(sorted(keys))}), which a native client's call "
+                "can reach only through a cell map. Give a file, or 'none' to "
+                "state that there is none")
+        return {}
+    if setting.lower() == CELLS_NONE:
+        return {}
+    return load_cells(Path(setting), keys)
+
+
 def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                   platform: Optional[Platform] = None,
                   store: Optional[SessionStore] = None) -> Runtime:
@@ -214,13 +242,15 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     store = store or SqliteStore(config.data_dir)
     recovered = sum(1 for s in store.sessions() if s.get("state") == "established")
     auditor = Auditor(store, identifier, clock=clock)
+    cells = _cell_map(config, loaded)
     manager = SessionManager(loaded, auditor,
                              platform=platform or fail_closed_platform(
                                  config.recorder == RECORDER_STUB,
                                  config.bearer == BEARER_STUB),
                              clock=clock, functions=role_functions(config),
                              defer_floor_start=config.sip is not None,
-                             adhoc_list_max=config.adhoc_list_max)
+                             adhoc_list_max=config.adhoc_list_max,
+                             cells=cells)
 
     groups = GroupDirectory(load_groups(config.groups_file),
                             load_users(config.groups_file))

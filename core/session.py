@@ -132,7 +132,8 @@ class SessionManager:
                  clock: Optional[Callable[[], int]] = None,
                  functions: Optional[Mapping[str, str]] = None,
                  defer_floor_start: bool = False,
-                 adhoc_list_max: Optional[int] = None) -> None:
+                 adhoc_list_max: Optional[int] = None,
+                 cells: Optional[Mapping[str, Mapping[str, str]]] = None) -> None:
         self._loaded = loaded
         self._hooks = loaded.hooks
         self._profile = loaded.profile
@@ -153,6 +154,9 @@ class SessionManager:
         # MCX_ADHOC_LIST_MAX, required there). None only for a manager built
         # by hand, and then the call type's limit alone applies.
         self._adhoc_list_max = adhoc_list_max
+        # Serving cell -> location attributes: deployment data, supplied by
+        # the host (MCX_CELLS_FILE; PLT-ICD-001 2.8, PRF-OP-03).
+        self._cells = dict(cells or {})
 
     # -- observation ----------------------------------------------------
 
@@ -529,7 +533,7 @@ class SessionManager:
             raise HookContractViolation("resolution contains duplicate members")
 
     def _located(self, request: SessionRequest) -> SessionRequest:
-        """PLT-ICD-001 2.8: a reported serving cell the profile maps gains
+        """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains
         the location attributes it stands for (e.g. track_section), which
         is what functional identities are keyed on. Attributes the request
         already carries are kept: the map fills in, it does not overrule.
@@ -537,7 +541,7 @@ class SessionManager:
         loc = request.location
         if loc is None or not loc.cell_id:
             return request
-        mapped = self._profile.identity.cells.get(loc.cell_id)
+        mapped = self._cells.get(loc.cell_id)
         if not mapped:
             return request
         attributes = {**mapped, **loc.attributes}

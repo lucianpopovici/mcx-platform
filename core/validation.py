@@ -16,7 +16,6 @@ tells the author everything that is wrong with the profile.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import mcinfo
@@ -490,7 +489,7 @@ def _mc_signature(c: _Checker, p: str, node: Any) -> Optional[mcinfo.Signature]:
 
 def _identity(c: _Checker, node: Any) -> model.Identity:
     p = "identity"
-    if not c.keys(p, node, allowed=("domains", "functional", "cells"),
+    if not c.keys(p, node, allowed=("domains", "functional"),
                   required=("domains",)):
         return model.Identity(domains=(), functional=())
 
@@ -542,58 +541,8 @@ def _identity(c: _Checker, node: Any) -> model.Identity:
             resolves_to=c.enum(f"{fp}.resolves_to", item.get("resolves_to"),
                                RESOLVES_TO) or "",
         ))
-    cells = _cells(c, f"{p}.cells", node.get("cells"),
-                   {f.location_key for f in functional if f.location_key})
-    return model.Identity(domains=tuple(parsed_domains), functional=tuple(functional),
-                          cells=cells)
+    return model.Identity(domains=tuple(parsed_domains), functional=tuple(functional))
 
-
-
-def _cells(c: _Checker, p: str, node: Any, location_keys: Set[str]
-           ) -> Mapping[str, Mapping[str, str]]:
-    """PLT-ICD-001 2.8: `cells` maps a serving cell to location attributes.
-    Optional; a profile with no location-dependent identity has no use for
-    it. Each attribute must be a location_key some functional identity
-    declares: anything else could never be read."""
-    if node is None:
-        return MappingProxyType({})
-    if not isinstance(node, list):
-        c.add(p, "bad-type", f"expected a list, found {_typename(node)}")
-        return MappingProxyType({})
-    out: Dict[str, Mapping[str, str]] = {}
-    for i, item in enumerate(node):
-        ip = f"{p}[{i}]"
-        if not c.keys(ip, item, allowed=("cell", "location"),
-                      required=("cell", "location")):
-            continue
-        cell = item.get("cell")
-        if not isinstance(cell, str) or not (mcinfo.ECGI.fullmatch(cell)
-                                              or mcinfo.NCGI.fullmatch(cell)):
-            c.add(f"{ip}.cell", "bad-value",
-                  "expected an ECGI (6 digits + 28 binary digits) or an NCGI "
-                  "(6 digits + 36 binary digits), as TS 24.379 annex F.3 writes them")
-            continue
-        if cell in out:
-            c.add(f"{ip}.cell", "duplicate", f"{cell!r} already mapped")
-            continue
-        loc = item.get("location")
-        if not isinstance(loc, dict) or not loc:
-            c.add(f"{ip}.location", "bad-value",
-                  "expected a non-empty mapping of location attributes")
-            continue
-        attrs: Dict[str, str] = {}
-        for k, v in loc.items():
-            if k not in location_keys:
-                c.add(f"{ip}.location.{k}", "unknown-key",
-                      f"not a location_key of any functional identity "
-                      f"(known: {', '.join(sorted(location_keys)) or 'none'})")
-                continue
-            if not isinstance(v, str) or not v:
-                c.add(f"{ip}.location.{k}", "bad-value", "expected a non-empty string")
-                continue
-            attrs[k] = v
-        out[cell] = MappingProxyType(attrs)
-    return MappingProxyType(out)
 
 
 def _identity_consistency(c: _Checker, identity: model.Identity) -> None:

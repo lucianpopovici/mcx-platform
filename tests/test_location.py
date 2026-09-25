@@ -3,7 +3,6 @@ map (PLT-ICD-001 2.8; PLT-VP-R1 ADHOC-OP-03)."""
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import sys
 from pathlib import Path
@@ -14,12 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core import mcinfo  # noqa: E402
-from core.validation import build  # noqa: E402
 from tests import mcpttinfo_fixture as mcf  # noqa: E402
 from tests.test_adhoc import (  # noqa: E402,F401  (fixtures)
     F, LOCAL, SDP, Flow, adhoc_invite, clock, core, list_max, msg, pki, refusal, rt,
     world)
-from tests.test_loader import expect_defects, mutate, mcx_raw  # noqa: E402,F401
 from core.hooks import LocationContext  # noqa: E402
 
 lxml = pytest.importorskip("lxml.etree")
@@ -101,66 +98,134 @@ def test_the_fixture_reports_are_schema_valid(spec, report):
     assert schema.validate(doc), schema.error_log
 
 
-# ============================================================ the profile's cell map
+# ============================================================ the deployment's cell map
 
 
-@pytest.fixture
-def frmcs_raw():
+from core.errors import StartupRefused  # noqa: E402
+from service.cells import load_cells  # noqa: E402
+
+KEYS = {"track_section", "yard_id"}
+
+
+def cells_yaml(tmp_path, entries, name="cells.yaml"):
     import yaml
-    return yaml.safe_load((ROOT / "profiles" / "frmcs" / "profile.yaml").read_text())
+    p = tmp_path / name
+    p.write_text(yaml.safe_dump({"cells": entries}))
+    return p
 
 
-def test_a_cell_map_is_read_into_the_model(frmcs_raw):
-    raw = copy.deepcopy(frmcs_raw)
-    raw["identity"]["cells"] = [
+def test_a_cell_map_is_read(tmp_path):
+    got = load_cells(cells_yaml(tmp_path, [
         {"cell": mcf.ECGI, "location": {"track_section": "S1"}},
-        {"cell": mcf.NCGI, "location": {"track_section": "S2", "yard_id": "Y1"}}]
-    prof = build(raw, "h")
-    assert dict(prof.identity.cells[mcf.ECGI]) == {"track_section": "S1"}
-    assert dict(prof.identity.cells[mcf.NCGI]) == {"track_section": "S2", "yard_id": "Y1"}
+        {"cell": mcf.NCGI, "location": {"track_section": "S2", "yard_id": "Y1"}}]), KEYS)
+    assert dict(got[mcf.ECGI]) == {"track_section": "S1"}
+    assert dict(got[mcf.NCGI]) == {"track_section": "S2", "yard_id": "Y1"}
 
 
-@pytest.mark.parametrize("cells, code", [
-    ("not-a-list", "bad-type"),
-    ([{"cell": "123", "location": {"track_section": "S1"}}], "bad-value"),
-    ([{"cell": mcf.ECGI, "location": {"platform": "P1"}}], "unknown-key"),
-    ([{"cell": mcf.ECGI, "location": {}}], "bad-value"),
-    ([{"cell": mcf.ECGI, "location": {"track_section": 7}}], "bad-value"),
+@pytest.mark.parametrize("entries, says", [
+    ([{"cell": "123", "location": {"track_section": "S1"}}], "ECGI"),
+    ([{"cell": "００１０１０" + "0" * 28, "location": {"track_section": "S1"}}], "ECGI"),
+    ([{"cell": mcf.ECGI, "location": {"platform": "P1"}}], "not a location_key"),
+    ([{"cell": mcf.ECGI, "location": {}}], "non-empty mapping"),
+    ([{"cell": mcf.ECGI, "location": {"track_section": 7}}], "non-empty string"),
     ([{"cell": mcf.ECGI, "location": {"track_section": "S1"}},
-      {"cell": mcf.ECGI, "location": {"track_section": "S2"}}], "duplicate"),
-    ([{"cell": mcf.ECGI}], "missing-key"),
-    ([{"cell": mcf.ECGI, "location": {"track_section": "S1"}, "name": "x"}], "unknown-key"),
+      {"cell": mcf.ECGI, "location": {"track_section": "S2"}}], "already mapped"),
+    ([{"cell": mcf.ECGI}], "exactly 'cell' and 'location'"),
+    ([{"cell": mcf.ECGI, "location": {"track_section": "S1"}, "name": "x"}],
+     "exactly 'cell' and 'location'"),
 ])
-def test_a_bad_cell_map_is_refused(frmcs_raw, cells, code):
-    raw = copy.deepcopy(frmcs_raw)
-    raw["identity"]["cells"] = cells
-    expect_defects(raw, codes=[code], path_contains="identity.cells")
+def test_a_bad_cell_map_refuses_startup(tmp_path, entries, says):
+    with pytest.raises(StartupRefused) as exc:
+        load_cells(cells_yaml(tmp_path, entries), KEYS)
+    assert says in str(exc.value)
 
 
-def test_a_profile_without_location_keys_accepts_no_cells(mutate):
-    raw = mutate()                                    # mcx: no functional identities
-    raw["identity"]["cells"] = [{"cell": mcf.ECGI, "location": {"track_section": "S1"}}]
-    expect_defects(raw, codes=["unknown-key"], path_contains="identity.cells")
+@pytest.mark.parametrize("text", ["cells: not-a-list\n", "other: []\n", "[]\n", "{{bad yaml"])
+def test_a_malformed_cell_file_refuses_startup(tmp_path, text):
+    p = tmp_path / "c.yaml"
+    p.write_text(text)
+    with pytest.raises(StartupRefused):
+        load_cells(p, KEYS)
+
+
+def test_every_defect_is_reported_at_once(tmp_path):
+    with pytest.raises(StartupRefused) as exc:
+        load_cells(cells_yaml(tmp_path, [{"cell": "1", "location": {"x": "y"}},
+                                         {"cell": mcf.ECGI, "location": {"q": "z"}}]), KEYS)
+    assert "2 defect(s)" in str(exc.value)
+
+
+# -- the startup rule (PRF-OP-03) --------------------------------------------------------
+
+
+def _env(tmp_path, pki, profile, cells):
+    from tests.test_sip_transport import sip_env
+    env = sip_env(tmp_path, pki, MCX_PROFILE=profile, MCX_RELEASE="19")
+    env.pop("MCX_CELLS_FILE")
+    if profile != "mcx":
+        env.pop("MCX_GROUPS_FILE")       # the test groups are mcx users
+    if cells is not None:
+        env["MCX_CELLS_FILE"] = cells
+    return env
+
+
+def test_a_profile_with_location_keys_requires_the_setting(tmp_path, pki, clock):
+    from service.runtime import build_runtime
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(_env(tmp_path, pki, "frmcs", None), clock)
+    text = str(exc.value)
+    assert "MCX_CELLS_FILE" in text and "track_section" in text and "'none'" in text
+
+
+@pytest.mark.parametrize("value", ["none", "NONE"])
+def test_none_states_there_is_no_map(tmp_path, pki, clock, value):
+    from service.runtime import build_runtime
+    r = build_runtime(_env(tmp_path, pki, "frmcs", value), clock)
+    assert r.manager._cells == {}
+    r.close()
+
+
+def test_a_profile_without_location_keys_needs_no_setting(tmp_path, pki, clock):
+    from service.runtime import build_runtime
+    r = build_runtime(_env(tmp_path, pki, "mcx", None), clock)
+    assert r.manager._cells == {}
+    r.close()
+
+
+def test_a_named_file_is_checked_against_the_profiles_keys(tmp_path, pki, clock):
+    """mcx has no location keys, so any key in the file is unknown."""
+    from service.runtime import build_runtime
+    f = cells_yaml(tmp_path, [{"cell": mcf.ECGI, "location": {"track_section": "S1"}}])
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(_env(tmp_path, pki, "mcx", str(f)), clock)
+    assert "not a location_key" in str(exc.value)
+
+
+def test_a_missing_file_refuses_startup(tmp_path, pki, clock):
+    from service.runtime import build_runtime
+    with pytest.raises(StartupRefused):
+        build_runtime(_env(tmp_path, pki, "frmcs", str(tmp_path / "absent.yaml")), clock)
 
 
 # ============================================================ end to end: REC by area
 
 
-def _with_cells(rt, cells):
-    prof = rt.manager._profile
-    rt.manager._profile = dataclasses.replace(
-        prof, identity=dataclasses.replace(prof.identity, cells=cells))
+@pytest.fixture
+def cells_file(tmp_path):
+    """Overrides test_adhoc's: the frmcs runtime starts with a real cell map,
+    ECGI -> track section S1 and NCGI -> S2, through MCX_CELLS_FILE."""
+    return str(cells_yaml(tmp_path, [
+        {"cell": mcf.ECGI, "location": {"track_section": "S1"}},
+        {"cell": mcf.NCGI, "location": {"track_section": "S2"}}], name="deploy-cells.yaml"))
 
 
 @pytest.fixture
 def area(rt):
-    """rec-area holders F1, F2 at track section S1 and F5 at S2; the
-    profile maps ECGI to S1 and NCGI to S2."""
+    """rec-area holders F1, F2 at track section S1 and F5 at S2."""
     resolver = rt.loaded.hooks.identity_resolver
     for u in (F[1], F[2]):
         resolver.bind("rec-area", u, LocationContext(attributes={"track_section": "S1"}))
     resolver.bind("rec-area", F[5], LocationContext(attributes={"track_section": "S2"}))
-    _with_cells(rt, {mcf.ECGI: {"track_section": "S1"}, mcf.NCGI: {"track_section": "S2"}})
     return rt
 
 
@@ -197,12 +262,15 @@ def test_no_usable_location_still_matches_nobody(core, area, world, report):
 
 def test_the_map_fills_in_but_does_not_overrule(rt):
     """Attributes a request already carries are kept (section 2.8)."""
-    _with_cells(rt, {mcf.ECGI: {"track_section": "S1", "yard_id": "Y1"}})
     from core.hooks import MediaKind, SessionRequest
     request = SessionRequest(request_id="r", initiator=F[0], target="", call_type="x",
                              media=(MediaKind.VOICE,),
                              location=LocationContext(cell_id=mcf.ECGI,
-                                                      attributes={"track_section": "S9"}))
+                                                      attributes={"yard_id": "Y9"}))
     located = rt.manager._located(request)
-    assert dict(located.location.attributes) == {"track_section": "S9", "yard_id": "Y1"}
+    assert dict(located.location.attributes) == {"track_section": "S1", "yard_id": "Y9"}
+    kept = rt.manager._located(dataclasses.replace(
+        request, location=LocationContext(cell_id=mcf.ECGI,
+                                          attributes={"track_section": "S9"})))
+    assert dict(kept.location.attributes) == {"track_section": "S9"}
     assert rt.manager._located(dataclasses.replace(request, location=None)).location is None
