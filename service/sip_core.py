@@ -336,9 +336,12 @@ class SipCore:
 
     _final = _provisional      # same path; `respond` arms timers for >= 200
 
-    def _reject(self, txn: ServerTxn, reason_code: str) -> None:
+    def _reject(self, txn: ServerTxn, reason_code: str,
+                invite: Optional[Request] = None,
+                authorisation: bool = False) -> None:
         ctx = DialogContext(call_id=txn.call_id, local_uri=self.local_uri)
-        self._final(txn, self.adapter.reject(reason_code, ctx))
+        self._final(txn, self.adapter.reject(reason_code, ctx, invite,
+                                             authorisation=authorisation))
 
     # -- REGISTER / OPTIONS ----------------------------------------------------
 
@@ -404,6 +407,12 @@ class SipCore:
             # ICD-OP-08). Re-INVITE is not supported, so this is refused.
             return self._final(txn, Response(Status.BAD_REQUEST, Headers(
                 [("Warning", '399 mcx "Call-ID of a call in progress"')])))
+        if self.adapter.invalid_adhoc_indications(req):
+            # TS 24.379 17.4.2.2 step 3A (6.3.3.1.25): an ad hoc call is an
+            # emergency or an imminent peril one, never both. Checked on the
+            # request alone, before authorisation, as the step order says.
+            ctx = DialogContext(call_id=txn.call_id, local_uri=self.local_uri)
+            return self._final(txn, self.adapter.reject_invalid_combination(ctx))
         call = Call(cid=sr.request_id, invite=req, sr=sr, txn=txn, flow=flow,
                     initiator=sr.initiator,
                     remote_target=_addr_uri(req.headers.get("Contact") or "") or sr.initiator,
@@ -422,7 +431,8 @@ class SipCore:
             self._pending.pop(call.cid, None)
         if refusal is not None:
             # Nothing was established: no session, no persisted record, no legs.
-            return self._reject(txn, refusal.reason_code)
+            return self._reject(txn, refusal.reason_code, invite=req,
+                                authorisation=refusal.step == "authorise")
         # `_consume` (called from establish) has created the legs.
         if call.media_error:
             return self._fail_call(call, Status.NOT_ACCEPTABLE_HERE,

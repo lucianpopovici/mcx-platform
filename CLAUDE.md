@@ -11,7 +11,7 @@ public-safety deployment or a railway FRMCS deployment, from one codebase and on
 image, with the profile chosen at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 924 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 966 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped

@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.13 (draft)
+**Version:** 0.14 (draft)
 **Date:** 2026-09-25
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -308,6 +308,8 @@ profile knowledge, so it is a hook. `SessionRequest` gains
 | ICD-ADH-003 | Each listed entry is resolved with `resolve`. Entries that yield no user are left out: unknown, outside the domains, a group, or an unheld or location-less functional identity. `resolver-unavailable` still fails the call. If nobody is left, the refusal is 187. The caller is never a member. |
 | ICD-ADH-004 | The core generates the ad hoc group identity (`sip:adhoc-<hash>@<first profile domain>`). It travels as `<mcptt-calling-group-id>` in each member's INVITE (17.4.2.1.1 item 4b) and in the 200 OK to the caller (17.4.2.2). Criteria, when used, travel in both as well (item 4c). |
 | ICD-ADH-005 | Ad hoc handling exists only where the configured release has the `adhoc` session type (Rel-18). Before that, the request takes the ordinary path. |
+| ICD-ADH-006 | Before step 0, an ad hoc INVITE carrying `<imminentperil-ind>` (in the clear or encrypted) together with `<adhoc-emergency-ind>` (whatever its value) is refused 403 "150 invalid combinations of data received in MIME body" (17.4.2.2 step 3A, 6.3.3.1.25). This is checked on the request alone, and nothing is looked up or audited. From v0.14. |
+| ICD-ADH-007 | When step 0 (`authorise`, §5.0) refuses an ad hoc call, the refusal follows the order of 17.4.2.2. (a) If the INVITE asked for emergency or imminent peril and the reason is `not-authorised` or `call-type-not-permitted`, the 403 carries an MCPTT info body setting that indication to false (steps 3B and 3C), and a plain warn-text with no MC code, since 3B and 3C skip step 4. (b) Otherwise `not-authorised` is 185 (step 4). (c) `call-type-not-permitted` is 186 (step 5) only when the profile declares no ad hoc call type at all; a profile that has some, asked for a kind it lacks, answers 100 "local policy". Refusals from later steps keep their ordinary codes. From v0.14 (PLT-VP-R1 ADHOC-OP-05). |
 
 ---
 
@@ -682,6 +684,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.14 | 2026-09-25 | ICD-ADH-006 (step 3A, warning 150) and ICD-ADH-007 (how a step-0 refusal of an ad hoc call is rendered: 3B/3C body, 185, 186). A minor change: no hook or parameter object changes. |
 | 0.13 | 2026-09-25 | Major change (ICD-VER-003): IF-SES gains `authorise(request)` (§5.0), called at §8.1 step 0 with the called party removed from the request. The roles lookup moves from step 4a to step 0. `admit`'s PRE now includes a successful `authorise`. The core checks POST-2 and POST-3 of both methods. All in-tree profiles implement it in the same change set: the call-type and role checks move from `admit` to `authorise`. §8.2 step 1 now reads steps 0–4. ICD-OP-09 closed; ICD-OP-13 opened. |
 | 0.12 | 2026-09-25 | §2.8 becomes the network profile (`MCX_NETWORK_FILE`, NET-OP-01): PLMNs, the cell map, and the trusted SIP cores with a CA of their own (ICD-NET-001 to 004; ICD-LOC-001 gains the PLMN check; ICD-LOC-005 superseded). The network identifier joins the audit identity. ICD-OP-10 closed; ICD-OP-12 opened. `MCX_CELLS_FILE` and `MCX_SIP_TRUSTED_PEERS` are withdrawn and refused. A minor change: no hook or parameter object changes. |
 | 0.11 | 2026-09-25 | §2.8: the cell map is deployment data (`MCX_CELLS_FILE`), not a profile section (PRF-OP-03). It is required when the profile has location-dependent identities (ICD-LOC-005). The profile schema is back to what it was before 0.10. |
