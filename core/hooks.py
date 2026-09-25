@@ -256,6 +256,14 @@ class PriorityPolicy(Protocol):
 class SessionPolicy(Protocol):
     """Hook 3. Whether the session happens, and in what shape."""
 
+    def authorise(self, request: SessionRequest) -> Admission:
+        """Whether this initiator may start this call type at all, decided
+        before anything about the target is looked up (TS 24.379 17.4.2.2
+        steps 4 and 5; PLT-ICD-001 section 5.0). The request carries the
+        initiator's roles in `initiator.roles`. What depends on the target --
+        participant limits, capacity -- is `admit`'s."""
+        ...
+
     def admit(
         self,
         request: SessionRequest,

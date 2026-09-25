@@ -458,11 +458,12 @@ def test_ad_hoc_is_not_understood_before_rel_18(tmp_path, pki, clock):
         c.on_bytes(adhoc_invite("rv7", mcf.adhoc_xml(criteria="train-driver")),
                    flows[F[0]])
         code, warning = refusal(flows[F[0]])
-        # The ordinary path: resolution of the request's target fails first
-        # (404, 145), as for any session type the release lacks. (An ad hoc
-        # refusal would be 403 -- its 187 text is suppressed before Rel-18,
-        # so the status is what tells the paths apart.)
-        assert code == 404 and "145 " in warning
+        # The ordinary path: no call type of the profile is this one, so
+        # authorisation refuses it (403, 100) before anything is looked up
+        # (ICD-OP-09), as for any session type the release lacks. Not an ad
+        # hoc refusal: no 187, and no participant was resolved.
+        assert code == 403 and "100 function not allowed" in warning
+        assert "187" not in warning
     finally:
         c.close()
         r.close()
@@ -546,3 +547,76 @@ def test_the_cap_does_not_limit_criteria(core, rt, world):
     core.on_bytes(adhoc_invite("cap4", mcf.adhoc_xml(criteria="train-driver")),
                   world[F[0]])
     assert all(world[u].requests("INVITE") for u in many)
+
+
+# ============================================================ ICD-OP-09: authorise first
+
+
+def _unauthorised_adhoc(core, world, cid, xml, rl=None):
+    """F1 holds no role; the shunting call type needs shunting-team-leader."""
+    core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[1], LOCAL,
+                      body=mcf.adhoc_body(SDP, xml, rl), ctype=mcf.CONTENT_TYPE),
+                  world[F[1]])
+    return refusal(world[F[1]])
+
+
+def _refusal_and_lookups(rt, flow, cid):
+    looked_up = [r["detail"]["method"] for r in rt.store.audit_records(cid)
+                 if r["type"] == "hook-invocation"]
+    refused = [r["detail"]["reason_code"] for r in rt.store.audit_records(cid)
+               if r["type"] == "session-refused"]
+    return refusal(flow), looked_up, refused
+
+
+def test_an_unauthorised_ad_hoc_caller_learns_nothing_about_the_target(core, rt, world):
+    """TS 24.379 17.4.2.2 authorises (steps 4, 5) before it checks the list
+    length (step 6) or determines who to call (step 12). One answer, however
+    the target is given, and nobody is looked up, let alone invited."""
+    cases = [
+        (mcf.adhoc_xml(criteria="train-driver"), None),         # matches F3
+        (mcf.adhoc_xml(criteria="no-such-role"), None),         # matches nobody
+        (mcf.adhoc_xml(), mcf.resource_list([F[2], F[3]])),     # real users
+        (mcf.adhoc_xml(), mcf.resource_list(["sip:ghost@frmcs.example"])),
+        # over the call type's limit (30) and the deployment cap (100):
+        # would be 189 for an authorised caller
+        (mcf.adhoc_xml(), mcf.resource_list(
+            [f"sip:x{i}@frmcs.example" for i in range(101)])),
+        (mcf.adhoc_xml(criteria="train-driver"), mcf.resource_list([F[2]])),
+    ]
+    seen = set()
+    for n, (xml, rl) in enumerate(cases):
+        world[F[1]].sent.clear()
+        cid = f"ua{n}"
+        core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[1], LOCAL,
+                          body=mcf.adhoc_body(SDP, xml, rl), ctype=mcf.CONTENT_TYPE),
+                      world[F[1]])
+        (code, warning), looked_up, refused = _refusal_and_lookups(rt, world[F[1]], cid)
+        assert code == 403 and looked_up == ["identities_of", "authorise"], n
+        assert refused == ["not-authorised"], n
+        seen.add(warning)
+    assert len(seen) == 1                    # the same words every time
+    assert all(not world[u].requests("INVITE") for u in F if u != F[1])
+
+
+def test_an_unauthorised_private_caller_learns_nothing_about_the_target(core, rt, world):
+    """The same for a restricted call type that is not ad hoc (frmcs
+    driver-controller, for train drivers and controllers). F1 holds neither."""
+    targets = [F[2], "sip:ghost@frmcs.example", "sip:x@other.example"]
+    seen = set()
+    for n, target in enumerate(targets):
+        world[F[1]].sent.clear()
+        cid = f"up{n}"
+        core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[1], LOCAL,
+                          body=mcf.body_for("private", target, SDP),
+                          ctype=mcf.CONTENT_TYPE), world[F[1]])
+        (code, warning), looked_up, refused = _refusal_and_lookups(rt, world[F[1]], cid)
+        assert code == 403 and looked_up == ["identities_of", "authorise"], target
+        assert refused == ["not-authorised"], target
+        seen.add(warning)
+    assert len(seen) == 1
+    # For contrast: the train driver, authorised, is told the target is unknown.
+    core.on_bytes(msg("INVITE", LOCAL, "up-ok", 1, F[3], LOCAL,
+                      body=mcf.body_for("private", "sip:ghost@frmcs.example", SDP),
+                      ctype=mcf.CONTENT_TYPE), world[F[3]])
+    (code, _), looked_up, _ = _refusal_and_lookups(rt, world[F[3]], "up-ok")
+    assert code == 404 and "resolve" in looked_up

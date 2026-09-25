@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.4
+**Version:** 2.5
 **Date:** 2026-09-25
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1609,6 +1609,7 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-25 | The order of authorisation and target determination in §8.1 | TS 24.379 17.4.2.2 steps 1–12 (V20.0.0) for ad hoc calls; 10.1.1.4.2 for prearranged groups | **Closed, with one deliberate deviation and one gap.** For ad hoc calls the order is now the specification's: the caller is authorised (steps 4 and 5), then the list is checked (step 6), then the participants are determined (step 12). Deviation: for prearranged groups the specification looks the group up first (404, warning 163) and authorises after it (403, warning 119). The platform authorises first for every call type (PLT-ICD-001 §5.0). Gap: an ad hoc refusal carries warning 100 where 185, 186 or the step 3B body are specified (PLT-VP-R1 ADHOC-OP-05). The specification also puts steps 1–2 (500 for lack of resources, 488 for media) before authorisation. The platform checks both after authorisation, and only an authorised caller reaches them. |
 | CA-24 | The PLMN identity in the network profile's `plmns`, and the check that a cell belongs to one | TS 24.379 annex F.3, `tPlmnIdentityFormat` (the same in V17.15.0, V18.13.0 and V20.0.0) | **Closed, with one question left to the specification.** `tPlmnIdentityFormat` is `\d{3}\d{3}`: MCC then MNC, six digits. tEcgi and tNcgi begin with the same six, so a cell's PLMN is its first six digits. They are read as ASCII digits, `[0-9]`, as for CA-23. Annex F.3 does not say how a two-digit MNC fills three digits. The platform does not guess: it compares the six digits as written, and PLT-ICD-001 ICD-OP-12 records the question. |
 | CA-23 | Location report constants: the MIME type, the namespace `urn:3gpp:ns:mcpttLocationInfo:1.0`, the ECGI and NCGI formats, and where the NCGI sits | TS 24.379 annex F.3 (schema extracted verbatim for V17.15.0, V18.13.0, V20.0.0 into `docs/3GPP/schemas/mcpttlocation-24379-*.xsd`), F.3.3 semantics | **Closed.** tEcgi `\d{3}\d{3}[0-1]{28}` and tNcgi `\d{3}\d{3}[0-1]{36}` are read as ASCII digits only. `CurrentServingNcgi` sits in `CurrentLocation/anyExt`, with its `Ncgi` in the `anyExt` of tLocationType, from Rel-18; Rel-17's schema has no NCGI. The test reports validate against the Rel-18 and Rel-20 schemas. |
 | CA-22 | Ad hoc group call constants: warnings 187 and 189, the Rel-18 `<anyExt>` elements, the RFC 5366 list | TS 24.379 clause 17, table 4.4.2-2, annex F.1 (V18.13.0, V20.0.0) | **Closed.** See 4.38. Two wording inconsistencies in the specification recorded. |
@@ -1744,6 +1745,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.5 | 2026-09-25 | CA-25: authorisation before target determination, read from 17.4.2.2 and 10.1.1.4.2. One deliberate deviation (prearranged groups are authorised first too) and one gap (warnings 185/186, ADHOC-OP-05). |
 | 2.4 | 2026-09-25 | CA-24: the PLMN identity format for the network profile (NET-OP-01), read from `tPlmnIdentityFormat` in three versions. How a two-digit MNC is written is not specified (PLT-ICD-001 ICD-OP-12). |
 | 2.3 | 2026-09-25 | CA-23: the location report constants, read from annex F.3 of three versions, and its schema extracted verbatim. |
 | 2.2 | 2026-09-25 | CA-22 (4.38): the ad hoc group call constants, read from V18.13.0 and V20.0.0 before use. Two specification inconsistencies recorded, along with one platform defect found on the way (initiator roles never reached admission). |
