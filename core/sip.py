@@ -47,7 +47,7 @@ from .errors import (
     RESOLVER_UNAVAILABLE,
     UNKNOWN_TARGET,
 )
-from .hooks import MediaKind, SessionRequest
+from .hooks import LocationContext, MediaKind, SessionRequest
 from . import mcinfo
 from .release import Release, supports_session_type, supports_sip_warning
 from .session import Signal, SignalType
@@ -854,7 +854,11 @@ class Adapter:
             # of the call type supplies both (profiles/common/tables.py).
             application=None,
             urgency=None,
-            location=None,
+            # 17.2.2.1.1 item 14a (and 10.1.1.2.1.1 for other group calls):
+            # the client's location report, when it sent one. The serving
+            # cell only; what the cell means is the profile's (section 2.8),
+            # applied by the session layer.
+            location=_location(content_type, message.body),
             attributes=attributes,
             # Clause 17: an ad hoc call's members are listed or described,
             # never a group the core already knows (PLT-ICD-001 section 3.5).
@@ -1017,6 +1021,13 @@ def canonical_uri(uri: str) -> str:
         return uri
     user, at, host = rest.rpartition("@")
     return f"{scheme.lower()}:{user}{at}{host.lower()}"
+
+
+def _location(content_type: str, body: str) -> Optional["LocationContext"]:
+    report = mcinfo.location_of(content_type, body)
+    if report is None or report.cell is None:
+        return None
+    return LocationContext(cell_id=report.cell)
 
 
 def _uri(value: str) -> str:

@@ -1,7 +1,7 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.2
+**Version:** 2.3
 **Date:** 2026-09-24
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
@@ -1609,6 +1609,7 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-23 | Location report constants: the MIME type, the namespace `urn:3gpp:ns:mcpttLocationInfo:1.0`, the ECGI and NCGI formats, and where the NCGI sits | TS 24.379 annex F.3 (schema extracted verbatim for V17.15.0, V18.13.0, V20.0.0 into `docs/3GPP/schemas/mcpttlocation-24379-*.xsd`), F.3.3 semantics | **Closed.** tEcgi `\d{3}\d{3}[0-1]{28}` and tNcgi `\d{3}\d{3}[0-1]{36}` are read as ASCII digits only. `CurrentServingNcgi` sits in `CurrentLocation/anyExt`, with its `Ncgi` in the `anyExt` of tLocationType, from Rel-18; Rel-17's schema has no NCGI. The test reports validate against the Rel-18 and Rel-20 schemas. |
 | CA-22 | Ad hoc group call constants: warnings 187 and 189, the Rel-18 `<anyExt>` elements, the RFC 5366 list | TS 24.379 clause 17, table 4.4.2-2, annex F.1 (V18.13.0, V20.0.0) | **Closed.** See 4.38. Two wording inconsistencies in the specification recorded. |
 | CA-21 | Timer *behaviour* in `core/floor.py` and the media plane | TS 24.380 6.3.4.3-6.3.4.5, 6.3.5.6 | **Closed.** See 4.37. Eleven deviations fixed, one deliberate deviation recorded (FC-OP-07). |
 | CA-07 | MCData and MCVideo feature tags | TS 24.281, TS 24.282 | **Closed.** See 4.25. Both confirmed; DATA-OP-01 opened for the MCData service-specific ICSIs. |
@@ -1742,6 +1743,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.3 | 2026-09-25 | CA-23: the location report constants, read from annex F.3 of three versions, and its schema extracted verbatim. |
 | 2.2 | 2026-09-25 | CA-22 (4.38): the ad hoc group call constants, read from V18.13.0 and V20.0.0 before use. Two specification inconsistencies recorded, along with one platform defect found on the way (initiator roles never reached admission). |
 | 2.1 | 2026-09-24 | CA-20a closed. The platform read and wrote an MCPTT info body of its own invention (`<mcptt-call_type>` and three other elements that exist in no release of TS 24.379), so no conformant client could place a call. The interop user agent had copied the format from the platform's tests. Replaced by `core/mcinfo.py`, validated against the annex F.1 schema extracted verbatim for Rel-17, 18 and 20; call types declared per profile by signature (PLT-ICD-001 §2.6); `P-Asserted-Identity` and the floor-control m-line corrected. Found on the way: FRMCS group calls need Rel-18 and ad hoc participant resolution; two pairs of call types cannot be told apart; the specification's own example is malformed. v1.9's CA-20 section cited the wrong clause and a header that clause does not require; both corrected. The coverage claim in §5 and §7 is corrected a second time. CA-21 (2.0) landed ahead of this fix on `main`; the two are unrelated and this entry does not revisit it. |
 | 2.0 | 2026-09-24 | CA-21 opened and closed (4.37): the floor timers had the right defaults and the wrong behaviour. T2 started at the grant instead of the first media packet, T20 ran on every grant without limit, T8 did T3's job, T1 was never driven, the revoke causes were always #255, a queued hand-over sent a Floor Idle first, a pre-emptor was not put in front of the queue, and a holder asking again was denied. All fixed against the clause and mutation-tested. Two inconsistencies in TS 24.380 itself recorded. CA-20 (4.36) remains open and unrelated to this change. |

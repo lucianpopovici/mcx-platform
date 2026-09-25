@@ -138,3 +138,39 @@ def adhoc_body(sdp: str, xml: str, rl: Optional[str] = None) -> str:
     if rl is not None:
         out += f"--{BOUNDARY}\r\nContent-Type: {CT_RESOURCE_LISTS}\r\n\r\n{rl}\r\n"
     return out + f"--{BOUNDARY}--\r\n"
+
+
+# -- location reports (TS 24.379 annex F.3), written by hand ---------------------------
+
+CT_LOCATION = "application/vnd.3gpp.mcptt-location-info+xml"
+NS_LOC = "urn:3gpp:ns:mcpttLocationInfo:1.0"
+ECGI = "001010" + "0000000000000000000100100011"               # MCC 001 MNC 010, 28 bits
+NCGI = "001010" + "000000000000000000000000000100100011"       # 36 bits
+
+
+def location_report(ecgi: Optional[str] = None, ncgi: Optional[str] = None,
+                    encrypted: bool = False) -> str:
+    """<location-info><Report ReportType="NonEmergency"><CurrentLocation>...
+    The NCGI goes where Rel-18 puts it: CurrentLocation/anyExt/
+    CurrentServingNcgi/anyExt/Ncgi."""
+    kind = "Encrypted" if encrypted else "Normal"
+    inner = ""
+    if ecgi is not None:
+        inner += (f'<CurrentServingEcgi type="{kind}"><Ecgi>{ecgi}</Ecgi>'
+                  "</CurrentServingEcgi>")
+    if ncgi is not None:
+        inner += (f'<anyExt><CurrentServingNcgi type="{kind}"><anyExt><Ncgi>{ncgi}</Ncgi>'
+                  "</anyExt></CurrentServingNcgi></anyExt>")
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\r\n<location-info xmlns="{NS_LOC}">'
+            f'<Report ReportType="NonEmergency"><CurrentLocation>{inner}'
+            "</CurrentLocation></Report></location-info>")
+
+
+def with_parts(sdp: str, xml: str, *extra) -> str:
+    """SDP, MCPTT info, then (content_type, body) pairs."""
+    sdp = sdp.replace("\r\n", "\n").rstrip("\n").replace("\n", "\r\n")
+    out = (f"--{BOUNDARY}\r\nContent-Type: application/sdp\r\n\r\n{sdp}\r\n"
+           f"--{BOUNDARY}\r\nContent-Type: {CT_MCINFO}\r\n\r\n{xml}\r\n")
+    for ctype, body in extra:
+        out += f"--{BOUNDARY}\r\nContent-Type: {ctype}\r\n\r\n{body}\r\n"
+    return out + f"--{BOUNDARY}--\r\n"

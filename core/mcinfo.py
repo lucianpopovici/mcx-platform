@@ -423,3 +423,75 @@ def participants_of(content_type: str, body: str) -> Optional[Tuple[str, ...]]:
             raise McInfoError("<entry> without a uri attribute")
         uris[uri] = None
     return tuple(uris)
+
+
+# -- the location report (TS 24.379 annex F.3) -----------------------------------------
+
+CT_LOCATION = "application/vnd.3gpp.mcptt-location-info+xml"
+_LOC = "{urn:3gpp:ns:mcpttLocationInfo:1.0}"
+ECGI = re.compile(r"[0-9]{6}[01]{28}")        # tEcgi; [0-9], not \d: ASCII only
+NCGI = re.compile(r"[0-9]{6}[01]{36}")        # tNcgi
+
+
+@dataclass(frozen=True)
+class LocationReport:
+    """What the platform can read of a client's <Report>: the serving cell.
+    Coordinates, neighbours and the rest are not used by anything yet."""
+
+    serving_ecgi: Optional[str] = None
+    serving_ncgi: Optional[str] = None
+
+    @property
+    def cell(self) -> Optional[str]:
+        # An NR cell when one is reported: a UE reporting both is served by
+        # NR, and the E-UTRA cell is the older fact.
+        return self.serving_ncgi or self.serving_ecgi
+
+
+def location_of(content_type: str, body: str) -> Optional[LocationReport]:
+    """The <Report> in an application/vnd.3gpp.mcptt-location-info+xml part
+    (TS 24.379 17.2.2.1.1 item 14a; annex F.3), or None.
+
+    Advisory, never a reason to refuse a call: a body that is missing,
+    malformed, not a report, or whose cells are encrypted (type="Encrypted",
+    F.3.3 -- the platform holds no key) yields None or an empty report, and
+    the call proceeds without a location. An emergency call must not fail
+    because its location could not be read.
+    """
+    raw = None
+    try:
+        for p in split_body(content_type, body):
+            if p.content_type == CT_LOCATION:
+                raw = p.body
+    except McInfoError:
+        return None
+    if raw is None or "<!DOCTYPE" in raw or "<!ENTITY" in raw:
+        return None
+    try:
+        root = ET.fromstring(raw.strip().encode("utf-8"))
+    except (ET.ParseError, ValueError, LookupError):
+        return None
+    if root.tag != _LOC + "location-info":
+        return None
+    report = root.find(_LOC + "Report")
+    current = report.find(_LOC + "CurrentLocation") if report is not None else None
+    if current is None:
+        return None
+
+    def readable(el: Optional[ET.Element]) -> bool:
+        return el is not None and (el.get("type") or "Normal") == "Normal"
+
+    ecgi = None
+    serving = current.find(_LOC + "CurrentServingEcgi")
+    if readable(serving):
+        value = (serving.findtext(_LOC + "Ecgi") or "").strip()
+        ecgi = value if ECGI.fullmatch(value) else None
+    ncgi = None
+    ext = current.find(_LOC + "anyExt")
+    serving_nr = ext.find(_LOC + "CurrentServingNcgi") if ext is not None else None
+    if readable(serving_nr):
+        # tLocationType carries Ncgi in its <anyExt> (F.3.2).
+        el = serving_nr.find(f"{_LOC}anyExt/{_LOC}Ncgi")
+        value = (el.text or "").strip() if el is not None else ""
+        ncgi = value if NCGI.fullmatch(value) else None
+    return LocationReport(serving_ecgi=ecgi, serving_ncgi=ncgi)

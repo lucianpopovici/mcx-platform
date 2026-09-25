@@ -175,6 +175,7 @@ class SessionManager:
         cid = request.request_id
         invoker = Invoker(self._auditor, cid)
         signals: List[Signal] = []
+        request = self._located(request)
 
         try:
             # 1 — IF-IDR. An ad hoc group call names no group; its members
@@ -526,6 +527,22 @@ class SessionManager:
                     "in resolved_from")
         if len(set(resolution.members)) != len(resolution.members):
             raise HookContractViolation("resolution contains duplicate members")
+
+    def _located(self, request: SessionRequest) -> SessionRequest:
+        """PLT-ICD-001 2.8: a reported serving cell the profile maps gains
+        the location attributes it stands for (e.g. track_section), which
+        is what functional identities are keyed on. Attributes the request
+        already carries are kept: the map fills in, it does not overrule.
+        An unmapped cell leaves the request as it is."""
+        loc = request.location
+        if loc is None or not loc.cell_id:
+            return request
+        mapped = self._profile.identity.cells.get(loc.cell_id)
+        if not mapped:
+            return request
+        attributes = {**mapped, **loc.attributes}
+        return dataclasses.replace(
+            request, location=dataclasses.replace(loc, attributes=attributes))
 
     # -- ad hoc group calls (TS 24.379 clause 17; PLT-ICD-001 §3.5) -------
 

@@ -95,6 +95,12 @@ identity:
       location_key: string?       # attribute name in LocationContext
       multiplicity: single|multi  # may several users hold it at once
       resolves_to: user|group
+  cells:                          # optional (PLT-ICD-001 2.8)
+    - cell: string                # a serving cell as TS 24.379 annex F.3 writes it:
+                                  # ECGI = 6 digits + 28 binary digits,
+                                  # NCGI = 6 digits + 36 binary digits
+      location: {string: string}  # location_key -> value, e.g. {track_section: S1};
+                                  # every key must be some identity's location_key
 
 # --------------------------------------------------------------------------
 # Priority. Declarative: (call_type, application, urgency) -> decision.

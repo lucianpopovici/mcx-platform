@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.9 (draft)
+**Version:** 0.10 (draft)
 **Date:** 2026-09-24
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -143,6 +143,31 @@ no_answer_s: 32        # seconds an invited member may ring
 
 All three in-tree profiles declare 32 for every call type, which keeps the
 previous behaviour. The value per call type is the profile owner's choice.
+
+
+### 2.8 Cell map (declared data, not a hook)
+
+A client may attach its location to an INVITE: an
+`application/vnd.3gpp.mcptt-location-info+xml` body with a `<Report>`
+(TS 24.379 17.2.2.1.1 item 14a for ad hoc calls, 10.1.1.2.1.1 for prearranged
+ones; schema in annex F.3). What it reports is the network's view: the serving
+cell, as an ECGI or NCGI. A functional identity is keyed on a location
+attribute the profile names (`location_key`, e.g. `track_section`). Turning one
+into the other is profile knowledge, so it is declared as data and checked at
+load time. Adopted 2026-09-25 (PLT-VP-R1 ADHOC-OP-03).
+
+```yaml
+identity:
+  cells:
+    - {cell: "0010100000000000000000000100100011", location: {track_section: S1}}
+```
+
+| ID | Rule |
+|---|---|
+| ICD-LOC-001 | `identity.cells` is optional. Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Each `location` key must be the `location_key` of some functional identity; a cell may appear once. Anything else is a load error. |
+| ICD-LOC-002 | The core reads the serving cell from the report. It prefers the NCGI, which Rel-18 carries in `<anyExt>`, to the ECGI. The cell becomes `LocationContext.cell_id`. Neighbour cells, coordinates and the rest are not read. |
+| ICD-LOC-003 | A location is advisory, never a reason to refuse. A missing, malformed or non-report body, a DOCTYPE, or a cell sent with `type="Encrypted"` (the platform holds no key, F.3.3) all leave the request without a location. |
+| ICD-LOC-004 | Before step 1 of §8.1, the core adds the mapped attributes of a reported cell to the request's location. Attributes the request already carries are kept, and an unmapped cell adds nothing. |
 
 ---
 
@@ -589,6 +614,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.10 | 2026-09-25 | §2.8 added: the cell map `identity.cells` (ICD-LOC-001 to 004). The core reads the client's location report (annex F.3) and applies the map, so location-dependent identities resolve from a native client's call. A minor change: an optional profile section, and no hook change. |
 | 0.9 | 2026-09-25 | ICD-OP-08 closed in its R1 form: certificate identity plus trusted cores (`MCX_SIP_TRUSTED_PEERS`), and each dialog bound to its connection. ICD-OP-10 (shared trust anchor) and ICD-OP-11 (guard order) opened. The ICD surface is unchanged; this is a host requirement. |
 | 0.8 | 2026-09-25 | ICD-ADH-001: the deployment-wide list cap `MCX_ADHOC_LIST_MAX` (PLT-VP-R1 ADHOC-OP-04). A minor change: no hook or parameter object changes. |
 | 0.7 | 2026-09-25 | Major change (ICD-VER-003): IF-IDR gains `determine_participants` (§3.5). `SessionRequest` gains the ad hoc fields. §8.1 gains the ad hoc variant of step 1 and step 4a (`identities_of`, whose result admission now reads, §3.4). §9 gains two reason codes. All in-tree profiles implement the method in the same change set: the directory resolver refuses criteria, and the functional resolver matches functional identities. ICD-OP-08 and ICD-OP-09 opened. |

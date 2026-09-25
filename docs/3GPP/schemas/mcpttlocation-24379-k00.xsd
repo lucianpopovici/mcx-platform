@@ -1,0 +1,616 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Extracted verbatim by tools/spec/extract_xsd.py from 24379-k00.docx
+     (sha256 e28936d66b365d72...), targetNamespace urn:3gpp:ns:mcpttLocationInfo:1.0. Do not edit:
+     re-extract. -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:mcpttloc="urn:3gpp:ns:mcpttLocationInfo:1.0" targetNamespace="urn:3gpp:ns:mcpttLocationInfo:1.0" elementFormDefault="qualified" attributeFormDefault="unqualified"
+xmlns:xenc="http://www.w3.org/2001/04/xmlenc#">
+
+<xs:import namespace="http://www.w3.org/2001/04/xmlenc#"/>
+
+<xs:element name="location-info" id="loc">
+<xs:annotation>
+<xs:documentation>Root element, contains all information related to location configuration, location request and location reporting for the MCPTT service</xs:documentation>
+</xs:annotation>
+
+<xs:complexType>
+<xs:choice minOccurs="0" maxOccurs="unbounded">
+<xs:element name="Configuration" type="mcpttloc:tConfigurationType"/>
+<xs:element name="Request" type="mcpttloc:tRequestType"/>
+<xs:element name="Report" type="mcpttloc:tReportType"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:choice>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+</xs:element>
+
+<xs:complexType name="tConfigurationType">
+<xs:sequence>
+<xs:element name="NonEmergencyLocationInformation" type="mcpttloc:tRequestedLocationType" minOccurs="0"/>
+<xs:element name="EmergencyLocationInformation" type="mcpttloc:tRequestedLocationType" minOccurs="0"/>
+<xs:element name="TriggeringCriteria" type="mcpttloc:TriggeringCriteriaType"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:attribute name="ConfigScope">
+<xs:simpleType>
+<xs:restriction base="xs:string">
+<xs:enumeration value="Full"/>
+<xs:enumeration value="Update"/>
+</xs:restriction>
+</xs:simpleType>
+</xs:attribute>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+    <xs:complexType name="tLocationFilterType">
+      <xs:sequence>
+        <xs:element name="AreaIdentifier" type="xs:string"/>
+        <xs:element name="AreaIn" type="xs:boolean"/>
+        <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+      </xs:sequence>
+      <xs:anyAttribute namespace="##any" processContents="lax"/>
+    </xs:complexType>
+
+<xs:complexType name="tRequestType">
+  <xs:sequence>
+        <xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+        <xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+      </xs:sequence>
+<xs:attribute name="RequestId" type="xs:string" use="required"/>
+<xs:attribute name="refresh" type="xs:boolean" use="optional"/>
+</xs:complexType>
+    <!-- Add a new element, conceptually to the "tRequestType" -->
+<xs:element name="LocationFilter" type="mcpttloc:tLocationFilterType"/>
+
+<xs:complexType name="tReportType">
+<xs:sequence>
+<xs:element name="TriggerId" type="xs:string" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="mcptt-reporting-uri" type="xs:anyURI" minOccurs="0"/>
+<xs:element name="CurrentLocation" type="mcpttloc:tCurrentLocationType"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:attribute name="ReportID" type="xs:string" use="optional"/>
+<xs:attribute name="ReportType" use="required">
+<xs:simpleType>
+<xs:restriction base="xs:string">
+<xs:enumeration value="Emergency"/>
+<xs:enumeration value="NonEmergency"/>
+</xs:restriction>
+</xs:simpleType>
+</xs:attribute>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- BearingAndSpeed includes current azimuth, horizontal and vertical velocities, with speed uncertainties, defined and encoded per TS 23.032 section 8.15 -->
+<xs:complexType name="tBearingAndSpeedType">
+<xs:sequence>
+<xs:element name="BearingAndSpeed" type="mcpttloc:BearingAndSpeedFormat"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/></xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+<xs:simpleType name="BearingAndSpeedFormat">
+<xs:restriction base="xs:string">
+<xs:pattern value="^[A-Fa-f0-9]{14}$"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="TriggeringCriteriaType">
+<xs:sequence>
+<xs:element name="CellChange" type="mcpttloc:tCellChange" minOccurs="0"/>
+<xs:element name="TrackingAreaChange" type="mcpttloc:tTrackingAreaChangeType" minOccurs="0"/>
+<xs:element name="PlmnChange" type="mcpttloc:tPlmnChangeType" minOccurs="0"/>
+<xs:element name="MbmsSaChange" type="mcpttloc:tMbmsSaChangeType" minOccurs="0"/>
+<xs:element name="MbsfnAreaChange" type="mcpttloc:tMbsfnAreaChangeType" minOccurs="0"/>
+<xs:element name="PeriodicReport" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name="TravelledDistance" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name="McpttSignallingEvent" type="mcpttloc:tSignallingEventType" minOccurs="0"/>
+<xs:element name="GeographicalAreaChange" type="mcpttloc:tGeographicalAreaChange"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "TriggeringCriteriaType" including 5G MBS Frequency Selection Area-->
+<xs:element name="RatTypeChange" type="mcpttloc:tRatTypeChange"/>
+<xs:element name="NR5GMbsfsaAreaChange" type="mcpttloc:t5GMbsfsaAreaChangeType"/>
+<xs:element name="NR5GTrackingAreaChange" type="mcpttloc:t5GTrackingAreaChangeType"/>
+<xs:element name="AddaptiveTrigger" type="mcpttloc:tAdaptiveTriggerType"/>
+
+<!-- For adaptive behavior based on time & distance combination & the 5G RRC state of the UE -->
+<xs:complexType name="tAdaptiveTriggerType">
+<xs:sequence>
+<xs:element name="MinPeriod" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name="MinDistance" type="xs:positiveInteger" minOccurs="0"/>
+<xs:element name="PersistencePeriod" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name="AdditionalTime" type="xs:positiveInteger" minOccurs="0"/>
+<xs:element name="RRC_INACTIVE_MinPeriod" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name="RRC_INACTIVE_MinDistance" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name=" RRC_INACTIVE_PersistencePeriod" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:element name="RRC_INACTIVE_AdditionalTime" type="mcpttloc:tIntegerAttributeType" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tCellChange">
+<xs:sequence>
+<xs:element name="AnyCellChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="EnterSpecificCell" type="mcpttloc:tSpecificCellType" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="ExitSpecificCell" type="mcpttloc:tSpecificCellType" minOccurs="0" maxOccurs="unbounded"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "tCellChange" -->
+<xs:element name="EnterSpecificNRCell" type="mcpttloc:tSpecificNRCellType"/>
+<xs:element name="ExitSpecificNRCell" type="mcpttloc:tSpecificNRCellType"/>
+
+<xs:complexType name="tEmptyType"/>
+
+<xs:simpleType name="tEcgi">
+<xs:restriction base="xs:string">
+<xs:pattern value="\d{3}\d{3}[0-1]{28}"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="tNcgi">
+<xs:restriction base="xs:string">
+<xs:pattern value="\d{3}\d{3}[0-1]{36}"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tSpecificCellType">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:tEcgi">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:complexType name="tSpecificNRCellType">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:tNcgi">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent></xs:complexType>
+
+<xs:complexType name="tEmptyTypeAttribute">
+<xs:complexContent>
+<xs:extension base="mcpttloc:tEmptyType">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:complexContent>
+</xs:complexType>
+
+<xs:complexType name="tTrackingAreaChangeType">
+<xs:sequence>
+<xs:element name="AnyTrackingAreaChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="EnterSpecificTrackingArea" type="mcpttloc:tTrackingAreaIdentity" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="ExitSpecificTrackingArea" type="mcpttloc:tTrackingAreaIdentity" minOccurs="0" maxOccurs="unbounded"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="t5GTrackingAreaChangeType">
+<xs:sequence>
+<xs:element name="Any5GTrackingAreaChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="EnterSpecific5GTrackingArea" type="mcpttloc:t5GTrackingAreaIdentity" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="ExitSpecific5GTrackingArea" type="mcpttloc:t5GTrackingAreaIdentity" minOccurs="0" maxOccurs="unbounded"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:simpleType name="tTrackingAreaIdentityFormat">
+<xs:restriction base="xs:string">
+<xs:pattern value="\d{3}\d{3}[0-1]{16}"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tTrackingAreaIdentity">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:tTrackingAreaIdentityFormat">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:simpleType name="t5GTrackingAreaIdentityFormat">
+<xs:restriction base="xs:string">
+<xs:pattern value="(^[A-Fa-f0-9]{4}$)|(^[A-Fa-f0-9]{6}$)"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="t5GTrackingAreaIdentity">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:t5GTrackingAreaIdentityFormat">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:complexType name="tPlmnChangeType">
+<xs:sequence>
+<xs:element name="AnyPlmnChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="EnterSpecificPlmn" type="mcpttloc:tPlmnIdentity" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="ExitSpecificPlmn" type="mcpttloc:tPlmnIdentity" minOccurs="0" maxOccurs="unbounded"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:simpleType name="tPlmnIdentityFormat">
+<xs:restriction base="xs:string">
+<xs:pattern value="\d{3}\d{3}"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tPlmnIdentity">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:tPlmnIdentityFormat">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:complexType name="tMbmsSaChangeType">
+<xs:sequence>
+<xs:element name="AnyMbmsSaChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="EnterSpecificMbmsSa" type="mcpttloc:tMbmsSaIdentity" minOccurs="0"/>
+<xs:element name="ExitSpecificMbmsSa" type="mcpttloc:tMbmsSaIdentity" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:element name="EnterSpecificMbmsSa" type="mcpttloc:tMbmsSaIdentity"/>
+<xs:element name="ExitSpecificMbmsSa" type="mcpttloc:tMbmsSaIdentity"/>
+
+<xs:simpleType name="tMbmsSaIdentityFormat">
+<xs:restriction base="xs:integer">
+<xs:minInclusive value="0"/>
+<xs:maxInclusive value="65535"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tMbmsSaIdentity">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:tMbmsSaIdentityFormat">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:complexType name="tMbsfnAreaChangeType">
+<xs:sequence>
+<xs:element name="EnterSpecificMbsfnArea" type="mcpttloc:tMbsfnAreaIdentity" minOccurs="0"/>
+<xs:element name="ExitSpecificMbsfnArea" type="mcpttloc:tMbsfnAreaIdentity" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:element name="AnyMbsfnAreaChange" type="mcpttloc:tEmptyTypeAttribute"/>
+<xs:element name="EnterSpecificMbsfnArea" type="mcpttloc:tMbsfnAreaIdentity"/>
+<xs:element name="ExitSpecificMbsfnArea" type="mcpttloc:tMbsfnAreaIdentity"/>
+
+<xs:complexType name="t5GMbsfsaAreaChangeType">
+<xs:sequence>
+<xs:element name="EnterSpecific5GMbsfsaArea" type="mcpttloc:t5GMbsfsaAreaIdentity" minOccurs="0"/>
+<xs:element name="ExitSpecific5GMbsfsaArea" type="mcpttloc:t5GMbsfsaAreaIdentity" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:element name="Any5GMbsfsaAreaChange" type="mcpttloc:tEmptyTypeAttribute"/>
+<xs:element name="EnterSpecific5GMbsfsaArea" type="mcpttloc:t5GMbsfsaAreaIdentity"/>
+<xs:element name="ExitSpecific5GMbsfsaArea" type="mcpttloc:t5GMbsfsaAreaIdentity"/>
+
+<xs:simpleType name="tMbsfnAreaIdentityFormat">
+<xs:restriction base="xs:integer">
+<xs:minInclusive value="0"/>
+<xs:maxInclusive value="255"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tMbsfnAreaIdentity">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:tMbsfnAreaIdentityFormat">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:simpleType name="t5GMbsfsaAreaIdentityFormat">
+<xs:restriction base="xs:string">
+<xs:pattern value="^[A-Fa-f0-9]{6}$"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="t5GMbsfsaAreaIdentity">
+<xs:simpleContent>
+<xs:extension base="mcpttloc:t5GMbsfsaAreaIdentityFormat">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:complexType name="tIntegerAttributeType">
+<xs:simpleContent>
+<xs:extension base="xs:integer">
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+</xs:extension>
+</xs:simpleContent>
+</xs:complexType>
+
+<xs:complexType name="tTravelledDistanceType">
+<xs:sequence>
+<xs:element name="TravelledDistance" type="xs:positiveInteger"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tSignallingEventType">
+<xs:sequence>
+<xs:element name="InitialLogOn" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="GroupCallNonEmergency" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="PrivateCallNonEmergency" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="LocationConfigurationReceived" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+<!-- anyExt elements for "tSignallingEventType" -->
+<xs:element name="FunctionalAliasActivation" type="mcpttloc:tEmptyTypeAttribute"/>
+<xs:element name="FunctionalAliasDeactivation" type="mcpttloc:tEmptyTypeAttribute"/>
+
+<xs:complexType name="tEmergencyEventType">
+<xs:sequence>
+<xs:element name="GroupCallEmergency" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="GroupCallImminentPeril" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="PrivateCallEmergency" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="InitiateEmergencyAlert" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+<xs:complexType name="tRequestedLocationType">
+<xs:sequence>
+<xs:element name="ServingEcgi" type="mcpttloc:tEmptyType" minOccurs="0"/>
+<xs:element name="NeighbouringEcgi" type="mcpttloc:tEmptyType" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="MbmsSaId" type="mcpttloc:tEmptyType" minOccurs="0"/>
+<xs:element name="MbsfnArea" type="mcpttloc:tEmptyType" minOccurs="0"/>
+<xs:element name="GeographicalCoordinate" type="mcpttloc:tEmptyType" minOccurs="0"/>
+<xs:element name="minimumIntervalLength" type="xs:positiveInteger"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "tRequestedLocationType" -->
+<xs:element name="ServingNcgi" type="mcpttloc:tEmptyType"/>
+<xs:element name="NeighbouringNcgi" type="mcpttloc:tEmptyType"/>
+<xs:element name="NR5GMbsfsaArea" type="mcpttloc:tEmptyType"/>
+
+<xs:element name="R_BearingAndSpeed" type="mcpttloc:tEmptyType"/>
+
+<xs:complexType name="tCurrentLocationType">
+<xs:sequence>
+<xs:element name="CurrentServingEcgi" type="mcpttloc:tLocationType" minOccurs="0"/>
+<xs:element name="NeighbouringEcgi" type="mcpttloc:tLocationType" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="MbmsSaId" type="mcpttloc:tLocationType" minOccurs="0"/>
+<xs:element name="MbsfnArea" type="mcpttloc:tLocationType" minOccurs="0"/>
+<xs:element name="CurrentCoordinate" type="mcpttloc:tPointCoordinate" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "tCurrentLocationType" -->
+<xs:element name="CurrentServingNcgi" type="mcpttloc:tLocationType"/>
+
+<xs:element name="CL_NeighbouringNcgi" type="mcpttloc:tLocationType"/>
+<xs:element name="CL_5GMbsfsaArea" type="mcpttloc:tLocationType"/>
+<xs:element name="CL_BearingAndSpeed" type="mcpttloc:tBearingAndSpeedType"/>
+
+<xs:element name="locTimestamp" type="xs:dateTime"/>
+<xs:element name="FunctionalAlias" type="xs:anyURI"/>
+<xs:element name="InterRatType" type="mcpttloc:tInterRatType"/>
+
+<xs:simpleType name="tInterRatType">
+<xs:restriction base="xs:string">
+<xs:enumeration value="5G-MBS-to-LTE-MBMS"/>
+<xs:enumeration value="5G-MBS-to-LTE-unicast"/>
+<xs:enumeration value="LTE-MBMS-to-5G-MBS"/>
+<xs:enumeration value="LTE-MBMS-to-5G-unicast"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="protectionType">
+<xs:restriction base="xs:string">
+<xs:enumeration value="Normal"/>
+<xs:enumeration value="Encrypted"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tLocationType">
+<xs:choice minOccurs="1" maxOccurs="1">
+<xs:element name="Ecgi" type="mcpttloc:tEcgi" minOccurs="0"/>
+<xs:element name="SaId" type="mcpttloc:tMbmsSaIdentity" minOccurs="0"/>
+<xs:element name="MbsfnAreaId" type="mcpttloc:tMbsfnAreaIdentity" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:choice>
+<xs:attribute name="type" type="mcpttloc:protectionType"/>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "tLocationType" -->
+<xs:element name="Ncgi" type="mcpttloc:tNcgi"/>
+<xs:element name="NR5GMbsfsaAreaId" type="mcpttloc:t5GMbsfsaAreaIdentity"/>
+
+<xs:complexType name="tGeographicalAreaChange">
+<xs:sequence>
+<xs:element name="AnyAreaChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:element name="EnterSpecificAreaType" type="mcpttloc:tSpecificAreaType" minOccurs="0"/>
+<xs:element name="ExitSpecificAreaType" type="mcpttloc:tSpecificAreaType" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tSpecificAreaType">
+<xs:sequence>
+<xs:element name="GeographicalArea" type="mcpttloc:tGeographicalAreaDef"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:attribute name="TriggerId" type="xs:string" use="required"/>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tRatTypeChange">
+<xs:sequence>
+<xs:element name="AnyRatTypeChange" type="mcpttloc:tEmptyTypeAttribute" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tPointCoordinate">
+<xs:sequence>
+<xs:element name="longitude" type="mcpttloc:tCoordinateType"/>
+<xs:element name="latitude" type="mcpttloc:tCoordinateType"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "tPointCoordinate" -->
+<xs:element name="altitude" type="mcpttloc:tCoordinateType2Bytes"/>
+<xs:element name="horizontalaccuracy" type="mcpttloc:tCoordinateType1Byte"/>
+<xs:element name="verticalaccuracy" type="mcpttloc:tCoordinateType1Byte"/>
+
+<xs:complexType name="tCoordinateType">
+<xs:choice minOccurs="1" maxOccurs="1">
+<xs:element name="threebytes" type="mcpttloc:tThreeByteType" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:choice>
+<xs:attribute name="type" type="mcpttloc:protectionType"/>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tCoordinateType2Bytes">
+<xs:choice minOccurs="1" maxOccurs="1">
+<xs:element name="twobytes" type="mcpttloc:tTwoByteType" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:choice>
+<xs:attribute name="type" type="mcpttloc:protectionType"/>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tCoordinateType1Byte">
+<xs:choice minOccurs="1" maxOccurs="1">
+<xs:element name="onebyteunsignedhalfrange" type="mcpttloc:tOneByteUnsignedHalfRangeType" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:choice>
+<xs:attribute name="type" type="mcpttloc:protectionType"/>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:simpleType name="tThreeByteType">
+<xs:restriction base="xs:integer">
+<xs:minInclusive value="0"/>
+<xs:maxInclusive value="16777215"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="tTwoByteType">
+<xs:restriction base="xs:integer">
+<xs:minInclusive value="-32768"/>
+<xs:maxInclusive value="32767"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="tOneByteUnsignedHalfRangeType">
+<xs:restriction base="xs:integer">
+<xs:minInclusive value="0"/>
+<xs:maxInclusive value="127"/>
+</xs:restriction>
+</xs:simpleType>
+
+<xs:complexType name="tGeographicalAreaDef">
+<xs:sequence>
+<xs:element name="PolygonArea" type="mcpttloc:tPolygonAreaType" minOccurs="0"/>
+<xs:element name="EllipsoidArcArea" type="mcpttloc:tEllipsoidArcType" minOccurs="0"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<!-- anyExt elements for "tGeographicalAreaDef: optional borders widths in meters" -->
+<xs:element name="InnerBorderWidth" type="mcpttloc:tOneByteUnsignedHalfRangeType"/>
+<xs:element name="OuterBorderWidth" type="mcpttloc:tOneByteUnsignedHalfRangeType"/>
+
+<xs:complexType name="tPolygonAreaType">
+<xs:sequence>
+<xs:element name="Corner" type="mcpttloc:tPointCoordinate" minOccurs="3" maxOccurs="15"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="tEllipsoidArcType">
+<xs:sequence>
+<xs:element name="Center" type="mcpttloc:tPointCoordinate"/>
+<xs:element name="Radius" type="xs:nonNegativeInteger"/>
+<xs:element name="OffsetAngle" type="xs:unsignedByte"/>
+<xs:element name="IncludedAngle" type="xs:unsignedByte"/>
+<xs:any namespace="##other" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+<xs:element name="anyExt" type="mcpttloc:anyExtType" minOccurs="0"/>
+</xs:sequence>
+<xs:anyAttribute namespace="##any" processContents="lax"/>
+</xs:complexType>
+
+<xs:complexType name="anyExtType">
+<xs:sequence>
+<xs:any namespace="##any" processContents="lax" minOccurs="0" maxOccurs="unbounded"/>
+</xs:sequence>
+</xs:complexType>
+
+<!-- anyEXT elements for the Configuration element – begin -->
+<xs:element name="EmergencyTriggeringCriteria" type="mcpttloc:TriggeringCriteriaType"/>
+<!-- anyEXT elements for the Configuration element – end -->
+</xs:schema>
