@@ -17,7 +17,7 @@ one release image per profile around a core that is identical in every image,
 and the profile still named at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 1218 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 1243 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -236,9 +236,8 @@ reasons are specific, not general:
   RFC 4826's `resource-lists.xsd` was the one file the OMA-defined XSD
   validation was skipping on; it is now in `docs/OMA/` and
   `tests/test_group_schema.py` validates the rendered group document against
-  the real schema set instead of skipping. VP1-DOC-001 as a whole is still
-  open on SVC-OP-03 (group configuration's source is deployment data, not the
-  profile schema).
+  the real schema set instead of skipping. SVC-OP-03 is closed: groups and
+  users are part of the network profile (decided 2026-09-26).
 - **VP1-MED-001**: the codec set is decided (VP-OP-03): the same six for every
   profile, one per call, no transcoding before R4. EVS parameters read from TS 26.445 annex A.
 - **VP1-CC-001**: roles are named in the audit record but not independently

@@ -120,13 +120,6 @@ class Proc:
 
 def start_platform(work: Path, port: int, recorder: str = "stub",
                    trusted: str = "none") -> Proc:
-    groups = work / "groups.yaml"
-    groups.write_text(
-        "groups:\n"
-        "  - id: \"grp:alpha\"\n"
-        "    display_name: \"Alpha\"\n"
-        f"    members: [\"{U1}\", \"{U2}\"]\n"
-        f"users: [\"{U1}\", \"{U2}\"]\n")
     data = work / f"data-{recorder}"
     data.mkdir(exist_ok=True)
     network = work / f"network-{recorder}.yaml"
@@ -134,12 +127,14 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
     network.write_text(json.dumps({
         "name": "interop", "version": "1", "plmns": ["001010"], "cells": [],
         "sip": {"trusted_cores": cores,
-                "core_ca": str(work / "pki/core-ca.crt") if cores else "none"}}))
+                "core_ca": str(work / "pki/core-ca.crt") if cores else "none"},
+        "groups": [{"id": "grp:alpha", "display_name": "Alpha", "members": [U1, U2]}],
+        "users": [U1, U2]}))
     env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
     env.update({
         "MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
         "MCX_RECORDER": recorder, "MCX_BEARER": "stub", "MCX_STRICT_RELEASE": "true", "MCX_ADHOC_LIST_MAX": "100",
-        "MCX_DATA_DIR": str(data), "MCX_GROUPS_FILE": str(groups),
+        "MCX_DATA_DIR": str(data),
         "MCX_HTTP_PORT": str(free_port()),
         "MCX_SIP_LISTEN": f"127.0.0.1:{port}", "MCX_SIP_URI": AS_URI,
         "MCX_SIP_TLS_CERT": str(work / "pki/platform.crt"),

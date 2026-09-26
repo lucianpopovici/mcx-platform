@@ -50,7 +50,7 @@ KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 STRICT_RELEASE_VALUES = {"true": True, "false": False}
 
 # Settings whose content moved into the network profile (NET-OP-01).
-MOVED_TO_NETWORK = ("MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS")
+MOVED_TO_NETWORK = ("MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS", "MCX_GROUPS_FILE")
 
 
 _LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
@@ -198,9 +198,9 @@ class Config:
     adhoc_list_max: int
     host: str
     port: int
-    groups_file: Optional[Path]
     # NET-OP-01 (decided 2026-09-25): the network profile -- PLMNs, cell
-    # map, trusted SIP cores and their CA. Required, no default.
+    # map, trusted SIP cores and their CA, and (SVC-OP-03, decided
+    # 2026-09-26) the groups and users. Required, no default.
     network: Path
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
@@ -300,10 +300,9 @@ class Config:
         if not network:
             raise StartupRefused(
                 "MCX_NETWORK_FILE is not set: name the network profile (PLMNs, "
-                "cell map, trusted SIP cores and their CA); there is no default, "
+                "cell map, trusted SIP cores and their CA, groups and users); there is no default, "
                 "and every audit record names the one in force")
 
-        groups = (env.get("MCX_GROUPS_FILE") or "").strip()
         sip = SipConfig.from_env(env)
         return Config(
             profile_names=names,
@@ -318,7 +317,6 @@ class Config:
             adhoc_list_max=int(raw_max),
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
-            groups_file=Path(groups) if groups else None,
             network=Path(network),
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,

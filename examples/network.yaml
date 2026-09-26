@@ -7,3 +7,5 @@ cells: []                   # [{cell: <ECGI or NCGI>, location: {<location_key>:
 sip:
   trusted_cores: []         # DNS names of SIP cores that may assert any identity
   core_ca: none             # their CA: a file beside this one, when the list is not empty
+groups: []                  # [{id: "grp:alpha", display_name: "Alpha", members: [<user URI>, ...]}]
+users: []                   # known users in no group; group members are users already

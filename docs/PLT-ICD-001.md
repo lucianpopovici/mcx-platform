@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.15 (draft)
-**Date:** 2026-09-25
+**Version:** 0.16 (draft)
+**Date:** 2026-09-26
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -154,7 +154,9 @@ plan or the core changes, not when the service does. They live in one file,
 the network profile, named by `MCX_NETWORK_FILE` (required, no default) and
 checked at startup against the loaded service profile. Adopted 2026-09-25
 (PLT-VP-R1 NET-OP-01). It replaces `MCX_CELLS_FILE` (PRF-OP-03) and
-`MCX_SIP_TRUSTED_PEERS` (ICD-OP-08), and closes ICD-OP-10.
+`MCX_SIP_TRUSTED_PEERS` (ICD-OP-08), and closes ICD-OP-10. Since 0.16 it also
+holds the groups and the known users (PLT-VP-R1 SVC-OP-03, decided
+2026-09-26), replacing `MCX_GROUPS_FILE`.
 
 ```yaml
 name: rail-ops
@@ -165,6 +167,11 @@ cells:                                # [] when there is no cell map
 sip:
   trusted_cores: [core1.rail.example] # [] when no core is trusted
   core_ca: core-ca.pem                # "none" when no core is trusted
+groups:                               # [] when there is no group
+  - id: "grp:alpha"
+    display_name: "Alpha team"        # optional; the id when absent
+    members: ["sip:u1@rail.example", "sip:u2@rail.example"]
+users: ["sip:u9@rail.example"]         # known users in no group; [] for none
 ```
 
 | ID | Rule |
@@ -173,6 +180,7 @@ sip:
 | ICD-NET-002 | The file and the core CA certificate are hashed together (SHA-256 over the canonical form, as PLT-PRF-011 does for the service profile). `name/version/hash[:16]` is the network identifier. It joins the service profile identifier and the release in every audit record (`<profile>+<release>+<network>`, extending PLT-REL-005) and appears in the health document. |
 | ICD-NET-003 | `trusted_cores` lists fully qualified DNS names. A non-empty list needs `core_ca`: a file, relative to the network profile, holding exactly one certificate, and only CERTIFICATE PEM blocks. The core CA must be self-signed, have `pathLenConstraint` 0, have keyCertSign if it has keyUsage, and be valid at startup. When SIP is enabled it must not share a key or a subject name with any CA in `MCX_SIP_TLS_CA` (which also may hold only CERTIFICATE blocks), and must not have issued any of them. |
 | ICD-NET-004 | The TLS listener trusts the core CA certificate as parsed and hashed at startup, not the file re-read. A peer is a trusted core when the core CA issued its certificate directly and the certificate carries a DNS name in `trusted_cores`. It may then assert any identity (RFC 3325 trust domain). A peer whose certificate the core CA issued asserts nothing else: no URI in it is a user's identity, so a core removed from the list asserts nothing at all. |
+| ICD-NET-005 | `groups` is a list of groups, each with `id` and `members` and optionally `display_name`, nothing else. Ids are distinct non-empty strings; a display name is a non-empty string; members are a non-empty list of non-empty strings, deduplicated in declaration order. `users` is a list of non-empty strings, deduplicated. No id may be both a group and a user, and no group may be a member of a group. Every group member is a known user. The groups and users provision the identity resolver (whose declared-domain check, PLT-IDM-008, applies to every member and user) and are the content of the group documents served (VP1-DOC-001). Being registered does not make a user known (PLT-VP-R1 SIP-OP-05). |
 | ICD-LOC-001 | Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Its first six digits must be one of `plmns`. Each `location` key must be the `location_key` of some functional identity in the loaded service profile, and a cell may appear once. |
 | ICD-LOC-002 | The core reads the serving cell from the report. It prefers the NCGI, which Rel-18 carries in `<anyExt>`, to the ECGI. The cell becomes `LocationContext.cell_id`. Neighbour cells, coordinates and the rest are not read. |
 | ICD-LOC-003 | A location is advisory, never a reason to refuse. A missing, malformed or non-report body, a DOCTYPE, or a cell sent with `type="Encrypted"` (the platform holds no key, F.3.3) all leave the request without a location. |
@@ -186,8 +194,11 @@ if they carry a listed name.
 **Deployment requirements that follow**:
 - The core CA's private key is as sensitive as the ability to assert any
   identity. Whoever holds it can make a core.
-- `MCX_CELLS_FILE` and `MCX_SIP_TRUSTED_PEERS` are refused if set, rather than
-  ignored, so an operator who sets one learns that it no longer applies.
+- `MCX_CELLS_FILE`, `MCX_SIP_TRUSTED_PEERS` and `MCX_GROUPS_FILE` are refused
+  if set, rather than ignored, so an operator who sets one learns that it no
+  longer applies.
+- A change to the groups or users is a new network identifier: every audit
+  record names the group data that was in force.
 
 ---
 
@@ -684,6 +695,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.16 | 2026-09-26 | §2.8: the network profile gains `groups` and `users` (ICD-NET-005; PLT-VP-R1 SVC-OP-03 decided). `MCX_GROUPS_FILE` is withdrawn and refused. A minor change: no hook or parameter object changes. |
 | 0.15 | 2026-09-25 | ICD-OP-08 amended: a dialog follows its party to a new connection that proves the same identity, and the old connection is dropped from it. The hook surface is unchanged. |
 | 0.14 | 2026-09-25 | ICD-ADH-006 (step 3A, warning 150) and ICD-ADH-007 (how a step-0 refusal of an ad hoc call is rendered: 3B/3C body, 185, 186). A minor change: no hook or parameter object changes. |
 | 0.13 | 2026-09-25 | Major change (ICD-VER-003): IF-SES gains `authorise(request)` (§5.0), called at §8.1 step 0 with the called party removed from the request. The roles lookup moves from step 4a to step 0. `admit`'s PRE now includes a successful `authorise`. The core checks POST-2 and POST-3 of both methods. All in-tree profiles implement it in the same change set: the call-type and role checks move from `admit` to `authorise`. §8.2 step 1 now reads steps 0–4. ICD-OP-09 closed; ICD-OP-13 opened. |

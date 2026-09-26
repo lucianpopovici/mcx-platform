@@ -171,17 +171,15 @@ def pki(tmp_path_factory):
 # ---------------------------------------------------------------------- fixtures
 
 
-GROUPS_YAML = f"groups:\n  - id: 'grp:alpha'\n    members: {json.dumps(U)}\n"
+GROUPS = [{"id": "grp:alpha", "members": list(U)}]
 
 
 def sip_env(tmp_path, pki, **over):
-    g = tmp_path / "groups.yaml"
-    g.write_text(GROUPS_YAML)
     net = network_yaml(tmp_path, trusted_cores=["core-client.example"],
-                       core_ca=pki / "core-ca.crt")
+                       core_ca=pki / "core-ca.crt", groups=GROUPS)
     env = {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
             "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": str(net),
-           "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
+           "MCX_DATA_DIR": str(tmp_path / "data"),
            "MCX_HTTP_PORT": "0",
            "MCX_SIP_LISTEN": "127.0.0.1:0", "MCX_SIP_URI": LOCAL,
            "MCX_SIP_TLS_CERT": str(pki / "server.crt"),

@@ -23,7 +23,7 @@ from core import mcinfo
 
 from .config import BEARER_STUB, IDMS_STUB, RECORDER_STUB, Config
 from .network import Network, load_network
-from .groups import GroupDirectory, load_groups, load_users
+from .groups import GroupDirectory
 from .store import SessionStore, SqliteStore
 
 log = logging.getLogger("mcx.service")
@@ -250,8 +250,7 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                              adhoc_list_max=config.adhoc_list_max,
                              cells=network.cells)
 
-    groups = GroupDirectory(load_groups(config.groups_file),
-                            load_users(config.groups_file))
+    groups = GroupDirectory(network.groups, network.users)
     # Provision the resolver from the same source the documents are served
     # from, so the two cannot disagree. register_group is not part of IF-IDR;
     # a resolver without it simply has no provisioning surface.
