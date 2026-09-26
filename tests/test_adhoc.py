@@ -52,14 +52,13 @@ def cells():
 
 @pytest.fixture
 def rt(tmp_path, pki, clock, list_max, cells):
-    g = tmp_path / "frmcs-groups.yaml"
-    g.write_text(f"groups:\n  - id: 'grp:yard'\n    members: {json.dumps(F[1:3])}\n"
-                 f"users: {json.dumps(F)}\n")
     env = sip_env(tmp_path, pki, MCX_PROFILE="frmcs", MCX_RELEASE="19",
-                  MCX_GROUPS_FILE=str(g), MCX_ADHOC_LIST_MAX=list_max,
+                  MCX_ADHOC_LIST_MAX=list_max,
                   MCX_NETWORK_FILE=str(network_yaml(
                       tmp_path, cells=cells, trusted_cores=["core-client.example"],
-                      core_ca=pki / "core-ca.crt", fname="frmcs-network.yaml")))
+                      core_ca=pki / "core-ca.crt", fname="frmcs-network.yaml",
+                      groups=[{"id": "grp:yard", "members": list(F[1:3])}],
+                      users=list(F))))
     r = build_runtime(env, clock, platform=Platform())
     resolver = r.loaded.hooks.identity_resolver
     resolver.bind("shunting-team-leader", F[0], YARD)   # may start shunting calls
@@ -445,10 +444,11 @@ def test_a_private_call_carrying_a_resource_list_is_not_read_as_ad_hoc(core, rt,
 def test_ad_hoc_is_not_understood_before_rel_18(tmp_path, pki, clock):
     """At Rel-17 "adhoc" is a session type no call type can declare: the
     request is refused as such, not with a Rel-18 ad hoc warning code."""
-    g = tmp_path / "g17.yaml"
-    g.write_text(f"groups: []\nusers: {json.dumps(F)}\n")
     env = sip_env(tmp_path, pki, MCX_PROFILE="frmcs", MCX_RELEASE="17",
-                  MCX_GROUPS_FILE=str(g))
+                  MCX_NETWORK_FILE=str(network_yaml(
+                      tmp_path, trusted_cores=["core-client.example"],
+                      core_ca=pki / "core-ca.crt", fname="g17-network.yaml",
+                      users=list(F))))
     r = build_runtime(env, clock, platform=Platform())
     c = SipCore(r, LOCAL, clock)
     try:

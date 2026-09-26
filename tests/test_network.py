@@ -76,7 +76,7 @@ def core_net(tmp_path, core_ca):
 
 
 GOOD = {"name": "rail-ops", "version": "3", "plmns": [PLMN], "cells": [],
-        "sip": {"trusted_cores": [], "core_ca": "none"}}
+        "sip": {"trusted_cores": [], "core_ca": "none"}, "groups": [], "users": []}
 
 
 # ============================================================ a well-formed file
@@ -134,7 +134,7 @@ def test_a_missing_file_is_refused(tmp_path):
     {**GOOD, "trusted_peers": []}])
 def test_the_keys_are_exactly_these(tmp_path, doc):
     text = refused(raw_yaml(tmp_path, doc))
-    assert "expected exactly the keys cells, name, plmns, sip, version" in text
+    assert "expected exactly the keys cells, groups, name, plmns, sip, users, version" in text
 
 
 def test_bad_yaml_is_refused(tmp_path):
@@ -382,6 +382,94 @@ def test_every_defect_is_reported_at_once(tmp_path):
     assert "4 defect(s)" in text
 
 
+# ============================================================ groups and users (SVC-OP-03)
+
+A, B, C = (f"sip:{u}@mcptt.example" for u in "abc")
+
+
+def test_groups_and_users_are_read(tmp_path):
+    n = load_network(network_yaml(tmp_path, groups=[
+        {"id": "grp:x", "display_name": "X team", "members": [A, B, A]},
+        {"id": "grp:y", "members": [C]}], users=[C, "sip:d@mcptt.example", C]), set())
+    assert [(g.id, g.display_name, g.members) for g in n.groups] == [
+        ("grp:x", "X team", (A, B)),                  # deduplicated, in order
+        ("grp:y", "grp:y", (C,))]                     # the id when no display name
+    assert n.users == (C, "sip:d@mcptt.example")
+
+
+def test_no_groups_and_no_users_is_stated_not_omitted(tmp_path):
+    n = load_network(network_yaml(tmp_path), set())
+    assert (n.groups, n.users) == ((), ())
+    for key in ("groups", "users"):
+        text = refused(raw_yaml(tmp_path, {k: v for k, v in GOOD.items() if k != key}))
+        assert "expected exactly the keys" in text
+
+
+def test_the_hash_covers_the_groups(tmp_path):
+    a = load_network(network_yaml(tmp_path, groups=[{"id": "g", "members": [A]}]), set())
+    b = load_network(network_yaml(tmp_path, groups=[{"id": "g", "members": [A, B]}]), set())
+    c = load_network(network_yaml(tmp_path, groups=[{"id": "g", "members": [A]}],
+                                  users=[C]), set())
+    assert len({a.content_hash, b.content_hash, c.content_hash}) == 3
+
+
+@pytest.mark.parametrize("groups,users,expect", [
+    ({"id": "g"}, [], "groups: expected a list"),
+    ([], "sip:a@x", "users: expected a list of ids"),
+    ([], [A, ""], "users: entries [1] are not non-empty strings"),
+    ([], [A, 7], "users: entries [1] are not non-empty strings"),
+    (["g"], [], "groups[0]: expected 'id', 'members' and optionally 'display_name'"),
+    ([{"id": "g"}], [], "groups[0]: expected 'id', 'members'"),
+    ([{"id": "g", "members": [A], "owner": A}], [], "groups[0]: expected 'id', 'members'"),
+    ([{"id": "", "members": [A]}], [], "groups[0].id: expected a non-empty string"),
+    ([{"id": 5, "members": [A]}], [], "groups[0].id: expected a non-empty string"),
+    ([{"id": ["g"], "members": [A]}], [], "groups[0].id: expected a non-empty string"),
+    ([{"id": {"g": 1}, "members": [A]}], ["x"], "groups[0].id: expected a non-empty string"),
+    ([{"id": "g", "members": [A]}, {"id": "g", "members": [B]}], [],
+     "groups[1].id: 'g' already declared"),
+    ([{"id": "g", "display_name": "", "members": [A]}], [],
+     "groups[0].display_name: expected a non-empty string"),
+    ([{"id": "g", "members": []}], [], "groups[0].members: a group needs at least one member"),
+    ([{"id": "g", "members": A}], [], "groups[0].members: expected a list of ids"),
+    ([{"id": "g", "members": [A, " "]}], [], "groups[0].members: entries [1] are not"),
+    ([{"id": "g", "members": [A]}], ["g"], "users: 'g' also declared as group id(s)"),
+    ([{"id": "g", "members": [A]}, {"id": "h", "members": ["g"]}], [],
+     "groups: 'g' listed as a member; a group's members are users"),
+])
+def test_a_malformed_group_or_user_is_refused(tmp_path, groups, users, expect):
+    assert expect in refused(raw_yaml(tmp_path, {**GOOD, "groups": groups, "users": users}))
+
+
+def test_group_defects_are_reported_with_the_rest(tmp_path):
+    text = refused(raw_yaml(tmp_path, {**GOOD, "plmns": ["1"], "users": [""],
+                                       "groups": [{"id": "g", "members": []},
+                                                  {"id": "g", "members": [A]}]}))
+    assert "4 defect(s)" in text
+
+
+def test_the_running_process_serves_the_network_profiles_groups(tmp_path, pki):
+    e = sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(network_yaml(
+        tmp_path, trusted_cores=["core-client.example"], core_ca=pki / "core-ca.crt",
+        fname="groups-net.yaml",
+        groups=[{"id": "grp:net", "members": ["sip:u1@mcptt.example"]}],
+        users=["sip:u2@mcptt.example"])))
+    rt = build_runtime(e, Clock())
+    try:
+        assert rt.groups.ids() == ("grp:net",)
+        assert rt.groups.users() == ("sip:u2@mcptt.example", "sip:u1@mcptt.example")
+        # the resolver was provisioned from the same data
+        from core.hooks import MediaKind, SessionRequest
+        req = SessionRequest(request_id="r", initiator="sip:u2@mcptt.example",
+                             target="grp:net", call_type="prearranged-group",
+                             media=(MediaKind.VOICE,))
+        resolver = rt.loaded.hooks.identity_resolver
+        assert resolver.resolve("grp:net", req).members == ("sip:u1@mcptt.example",)
+        assert resolver.resolve("sip:u2@mcptt.example", req).members == (
+            "sip:u2@mcptt.example",)
+    finally:
+        rt.close()
+
+
 # ============================================================ configuration
 
 
@@ -399,7 +487,8 @@ def test_the_setting_is_required(tmp_path, pki):
         Config.from_env({**env, "MCX_NETWORK_FILE": "  "})
 
 
-@pytest.mark.parametrize("moved", ["MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS"])
+@pytest.mark.parametrize("moved", ["MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS",
+                                   "MCX_GROUPS_FILE"])
 @pytest.mark.parametrize("value", ["none", ""])
 def test_a_setting_that_moved_is_refused_not_ignored(tmp_path, pki, moved, value):
     with pytest.raises(StartupRefused) as exc:

@@ -46,7 +46,9 @@ def test_must_match_parameters_and_defaults():
     amr = {"octet-align": "0", "crc": "0", "robust-sorting": "0", "interleaving": ""}
     assert dict(codec.MUST_MATCH["AMR"]) == amr          # RFC 4867 8.3.1
     assert dict(codec.MUST_MATCH["AMR-WB"]) == amr
-    assert dict(codec.MUST_MATCH["EVS"]) == {"hf-only": "0", "evs-mode-switch": "0"}
+    # TS 26.445 A.3.1, A.3.3.1 (V12.17.0, V16.4.0, V19.1.0)
+    assert dict(codec.MUST_MATCH["EVS"]) == {"hf-only": "0", "evs-mode-switch": "0",
+                                             "cmr": "0"}
     assert set(codec.MUST_MATCH) == {"AMR", "AMR-WB", "EVS"}
 
 
@@ -165,7 +167,7 @@ def test_params_and_layout():
                           ("octet-align", "1"), ("robust-sorting", "0"))
     assert Offered(0, "PCMU/8000").layout() == ()
     assert Offered(96, "EVS/16000", "hf-only=1").layout() == (
-        ("evs-mode-switch", "0"), ("hf-only", "1"))
+        ("cmr", "0"), ("evs-mode-switch", "0"), ("hf-only", "1"))
 
 
 # -- choosing the call's codec -----------------------------------------------
@@ -264,11 +266,23 @@ def test_the_first_matching_variant_is_used():
     assert match(body, AMRWB) == 101
 
 
-@pytest.mark.parametrize("fmtp", ["hf-only=1", "evs-mode-switch=1"])
+@pytest.mark.parametrize("fmtp", ["hf-only=1", "evs-mode-switch=1", "cmr=1", "cmr=-1"])
 def test_evs_layout_parameters_must_match(fmtp):
+    """TS 26.445 A.3.3.1: offered, the answerer shall not modify or remove
+    them; not offered, it may add them, which the relay cannot honour."""
     evs = choose(sdp((96, "EVS/16000", None)), DECIDED)
     assert match(sdp((110, "EVS/16000", fmtp)), evs) is None
-    assert match(sdp((110, "EVS/16000", "br=13.2")), evs) == 110
+    offered = choose(sdp((96, "EVS/16000", fmtp)), DECIDED)
+    assert match(sdp((110, "EVS/16000", fmtp)), offered) == 110
+    assert match(sdp((110, "EVS/16000", None)), offered) is None     # removed
+
+
+@pytest.mark.parametrize("fmtp", ["br=13.2", "bw=wb", "dtx=0", "dtx-recv=0",
+                                  "ch-aw-recv=2", "max-red=220", "mode-set=0,1,2",
+                                  "hf-only=0;evs-mode-switch=0;cmr=0"])
+def test_evs_parameters_that_do_not_frame_the_payload_or_are_defaults_match(fmtp):
+    evs = choose(sdp((96, "EVS/16000", None)), DECIDED)
+    assert match(sdp((110, "EVS/16000", fmtp)), evs) == 110
 
 
 def test_static_codecs_match_by_number_or_rtpmap():

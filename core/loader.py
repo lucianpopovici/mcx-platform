@@ -58,6 +58,8 @@ HOOK_INTERFACES: Mapping[str, Tuple[type, Tuple[str, ...]]] = {
 # OPEN (VP-OP-05): PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008 all turn on a
 # "production indicator" that PLT-SRS does not define. The definition below is
 # this implementation's proposal and requires confirmation before baselining.
+# Its weaknesses (opt-in, switchable by whoever configures the stubs, recorded
+# nowhere) and the options for R1 are in PLT-VP-R1 VP-OP-05.
 # --------------------------------------------------------------------------
 
 PRODUCTION_ENV_VALUES = ("production", "prod")
