@@ -80,6 +80,20 @@ class Endpoint:
     remote_rtp: Optional[Addr] = None
     remote_floor: Optional[Addr] = None
     seq: int = 0
+    # The call codec's RTP payload type numbers for this party. A number in
+    # an SDP is what its author expects to RECEIVE, and each side sends with
+    # the other's numbers (RFC 3264 5.1, 6.1). So there are two:
+    #   rx_pt: the number in the relay's SDP to this party -- the party
+    #          sends with it, and the relay accepts no other from it;
+    #   tx_pt: the number in this party's own SDP -- the relay sends with it.
+    # None: the session's (the caller's number).
+    rx_pt: Optional[int] = None
+    tx_pt: Optional[int] = None
+    # The number rx_pt replaced when the party's re-offer renumbered the
+    # codec: still accepted until the party's first packet under the new one,
+    # since it sends with the old until the relay's answer reaches it (review
+    # of MED-OP-01). None: no renumbering pending.
+    rx_prev: Optional[int] = None
 
     @property
     def rtp_port(self) -> int:
@@ -107,6 +121,8 @@ class MediaSession:
         self.codec = codec              # PLT-REL-004: the deployment's release
         self.cid = cid
         self.floor = floor
+        if not 0 <= payload_type <= 127:
+            raise ValueError(f"RTP payload type {payload_type} is not 0..127")
         self.payload_type = payload_type
         self._now = clock
         self._io_factory = io_factory
@@ -135,6 +151,28 @@ class MediaSession:
             self.endpoints[uri] = ep
         return ep
 
+    def set_payload_types(self, uri: str, *, rx: Optional[int] = None,
+                          tx: Optional[int] = None) -> None:
+        """`rx`: the number the relay's SDP gave this party (it sends with
+        it). `tx`: the number the party's own SDP gave (the relay sends with
+        it). None leaves that one as it is."""
+        for pt in (rx, tx):
+            if pt is not None and not 0 <= pt <= 127:
+                raise ValueError(f"RTP payload type {pt} is not 0..127")
+        ep = self.endpoints[uri]
+        if rx is not None:
+            if ep.rx_pt != rx:
+                ep.rx_prev = ep.rx_pt
+            ep.rx_pt = rx
+        if tx is not None:
+            ep.tx_pt = tx
+
+    def _rx(self, ep: Endpoint) -> int:
+        return ep.rx_pt if ep.rx_pt is not None else self.payload_type
+
+    def _tx(self, ep: Endpoint) -> int:
+        return ep.tx_pt if ep.tx_pt is not None else self.payload_type
+
     def set_remote(self, uri: str, rtp: Addr, floor: Optional[Addr]) -> None:
         ep = self.endpoints[uri]
         ep.remote_rtp, ep.remote_floor = rtp, floor
@@ -159,9 +197,13 @@ class MediaSession:
         if len(data) < RTP_MIN_HEADER or data[0] >> 6 != 2:
             self.counters["rtp_dropped_malformed"] += 1
             return False
-        # VP1-MED-001: only the negotiated payload type, which is itself
-        # drawn from the profile's declared codecs.
-        if data[1] & 0x7F != self.payload_type:
+        # VP1-MED-001: only the call's codec, under the number the relay's
+        # SDP gave this party; the codec is itself drawn from the profile's
+        # declared ones.
+        pt = data[1] & 0x7F
+        if pt == self._rx(ep):
+            ep.rx_prev = None                        # the renumbering has landed
+        elif pt != ep.rx_prev:
             self.counters["rtp_dropped_codec"] += 1
             return False
         # VP1-MED-004: only the floor holder's media goes anywhere.
@@ -181,7 +223,11 @@ class MediaSession:
                 fl.EventType.MEDIA_RECEIVED, participant=uri)))
         for other in self.endpoints.values():
             if other.uri != uri and other.remote_rtp is not None:
-                other.io.send_rtp(other.remote_rtp, data)
+                # The same codec under the number the receiver's SDP gave:
+                # the payload type is rewritten, the marker bit kept, and
+                # nothing else in the packet changes (no transcoding before R4).
+                out = data[:1] + bytes([(data[1] & 0x80) | self._tx(other)]) + data[2:]
+                other.io.send_rtp(other.remote_rtp, out)
                 self.counters["rtp_forwarded"] += 1
         return True
 
@@ -408,7 +454,13 @@ class UdpEndpointIO:
                 continue
             except OSError:
                 return
-            self._plane.deliver(self._session_id, self._uri, kind, src, data)
+            try:
+                self._plane.deliver(self._session_id, self._uri, kind, src, data)
+            except Exception:                              # noqa: BLE001
+                # One packet the relay cannot handle must not end this
+                # party's media for the rest of the call (review of MED-OP-01).
+                log.exception("media %s: %s packet from %s not handled",
+                              self._session_id, kind, src)
 
     def send_rtp(self, addr: Addr, data: bytes) -> None:
         self._sendto(self._rtp, addr, data)

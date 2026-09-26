@@ -163,9 +163,11 @@ admission:
     <urgency_id>: int
   reject_reason_codes: [string]   # closed set; audit records reference these
 
-# Voice codecs the deployment may carry. Payload types are unique, 0..127.
-# The media plane forwards nothing else (PLT-MED-001, VP1-MED-001).
+# Voice codecs the deployment may carry, in order of preference: a call
+# uses the first the caller offers, and every party uses that one (no
+# transcoding before R4). By rtpmap name; payload type numbers are each
+# party's (RFC 3264 6.1) or RFC 3551's. The media plane forwards nothing
+# else (PLT-MED-001, VP1-MED-001).
 media:
   codecs:
-    - payload_type: int
-      name: string          # SDP rtpmap value, e.g. AMR-WB/16000
+    - name: string          # rtpmap name, encoding/clock[/channels], e.g. AMR-WB/16000

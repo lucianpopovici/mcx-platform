@@ -22,7 +22,7 @@ import ssl
 import threading
 import time
 import uuid
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 ICSI = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt"
 MCINFO = "application/vnd.3gpp.mcptt-info+xml"
@@ -183,10 +183,15 @@ class UA:
         return (f"Via: SIP/2.0/TLS {self.host}:{self.port};"
                 f"branch=z9hG4bK{uuid.uuid4().hex[:12]};rport")
 
+    # The codec this agent offers and answers: (payload type, rtpmap, fmtp).
+    codec: Tuple[int, str, str] = (0, "PCMU/8000", "")
+
     def sdp(self, port: int, version: int = 1) -> str:
+        pt, name, fmtp = self.codec
         return (f"v=0\no=- {version} {version} IN IP4 {self.host}\ns=-\n"
                 f"c=IN IP4 {self.host}\nt=0 0\n"
-                f"m=audio {port} RTP/AVP 0\na=rtpmap:0 PCMU/8000\na=sendrecv\n")
+                f"m=audio {port} RTP/AVP {pt}\na=rtpmap:{pt} {name}\n"
+                + (f"a=fmtp:{pt} {fmtp}\n" if fmtp else "") + "a=sendrecv\n")
 
     # -- requests out of dialog ------------------------------------------------
     def register(self, registrar: str = "sip:mcptt.example", expires: int = 3600) -> str:
