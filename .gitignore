@@ -163,6 +163,5 @@ cython_debug/
 .idea/
 
 
-# kb: generated outputs (rebuild with python3 kb/tools/kb.py build)
-kb/STATE.md
-kb/registry/
+# kb: agent memory, local only, not tracked in git
+kb/
