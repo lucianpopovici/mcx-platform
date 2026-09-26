@@ -52,9 +52,9 @@ class UE:
         s.bind(("127.0.0.1", 0))
         return s
 
-    def sdp(self):
+    def sdp(self, codecs=CODEC, fmtp=None):
         return build_sdp("127.0.0.1", self.rtp.getsockname()[1],
-                         self.floor.getsockname()[1], CODEC)
+                         self.floor.getsockname()[1], codecs, fmtp)
 
     def learn_relay(self, sdp_text):
         info = parse_sdp(sdp_text)
@@ -109,10 +109,10 @@ def call(tmp_path, pki):
     rt.close()
 
 
-def group_invite(ue0, cid="e2e"):
+def group_invite(ue0, cid="e2e", sdp=None):
     """A conformant prearranged group call request (TS 24.379 10.1.1.2.1.1)."""
     return msg("INVITE", LOCAL, cid, 1, U[0], LOCAL,
-               body=mcf.body_for("prearranged-group", "grp:alpha", ue0.sdp()),
+               body=mcf.body_for("prearranged-group", "grp:alpha", sdp or ue0.sdp()),
                ctype=mcf.CONTENT_TYPE)
 
 
@@ -251,7 +251,8 @@ def test_full_call_trace_has_no_deviation(call):
 def test_offer_with_no_profile_codec_is_refused_488_and_leaves_nothing(call):
     rt, core, flows, ues, _ = call
     body = mcf.body_for("prearranged-group", "grp:alpha",
-                        build_sdp("127.0.0.1", 5000, 5002, [(8, "PCMA/8000")]))
+                        build_sdp("127.0.0.1", 5000, 5002, [(18, "G729/8000"),
+                                                            (111, "opus/48000/2")]))
     with core.lock:
         core.on_bytes(msg("INVITE", LOCAL, "nocodec", 1, U[0], LOCAL,
                           body=body, ctype=mcf.CONTENT_TYPE),
@@ -300,3 +301,133 @@ def test_floor_does_not_start_while_callees_are_still_ringing(call):
         # a direct grant runs T1 only: T2 waits for the first RTP packet and
         # T20 is for queued grants (TS 24.380 6.3.4.4.2, 6.3.4.4.5)
         assert set(floor.running_timers()) == {"T1"}
+
+
+# ------------------------------------------------------------------ MED-OP-01: one codec, each party's own number
+
+
+def _audio_lines(sdp_text):
+    return [ln for ln in sdp_text.splitlines()
+            if ln.startswith(("m=audio", "a=rtpmap", "a=fmtp"))]
+
+
+def test_med_op_01_the_profile_order_picks_the_codec_and_every_party_is_offered_it(call):
+    """The caller lists PCMU, PCMA, AMR-WB (octet-aligned and not), EVS is
+    absent: the profile's order picks AMR-WB, in the bandwidth-efficient
+    layout (TS 26.179 4.1.3), and the callee offers and the caller's answer
+    carry exactly that, with the caller's number and parameters."""
+    rt, core, flows, ues, _ = call
+    offer = ues[U[0]].sdp([(0, "PCMU/8000"), (8, "PCMA/8000"),
+                           (99, "AMR-WB/16000"), (98, "AMR-WB/16000")],
+                          {99: "octet-align=1", 98: "mode-set=0,1,2"})
+    with core.lock:
+        core.on_bytes(group_invite(ues[U[0]], "order", offer), flows[U[0]])
+        (req,) = flows[U[1]].requests("INVITE")
+        assert _audio_lines(mcf.sdp_of(req))[1:] == [
+            "a=rtpmap:98 AMR-WB/16000", "a=fmtp:98 mode-set=0,1,2"]
+        core.on_bytes(answer(req, 200, ues[U[1]].sdp([(98, "AMR-WB/16000")])),
+                      flows[U[1]])
+    ok = [m for m in flows[U[0]].messages() if getattr(m, "code", None) == 200][0]
+    lines = _audio_lines(ok.body)
+    assert lines[0].endswith(" RTP/AVP 98")
+    assert lines[1:] == ["a=rtpmap:98 AMR-WB/16000", "a=fmtp:98 mode-set=0,1,2"]
+
+
+def test_med_op_01_a_callee_numbering_the_codec_differently_gets_its_own_number(call):
+    """RTP payload types over real UDP (RFC 3264 5.1, 6.1): the relay offers
+    AMR-WB as 97; U1 answers 101, U2 97. The caller's packet reaches U1 as
+    101 and U2 unchanged, marker bit kept. U1 itself sends with the offer's
+    number, 97, which reaches the caller as its own 97."""
+    rt, core, flows, ues, _ = call
+    with core.lock:
+        core.on_bytes(group_invite(ues[U[0]], "renum"), flows[U[0]])
+        legs = {u: flows[u].requests("INVITE")[0] for u in U[1:3]}
+        for u in U[1:3]:
+            ues[u].learn_relay(mcf.sdp_of(legs[u]))
+        core.on_bytes(answer(legs[U[1]], 200, ues[U[1]].sdp([(101, "AMR-WB/16000")])),
+                      flows[U[1]])
+        core.on_bytes(answer(legs[U[2]], 200, ues[U[2]].sdp()), flows[U[2]])
+    ok = [m for m in flows[U[0]].messages() if getattr(m, "code", None) == 200][0]
+    ues[U[0]].learn_relay(ok.body)
+    assert parse_sdp(ok.body).payload_types == (PT,)       # the caller's own
+    pkt = ues[U[0]].send_voice(pt=0x80 | PT)                 # marker set
+    assert ues[U[1]].voice() == bytes([0x80, 0x80 | 101]) + pkt[2:]
+    assert ues[U[2]].voice() == pkt
+    ms = core.media._sessions["renum"]
+    assert (ms.endpoints[U[1]].rx_pt, ms.endpoints[U[1]].tx_pt) == (PT, 101)
+    assert (ms.endpoints[U[2]].rx_pt, ms.endpoints[U[2]].tx_pt) == (PT, PT)
+    # U1 takes the floor and talks, with the offer's number
+    for u in U[:3]:
+        while ues[u].floor_msg(0.2):
+            pass
+    ues[U[0]].send_floor(MsgType.RELEASE)
+    ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+    while True:
+        m = ues[U[1]].floor_msg()
+        assert m is not None
+        if m.type is MsgType.GRANTED:
+            break
+    ues[U[1]].send_voice(pt=101, seq=5)                  # its own answer's: not the codec
+    assert ues[U[0]].voice(0.4) is None
+    pkt = ues[U[1]].send_voice(pt=PT, seq=6)
+    assert ues[U[0]].voice() == pkt and ues[U[2]].voice() == pkt
+
+
+@pytest.mark.parametrize("fmtp", ["octet-align=1", "crc=1", "robust-sorting=1",
+                                  "interleaving=2"])
+def test_rfc_4867_a_callee_answering_another_payload_layout_is_hung_up(call, fmtp):
+    rt, core, flows, ues, _ = call
+    with core.lock:
+        core.on_bytes(group_invite(ues[U[0]], "layout"), flows[U[0]])
+        (req,) = flows[U[1]].requests("INVITE")
+        core.on_bytes(answer(req, 200, ues[U[1]].sdp(CODEC, {PT: fmtp})), flows[U[1]])
+    assert [r.method for r in flows[U[1]].requests()][-2:] == ["ACK", "BYE"]
+    assert 200 not in flows[U[0]].codes()
+
+
+def test_a_callee_answering_the_layout_with_explicit_defaults_is_relayed(call):
+    rt, core, flows, ues, _ = call
+    with core.lock:
+        core.on_bytes(group_invite(ues[U[0]], "defaults"), flows[U[0]])
+        (req,) = flows[U[1]].requests("INVITE")
+        core.on_bytes(answer(req, 200, ues[U[1]].sdp(CODEC, {PT: "octet-align=0;crc=0"})),
+                      flows[U[1]])
+    assert "BYE" not in [r.method for r in flows[U[1]].requests()]
+    assert 200 in flows[U[0]].codes()
+
+
+def test_g722_static_payload_type_end_to_end(call):
+    rt, core, flows, ues, _ = call
+    offer = ues[U[0]].sdp([(9, "G722/8000"), (0, "PCMU/8000")])
+    with core.lock:
+        core.on_bytes(group_invite(ues[U[0]], "g722", offer), flows[U[0]])
+        (req,) = flows[U[1]].requests("INVITE")
+        assert parse_sdp(mcf.sdp_of(req)).payload_types == (9,)
+        ues[U[1]].learn_relay(mcf.sdp_of(req))
+        core.on_bytes(answer(req, 200, ues[U[1]].sdp([(9, "G722/8000")])), flows[U[1]])
+    ok = [m for m in flows[U[0]].messages() if getattr(m, "code", None) == 200][0]
+    ues[U[0]].learn_relay(ok.body)
+    pkt = ues[U[0]].send_voice(pt=9)
+    assert ues[U[1]].voice() == pkt
+
+
+def test_a_caller_offering_only_numbers_rtp_cannot_carry_is_488(call):
+    """Review of MED-OP-01: payload type 300 names nothing (RFC 3550 5.1)."""
+    rt, core, flows, ues, _ = call
+    body = mcf.body_for("prearranged-group", "grp:alpha",
+                        build_sdp("127.0.0.1", 5000, 5002, [(300, "AMR-WB/16000")]))
+    with core.lock:
+        core.on_bytes(msg("INVITE", LOCAL, "pt300", 1, U[0], LOCAL,
+                          body=body, ctype=mcf.CONTENT_TYPE), flows[U[0]])
+    assert flows[U[0]].codes() == [100, 488]
+    assert "pt300" not in core.media._sessions
+
+
+def test_a_callee_answering_a_number_rtp_cannot_carry_is_hung_up(call):
+    rt, core, flows, ues, _ = call
+    with core.lock:
+        core.on_bytes(group_invite(ues[U[0]], "pt300b"), flows[U[0]])
+        (req,) = flows[U[1]].requests("INVITE")
+        core.on_bytes(answer(req, 200, ues[U[1]].sdp([(300, "AMR-WB/16000")])), flows[U[1]])
+    assert [r.method for r in flows[U[1]].requests()][-2:] == ["ACK", "BYE"]
+    assert core.media._sessions["pt300b"].endpoints[U[1]].tx_pt is None

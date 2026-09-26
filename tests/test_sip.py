@@ -35,8 +35,6 @@ from core.sip import (  # noqa: E402
     SipError,
     Status,
     build_offer,
-    negotiate,
-    offered_payload_types,
 )
 
 PROFILES = ROOT / "profiles"
@@ -442,32 +440,13 @@ def test_parse_rejects_a_non_invite():
 
 
 # --------------------------------------------------------------------------
-# VP1-MED-002 — SDP negotiation
+# SDP offers (VP1-MED-002 negotiation: tests/test_codec.py)
 # --------------------------------------------------------------------------
-
-
-def test_vp1_med_002_offer_with_an_acceptable_codec_negotiates():
-    offer = build_offer([AMR_WB, AMR])
-    assert negotiate(offer, supported=[97]) == 97
-
-
-def test_vp1_med_002_offer_with_no_acceptable_codec_is_refused():
-    offer = build_offer([AMR])
-    assert negotiate(offer, supported=[97]) is None
-
-
-def test_negotiation_prefers_the_offerer_ordering():
-    offer = build_offer([AMR_WB, AMR])
-    assert negotiate(offer, supported=[96, 97]) == 97
 
 
 def test_offer_must_contain_a_codec():
     with pytest.raises(SipError):
         build_offer([])
-
-
-def test_offered_payload_types_parsed():
-    assert offered_payload_types(build_offer([AMR_WB, AMR])) == (97, 96)
 
 
 # --------------------------------------------------------------------------

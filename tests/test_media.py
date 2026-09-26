@@ -31,7 +31,7 @@ from core.release import Release  # noqa: E402
 # are specifically about release gating (tests/test_release.py).
 FLOOR_CODEC = rtcp.Codec(Release.REL_19)
 from core.rtcp import MsgType, RtcpError  # noqa: E402
-from core.sip import build_sdp, parse_sdp, negotiate, SipError  # noqa: E402
+from core.sip import build_sdp, parse_sdp, SipError  # noqa: E402
 from core.validation import build  # noqa: E402
 from service.media import MediaSession, PLATFORM_SSRC  # noqa: E402
 
@@ -199,11 +199,14 @@ def test_in_tree_profiles_state_the_specification_revoke_timers():
                 assert timers.get("T3") == 3000, (name, ct.get("id"))
 
 
-def test_every_in_tree_profile_declares_codecs():
+def test_every_in_tree_profile_declares_the_decided_codecs():
+    """VP-OP-03, decided 2026-09-25: the same set and order everywhere."""
     from core import loader
     for name in ("mcx", "frmcs", "utility"):
         lp = loader.load(ROOT / "profiles" / name)
-        assert lp.profile.media.codecs, name
+        assert [c.name for c in lp.profile.media.codecs] == [
+            "EVS/16000", "AMR-WB/16000", "AMR/8000", "G722/8000",
+            "PCMA/8000", "PCMU/8000"], name
 
 
 def test_media_section_is_required(mcx_raw):
@@ -215,17 +218,32 @@ def test_media_section_is_required(mcx_raw):
 
 @pytest.mark.parametrize("codecs,code", [
     ([], "bad-value"),
-    ([{"payload_type": 200, "name": "X/8000"}], "bad-value"),
-    ([{"payload_type": 0, "name": "A/8000"}, {"payload_type": 0, "name": "B/8000"}],
-     "duplicate"),
-    ([{"payload_type": 0, "name": "has space"}], "bad-value"),
-    ([{"payload_type": 0}], "missing-key"),
-    ([{"payload_type": 0, "name": "X/8000", "extra": 1}], "unknown-key"),
+    ([{"name": "X"}], "bad-value"),                     # no clock rate
+    ([{"name": "has space/8000"}], "bad-value"),
+    ([{"name": "AMR-WB/16000"}, {"name": "amr-wb/16000"}], "duplicate"),   # no case
+    ([{"name": "PCMU/8000"}, {"name": "PCMU/8000/1"}], "duplicate"),       # 1 channel
+    ([{}], "missing-key"),
+    ([{"name": "X/8000", "extra": 1}], "unknown-key"),
+    # VP-OP-03: payload type numbers are no longer declared
+    ([{"payload_type": 0, "name": "PCMU/8000"}], "unknown-key"),
+    # review of MED-OP-01: formats that carry no voice
+    ([{"name": "telephone-event/8000"}], "bad-value"),
+    ([{"name": "CN/8000"}], "bad-value"),
+    ([{"name": "red/8000"}], "bad-value"),
+    ([{"name": "ulpfec/8000"}], "bad-value"),
 ])
 def test_bad_codec_declarations_are_rejected(mcx_raw, codecs, code):
     raw = copy.deepcopy(mcx_raw)
     raw["media"]["codecs"] = codecs
     assert code in {d.code for d in _defects(raw)}
+
+
+def test_codecs_differing_in_clock_or_channels_are_distinct(mcx_raw):
+    raw = copy.deepcopy(mcx_raw)
+    raw["media"]["codecs"] = [{"name": "AMR-WB/16000"}, {"name": "AMR-WB/16000/2"},
+                              {"name": "AMR-WB/8000"}]
+    assert [c.name for c in build(raw, "h").media.codecs] == [
+        "AMR-WB/16000", "AMR-WB/16000/2", "AMR-WB/8000"]
 
 
 # ============================================================ endpoint harness
@@ -471,6 +489,118 @@ def test_vp1_med_001_only_the_negotiated_payload_type_is_forwarded():
     assert send_rtp(ms, A, pt=PT) is True
     assert ms.counters["rtp_dropped_codec"] == 2
     assert len(ios[B].rtp) == 1
+
+
+def test_med_op_01_the_relay_sends_with_the_number_the_receivers_sdp_gave():
+    """The relay offered B the codec as 97 and B answered 101: B expects to
+    receive 101 (RFC 3264 5.1), so the relay rewrites the payload type and
+    nothing else, and keeps the marker bit. C never renumbered."""
+    ms, ios, _, _ = make()
+    ms.set_payload_types(B, rx=PT, tx=101)
+    first = bytes([0x80, 0x80 | PT]) + rtp()[2:]            # marker set
+    assert ms.on_rtp(A, remote(A)[0], first) is True
+    assert send_rtp(ms, A, seq=2) is True
+    (_, b1), (_, b2) = ios[B].rtp
+    (_, c1), (_, c2) = ios[C].rtp
+    assert b1 == bytes([0x80, 0x80 | 101]) + first[2:]
+    assert b2 == bytes([0x80, 101]) + rtp(seq=2)[2:]
+    assert (c1, c2) == (first, rtp(seq=2))
+
+
+def test_med_op_01_a_party_sends_with_the_number_the_relays_sdp_gave():
+    """Review of MED-OP-01, RFC 3264 6.1: the answerer "MUST use the payload
+    type numbers from the offer" to send. B answered 101 to the relay's 97,
+    so B sends 97, and 101 from B is not the call's codec."""
+    ms, ios, _, _ = make(users=(B, A, C))                   # B holds the floor
+    ms.set_payload_types(B, rx=PT, tx=101)
+    ms.set_payload_types(A, rx=PT, tx=96)
+    assert ms.on_rtp(B, remote(B)[0], rtp(pt=101)) is False
+    assert ms.counters["rtp_dropped_codec"] == 1
+    assert send_rtp(ms, B, pt=PT) is True
+    assert [d[1] for _, d in ios[A].rtp] == [96]
+    assert [d[1] for _, d in ios[C].rtp] == [PT]
+
+
+@pytest.mark.parametrize("pt", [-1, 128, 255, 300])
+def test_payload_types_rtp_cannot_carry_are_refused(pt):
+    """RFC 3550 5.1: 7 bits. A number past them would corrupt the marker bit
+    or raise inside the relay (review of MED-OP-01)."""
+    ms, _, _, _ = make()
+    with pytest.raises(ValueError):
+        ms.set_payload_types(B, rx=pt)
+    with pytest.raises(ValueError):
+        ms.set_payload_types(B, tx=pt)
+    assert (ms.endpoints[B].rx_pt, ms.endpoints[B].tx_pt) == (None, None)
+    with pytest.raises(ValueError):
+        MediaSession("x", fl.FloorControl(policy(), clock=Clock()), pt, Clock(),
+                     IO, lambda u: 100, FLOOR_CODEC)
+
+
+def test_payload_type_bounds_are_accepted():
+    ms, _, _, _ = make()
+    ms.set_payload_types(B, rx=0, tx=127)
+    assert (ms.endpoints[B].rx_pt, ms.endpoints[B].tx_pt) == (0, 127)
+    ms.set_payload_types(B, tx=5)                        # rx left as it was
+    assert (ms.endpoints[B].rx_pt, ms.endpoints[B].tx_pt) == (0, 5)
+    ms.set_payload_types(B, rx=3)                        # tx left as it was
+    assert (ms.endpoints[B].rx_pt, ms.endpoints[B].tx_pt) == (3, 5)
+
+
+def test_a_renumbered_party_is_heard_under_its_old_number_until_the_new_lands():
+    """Review of MED-OP-01 (RFC 3264 8): a party that re-offered the codec
+    as 100 sends with 97 until the relay's answer reaches it."""
+    ms, ios, _, _ = make()                                 # A holds the floor
+    ms.set_payload_types(A, rx=PT, tx=PT)
+    assert ms.endpoints[A].rx_prev is None
+    ms.set_payload_types(A, rx=PT, tx=PT)                  # same number: no grace
+    assert ms.endpoints[A].rx_prev is None
+    ms.set_payload_types(A, rx=100, tx=100)
+    assert ms.endpoints[A].rx_prev == PT
+    assert send_rtp(ms, A, pt=PT) is True                  # in flight: old number
+    assert send_rtp(ms, A, pt=100, seq=2) is True          # the new one lands
+    assert ms.endpoints[A].rx_prev is None
+    assert send_rtp(ms, A, pt=PT, seq=3) is False          # the old one is over
+    assert send_rtp(ms, A, pt=96, seq=4) is False          # never a number of A's
+    assert ms.counters["rtp_dropped_codec"] == 2
+    assert [d[1] for _, d in ios[B].rtp] == [PT, PT]       # B's own number, 97
+
+
+def test_the_first_number_given_leaves_no_grace():
+    ms, _, _, _ = make()
+    ms.set_payload_types(B, rx=101)
+    assert ms.endpoints[B].rx_prev is None
+
+
+def test_udp_loop_survives_a_raising_deliver():
+    """Review of MED-OP-01 (the reviewer's proof): one packet the relay
+    cannot handle does not end the party's receive thread."""
+    import socket as so
+    import time as t
+    from service.media import UdpEndpointIO
+    got = []
+
+    class Plane:
+        def bind(self):
+            s = so.socket(so.AF_INET, so.SOCK_DGRAM)
+            s.bind(("127.0.0.1", 0))
+            s.settimeout(0.1)
+            return s
+
+        def deliver(self, cid, uri, kind, src, data):
+            got.append(data)
+            if data == b"boom":
+                raise ValueError("boom")
+
+    io = UdpEndpointIO(Plane(), "c", "u")
+    tx = so.socket(so.AF_INET, so.SOCK_DGRAM)
+    try:
+        for d in (b"boom", b"ok"):
+            tx.sendto(d, ("127.0.0.1", io.rtp_port))
+            t.sleep(0.2)
+    finally:
+        io.close()
+        tx.close()
+    assert got == [b"boom", b"ok"]
 
 
 def test_media_from_the_wrong_source_or_malformed_is_dropped():

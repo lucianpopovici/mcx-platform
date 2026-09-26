@@ -17,7 +17,7 @@ one release image per profile around a core that is identical in every image,
 and the profile still named at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 1107 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 1208 tests pass and 20 boundary gates pass. `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -80,6 +80,7 @@ core/qos.py         TS 23.501 standardised 5QI table; 3GPP, never profile
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
 core/mcinfo.py      TS 24.379 annex F.1 MCPTT info body and multipart; no call types
+core/codec.py       the call's voice codec from the offer and the profile's order; payload layouts (RFC 4867), payload type numbers (RFC 3264)
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
 service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only SIP socket)
 service/media.py    RTP relay gated by the floor + floor control over UDP; MediaSession is pure, UdpMediaPlane owns the sockets
@@ -238,7 +239,8 @@ reasons are specific, not general:
   the real schema set instead of skipping. VP1-DOC-001 as a whole is still
   open on SVC-OP-03 (group configuration's source is deployment data, not the
   profile schema).
-- **VP1-MED-001**: enforcement exists, but the codec set is a placeholder (MED-OP-01).
+- **VP1-MED-001**: the codec set is decided (VP-OP-03): the same six for every
+  profile, one per call, no transcoding before R4. EVS parameters unverified (MED-OP-04).
 - **VP1-CC-001**: roles are named in the audit record but not independently
   deployable (SIP-OP-03).
 

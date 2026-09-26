@@ -211,15 +211,18 @@ class Admission:
 
 @dataclass(frozen=True)
 class Codec:
-    """A voice codec the deployment may carry. Opaque to the core: it is a
-    payload type and an rtpmap string, never a name the core recognises."""
+    """A voice codec the deployment may carry, by its SDP rtpmap name
+    (e.g. "AMR-WB/16000"). No payload type number: a dynamic codec's number
+    is each party's own choice (RFC 3264 6.1), and the relay maps between
+    them (core/codec.py, VP-OP-03 decided 2026-09-25)."""
 
-    payload_type: int
-    name: str            # SDP rtpmap value, e.g. "AMR-WB/16000"
+    name: str
 
 
 @dataclass(frozen=True)
 class Media:
+    # In the profile's preference order: the call's codec is the first of
+    # these that the caller's offer carries.
     codecs: Tuple[Codec, ...]
 
 
