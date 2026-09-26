@@ -15,6 +15,18 @@ their own file, named by MCX_NETWORK_FILE (required, no default):
     sip:
       trusted_cores: [core1.rail.example]  # [] when none is trusted
       core_ca: core-ca.pem                 # "none" when none is trusted
+    groups:                               # [] when there is none
+      - id: "grp:alpha"
+        display_name: "Alpha team"        # optional; the id when absent
+        members: ["sip:u1@rail.example", "sip:u2@rail.example"]
+    users: ["sip:u9@rail.example"]         # known users in no group; [] for none
+
+Groups and users are the network's too (SVC-OP-03, decided 2026-09-26): who
+exists and who belongs together is deployment data that the core must not
+learn, and it changes with the organisation, not with the service. Every group
+member is also a known user. Registering over SIP does not make a user known
+(SIP-OP-05): being registered says where a user can be reached, this file says
+who exists.
 
 Every key is required; an empty list or "none" is how a deployment says it has
 nothing there. The file and the core CA certificate are hashed together, and
@@ -44,9 +56,11 @@ from core.errors import StartupRefused
 from core.loader import content_hash
 
 from .config import is_fqdn
+from .groups import Group
 
 NONE = "none"
-KEYS = {"name", "version", "plmns", "cells", "sip"}
+KEYS = {"name", "version", "plmns", "cells", "sip", "groups", "users"}
+GROUP_KEYS = {"id", "display_name", "members"}
 SIP_KEYS = {"trusted_cores", "core_ca"}
 # "/" and "+" separate the parts of the audit identifier, so neither may occur.
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -61,6 +75,8 @@ class Network:
     plmns: Tuple[str, ...]
     cells: Mapping[str, Mapping[str, str]]
     trusted_cores: Tuple[str, ...]
+    groups: Tuple[Group, ...] = ()
+    users: Tuple[str, ...] = ()           # declared in no group; members are users too
     # Parsed once, and handed to the TLS context as data: what was checked
     # and hashed is what is trusted, whatever happens to the file later.
     core_ca: Optional[x509.Certificate] = field(default=None, compare=False)
@@ -215,6 +231,66 @@ def _cells(raw: Any, keys: Set[str], plmns: Set[str],
     return MappingProxyType(out)
 
 
+def _ids(raw: Any, where: str, defects: List[str]) -> Optional[List[str]]:
+    if not isinstance(raw, list):
+        defects.append(f"{where}: expected a list of ids")
+        return None
+    bad = [i for i, v in enumerate(raw) if not isinstance(v, str) or not v.strip()]
+    if bad:
+        defects.append(f"{where}: entries {bad} are not non-empty strings")
+        return None
+    return raw
+
+
+def _groups(raw_groups: Any, raw_users: Any,
+            defects: List[str]) -> Tuple[Tuple[Group, ...], Tuple[str, ...]]:
+    groups: List[Group] = []
+    if not isinstance(raw_groups, list):
+        defects.append("groups: expected a list ([] when there is no group)")
+        raw_groups = []
+    seen: Set[str] = set()
+    for i, g in enumerate(raw_groups):
+        where = f"groups[{i}]"
+        if not isinstance(g, dict) or not {"id", "members"} <= set(g) <= GROUP_KEYS:
+            defects.append(f"{where}: expected 'id', 'members' and optionally "
+                           "'display_name'")
+            continue
+        gid, name = g["id"], g.get("display_name")
+        if not isinstance(gid, str) or not gid.strip():
+            defects.append(f"{where}.id: expected a non-empty string")
+            continue
+        if gid in seen:
+            defects.append(f"{where}.id: {gid!r} already declared")
+            continue
+        seen.add(gid)
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            defects.append(f"{where}.display_name: expected a non-empty string")
+            continue
+        members = _ids(g["members"], f"{where}.members", defects)
+        if members is None:
+            continue
+        if not members:
+            defects.append(f"{where}.members: a group needs at least one member")
+            continue
+        # Deduplicated in declaration order, as the resolver does.
+        groups.append(Group(gid, name or gid, tuple(dict.fromkeys(members))))
+    users = _ids(raw_users, "users", defects)
+    if users is None:
+        users = []
+    both = sorted(seen & set(users))
+    if both:
+        # One identity cannot be both: a call to it would be private or a
+        # group call depending on which the resolver looked at first.
+        defects.append(f"users: {', '.join(map(repr, both))} also declared as "
+                       "group id(s)")
+    members = {m for g in groups for m in g.members}
+    as_member = sorted(seen & members)
+    if as_member:
+        defects.append(f"groups: {', '.join(map(repr, as_member))} listed as a "
+                       "member; a group's members are users")
+    return tuple(groups), tuple(dict.fromkeys(users))
+
+
 def load_network(path: Path, location_keys: Set[str],
                  user_ca: Optional[Path] = None) -> Network:
     """`user_ca` is MCX_SIP_TLS_CA when SIP is enabled: the core CA must be
@@ -295,6 +371,8 @@ def load_network(path: Path, location_keys: Set[str],
                 anchors = _pem_certificates(user_ca, "MCX_SIP_TLS_CA", defects) or ()
             ca = _load_ca(ca_path, anchors, defects)
 
+    groups, users = _groups(raw["groups"], raw["users"], defects)
+
     if defects:
         raise StartupRefused(f"network profile {path}: {len(defects)} defect(s)\n  "
                              + "\n  ".join(defects))
@@ -302,4 +380,4 @@ def load_network(path: Path, location_keys: Set[str],
     return Network(name=ident["name"], version=ident["version"],
                    content_hash=content_hash({"network": raw, "core_ca": ca_hash}),
                    plmns=tuple(sorted(plmns)), cells=cells, trusted_cores=trusted,
-                   core_ca=ca)
+                   groups=groups, users=users, core_ca=ca)

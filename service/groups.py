@@ -1,14 +1,9 @@
 """Group documents (PLT-GRP-001, VP1-DOC-001).
 
-Group configuration is deployment data, not profile data: the profile schema
-has no group section, and the core must not learn any deployment's groups.
-It is read from the file named by MCX_GROUPS_FILE:
-
-    groups:
-      - id: "grp:alpha"
-        display_name: "Alpha team"
-        members: ["sip:u1@mcptt.example", ...]
-    users: ["sip:u9@mcptt.example"]      # optional: known users in no group
+Group configuration is deployment data, not service profile data: the core
+must not learn any deployment's groups. It is part of the network profile
+(`groups` and `users`, service/network.py; SVC-OP-03, decided 2026-09-26), and
+counts toward its hash, so every audit record names the group data in force.
 
 Every group member is also a known user, so a private call to one resolves.
 Registering over SIP does not make a user known: being registered says where a
@@ -32,13 +27,8 @@ the rest.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from xml.etree import ElementTree as ET
-
-import yaml
-
-from core.errors import StartupRefused
 
 # TS 24.481 clause 7.2.2 and the example in clause A.2. The document namespace
 # is the OMA one; resource-lists appears only on <entry> child elements that
@@ -63,54 +53,6 @@ class Group:
     id: str
     display_name: str
     members: Tuple[str, ...]
-
-
-def load_users(path: Optional[Path]) -> Tuple[str, ...]:
-    """Explicitly declared users (the optional `users` key)."""
-    if path is None:
-        return ()
-    with path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
-    users = raw.get("users", []) if isinstance(raw, dict) else []
-    if not isinstance(users, list) or not all(isinstance(u, str) and u for u in users):
-        raise StartupRefused(f"groups file {path}: users must be a list of ids")
-    return tuple(users)
-
-
-def load_groups(path: Optional[Path]) -> Tuple[Group, ...]:
-    if path is None:
-        return ()
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
-    except (OSError, yaml.YAMLError) as exc:
-        raise StartupRefused(f"groups file {path}: {exc}") from exc
-    if not isinstance(raw, dict) or "groups" not in raw \
-            or not set(raw) <= {"groups", "users"} \
-            or not isinstance(raw["groups"], list):
-        raise StartupRefused(
-            f"groups file {path}: expected a mapping with 'groups' and "
-            "optionally 'users'")
-    groups: List[Group] = []
-    seen = set()
-    for i, g in enumerate(raw["groups"]):
-        where = f"groups file {path}: groups[{i}]"
-        if not isinstance(g, dict) or not set(g) <= {"id", "display_name", "members"}:
-            raise StartupRefused(f"{where}: unknown or malformed keys")
-        gid = g.get("id")
-        members = g.get("members")
-        if not isinstance(gid, str) or not gid:
-            raise StartupRefused(f"{where}: id must be a non-empty string")
-        if gid in seen:
-            raise StartupRefused(f"{where}: duplicate group id {gid!r}")
-        if not isinstance(members, list) or not members \
-                or not all(isinstance(m, str) and m for m in members):
-            raise StartupRefused(f"{where}: members must be a non-empty list of ids")
-        seen.add(gid)
-        # Deduplicate in declaration order, as the resolver does.
-        ordered = tuple(dict.fromkeys(members))
-        groups.append(Group(gid, str(g.get("display_name") or gid), ordered))
-    return tuple(groups)
 
 
 def _q(ns: str, tag: str) -> str:

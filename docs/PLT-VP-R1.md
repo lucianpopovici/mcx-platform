@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.25 (draft)
+**Version:** 0.26 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -342,7 +342,7 @@ runs: Kamailio relays it statefully, and Asterisk mirrors it on its own leg.
 | VP1-REL-005 | Wrong release is not malformed | A Rel-19 message decoded at Rel-17 raises `ReleaseRefused`, counts `floor_wrong_release`, and does not count `floor_malformed` |
 | VP1-REL-007 | Signalling warning codes are release-gated | A refusal whose TS 24.379 warning code post-dates the configured release carries the explanatory phrase without the number, keeps its 4xx/5xx status, and does not raise |
 | VP1-REL-006 | Release is in the audit record | Every audit record's identity carries the profile triple and the release |
-| VP1-DOC-001 | Group documents served | Group documents retrievable over HTTP per TS 24.481; schema-valid; content matches the profile's group configuration |
+| VP1-DOC-001 | Group documents served | Group documents retrievable over HTTP per TS 24.481; schema-valid; content matches the network profile's group configuration (SVC-OP-03) |
 
 ### 7.5 TS-OAM — observability (ENV-INT)
 
@@ -517,13 +517,13 @@ not by relaxing its pass criterion.
 | VP-OP-05 | Define the production indicator referenced by PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008. Three requirements depend on a term not yet specified. | VP1-LOAD-005, VP1-SIG-007 |
 | SVC-OP-01 | ~~Full XSD validation of the OMA-defined remainder needs RFC 4826's `resource-lists.xsd`.~~ **CLOSED 2026-09-22 (PLT-CONF-AUDIT v1.3, 4.27).** The file is in `docs/OMA/`, transcribed from RFC 4826 §3.2 (not from its `schemaLocation` URL, which serves IANA's namespace-registry placeholder page, not the schema). `test_the_group_document_is_schema_valid` runs instead of skipping and passes. History: narrowed in v1.2 (4.27) to this one file; originally narrowed in v0.3 (CA-04) from "the schema was never obtained" to needing OMA-TS-XDM_Group-V1_1_1, which turned out not to be the actual blocker once the OMA-SUP-XSD schema files themselves were in `docs/OMA/`. | closed |
 | SVC-OP-02 | Restart semantics for sessions that were `established` when the process died: records survive, but signalling and media state do not. Should they be released with a recovery cause, or resumed? Needs the SIP transport (task 2) to answer. | VP1-OAM-005 (beyond "no record lost") |
-| SVC-OP-03 | Group configuration has no home in the profile schema, so it is read from deployment data (`MCX_GROUPS_FILE`). Confirm that is intended; "matches the profile's group configuration" in VP1-DOC-001 is otherwise unsatisfiable literally. | VP1-DOC-001 |
+| SVC-OP-03 | **CLOSED 2026-09-26 (decided: groups stay in the network profile).** The groups and the known users are keys of the network profile (`groups`, `users`; PLT-ICD-001 ICD-NET-005), required like its other keys (`[]` for none) and checked with them, every defect at once. `MCX_GROUPS_FILE` is refused if set. The groups count toward the network hash, so every audit record names the group data in force. VP1-DOC-001 reads "the network profile's group configuration". Tests in `tests/test_network.py`; mutation: every non-equivalent mutant killed (three equivalents: a defect is already recorded, and any defect refuses the file). | closed |
 | SVC-OP-04 | No stub identity provider existed in the code. `MCX_IDMS=stub` is introduced as the explicit selector; it is required (no default) and refused under the production indicator. | VP1-SIG-007 |
 | SIP-OP-01 | **CLOSED 2026-09-24.** Kamailio 5.7.4 and Asterisk 20.6 are both installable in the environment and both were exercised over real TLS (§7.1.1). The earlier statement that no third-party core was available had stopped being true without anyone rechecking it. | VP1-SIG-001 |
 | SIP-OP-02 | TLS encrypts the wire, so a capture cannot show MC feature tags without session keys. The interoperability harness keeps every message at both user agents in plaintext (`transcript.txt`), and Kamailio and Asterisk log what they relayed, which together show the feature tags crossing a third-party core. **Still owed:** a keylog-decrypted packet capture. It is independent evidence of the wire itself, and nothing above replaces it. | VP1-SIG-001 evidence |
 | SIP-OP-03 | Only the combined and controlling-only role sets start; `participating` alone is refused because a participating function must relay to a remote controlling function (MCPTT-4), which is not built. Roles are named in the audit record, but they are not yet independently deployable. | VP1-CC-001 (open) |
 | SIP-OP-04 | Not built: dial-out to a next hop, so ROUTE_EXTERNAL and ROUTE_PARTNER legs fail 480. (Corrected 2026-09-25: CANCEL was built with SIP-OP-14. Media anchoring was built with the media plane, so the platform no longer forwards the initiator's SDP verbatim; it anchors media at its own ports.) | PLT-SIG-001 completeness |
-| SIP-OP-05 | Being registered does not make a user known to the resolver; users are provisioned from the groups file (group members plus an optional `users:` list). Confirm whether third-party registration should provision. | VP1-CC-003 |
+| SIP-OP-05 | Being registered does not make a user known to the resolver; users are provisioned from the network profile (group members plus its `users` list, SVC-OP-03). Confirm whether third-party registration should provision. | VP1-CC-003 |
 | FRMCS-OP-02 | **CLOSED (PLT-CONF-AUDIT v1.7, 4.34).** Table J-1's bands were read from the document: FRS 10.3/10.4 are band D, so driver-to-controller voice now ranks with shunting instead of falling through to the catch-all below ATO. Originally: **From PLT-CONF-AUDIT v1.5 (4.32).** FRS table J-1 spreads this profile's single `voice-operational` application (FRS 10.3, 10.4, 10.10, 10.23, 10.2) across at least three of its seven priority bands, and it resolves to the catch-all decision at level 30 — below `ato`. So driver-to-controller voice ranks below automatic train operation data, inverting table J-1 a second time. Unlike the ATO/shunting swap this cannot be fixed by changing a number: the application vocabulary has to be split to match the bands, which changes what priority decisions exist and what the hooks return. A profile design change with safety-case consequences. | FRMCS profile fitness |
 | SHUNT-OP-01 | **From PLT-CONF-AUDIT v1.5 (4.31).** SRS Annex A note (1) lists FRS 10.8 (shunting voice) and 11.12 (shunting data) among the applications "not yet covered", so the SRS gives shunting no communication session, no 5QI and no ARP. `shunting-group` therefore carries no bearer rule of its own and a test asserts it stays that way. Its PRIORITY is sound — FRS table J-1 does cover 10.8 — only the QoS assignment is absent. | FRMCS profile completeness |
 | CA-18 | **CLOSED (PLT-CONF-AUDIT v1.6, 4.33).** Annex A table A.1-1 read by hand. Emergency Voice is ARP 2 and ATP Regular Data ARP 4; the profile carried 1 and 2. ARP 1 is reserved for FRMCS Signalling, so the emergency call had been out-ranking the control plane that establishes it. Whole table now pinned. | closed |
@@ -581,6 +581,7 @@ not by relaxing its pass criterion.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
+| 0.26 | 2026-09-26 | SVC-OP-03 closed (decided): groups and users are part of the network profile; `MCX_GROUPS_FILE` refused. VP1-DOC-001 names the network profile. |
 | 0.25 | 2026-09-26 | TS 26.179 read from docs/3GPP: citations confirmed; MED-OP-03 and MED-OP-05 annotated (4.2.1, 4.1.2, 4.1.3). |
 | 0.24 | 2026-09-26 | MED-OP-04 closed: the EVS parameters read from TS 26.445 annex A; `cmr` added as must-match. |
 | 0.23 | 2026-09-26 | VP-OP-03 decided and MED-OP-01 closed: one codec set for every profile (EVS, AMR-WB, AMR, G.722, PCMA, PCMU) in order of preference, chosen per call without transcoding, each party numbering it its own way. MED-OP-03 (transcoding, R4), MED-OP-04 (EVS parameters unverified) and MED-OP-05 (offer/answer limits) opened. |

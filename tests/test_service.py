@@ -33,12 +33,7 @@ from service.runtime import Health, build_runtime, fail_closed_platform  # noqa:
 from tests.network_fixture import network_yaml  # noqa: E402
 
 U = [f"sip:u{i}@mcptt.example" for i in range(4)]
-GROUPS_YAML = f"""
-groups:
-  - id: "grp:alpha"
-    display_name: "Alpha team"
-    members: {json.dumps(U)}
-"""
+GROUPS = [{"id": "grp:alpha", "display_name": "Alpha team", "members": U}]
 
 
 class Clock:
@@ -52,13 +47,17 @@ class Clock:
 
 @pytest.fixture
 def env(tmp_path):
-    g = tmp_path / "groups.yaml"
-    g.write_text(GROUPS_YAML)
     return {"MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",
             "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100",
-            "MCX_NETWORK_FILE": str(network_yaml(tmp_path)),
-            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_GROUPS_FILE": str(g),
+            "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
+            "MCX_DATA_DIR": str(tmp_path / "data"),
             "MCX_HTTP_PORT": "0"}
+
+
+def with_network(env, fname, **kw):
+    """`env` with a network profile of its own, beside the fixture's."""
+    net = network_yaml(Path(env["MCX_NETWORK_FILE"]).parent, fname=fname, **kw)
+    return {**env, "MCX_NETWORK_FILE": str(net)}
 
 
 def permissive():
@@ -164,10 +163,10 @@ def test_no_default_for_data_dir_or_idms(env):
 
 
 def test_group_member_outside_declared_domain_refuses_start(env, tmp_path):
-    Path(env["MCX_GROUPS_FILE"]).write_text(
-        'groups:\n  - {id: "grp:x", members: ["sip:a@elsewhere.example"]}\n')
+    e = with_network(env, "elsewhere.yaml", groups=[
+        {"id": "grp:x", "members": ["sip:a@elsewhere.example"]}])
     with pytest.raises(Exception, match="declared domains"):
-        build_runtime(env, Clock())
+        build_runtime(e, Clock())
 
 
 # -- VP1-OAM-002: health and readiness ----------------------------------------
@@ -405,10 +404,10 @@ def test_check_rendered_detects_mismatch():
         groups_mod.check_rendered(groups_mod.Group("grp:a", "A", ("sip:a@x",)), doc)
 
 
-def test_malformed_groups_file_refuses_start(env):
-    Path(env["MCX_GROUPS_FILE"]).write_text("groups:\n  - {id: g, members: []}\n")
+def test_a_malformed_group_refuses_start(env):
+    e = with_network(env, "bad-group.yaml", groups=[{"id": "g", "members": []}])
     with pytest.raises(StartupRefused, match="members"):
-        build_runtime(env, Clock())
+        build_runtime(e, Clock())
 
 
 # -- PLT-CONF-AUDIT CA-04 ------------------------------------------------------
@@ -570,8 +569,8 @@ def test_health_says_which_call_types_no_client_can_request(env):
 
 def _frmcs(env, release, strict):
     """The railway profile, whose group calls are ad hoc and so exist in
-    TS 24.379 only from Rel-18. No groups file: its members are mcx users."""
-    e = {k: v for k, v in env.items() if k != "MCX_GROUPS_FILE"}
+    TS 24.379 only from Rel-18. No groups: the fixture's members are mcx users."""
+    e = with_network(env, "frmcs-net.yaml")
     e.update({"MCX_PROFILE": "frmcs", "MCX_RELEASE": release,
               "MCX_STRICT_RELEASE": strict})
     return e
