@@ -32,10 +32,11 @@ Two things are protocol knowledge and live here, read from the RFCs:
     Absent parameters take their defaults (RFC 4867 8.1: 0 for octet-align,
     crc and robust-sorting; interleaving absent means none).
 
-TS 26.179 (read as ETSI TS 126 179 V19.0.0, not in docs/3GPP): 4.1.1, MCPTT
-clients shall support AMR-WB and may support EVS; 4.1.3, the RFC 4867
-bandwidth-efficient format shall be supported. So when a caller offers AMR or
-AMR-WB in both layouts, the bandwidth-efficient one is chosen.
+TS 26.179 (docs/3GPP; V13.2.0 and V19.0.0 read the same): 4.1.1, MCPTT
+clients shall support AMR-WB and may support EVS; 4.1.2, the codec preference
+order is set by operator policy (here, the profile's order); 4.1.3, the RFC
+4867 bandwidth-efficient format shall be supported. So when a caller offers
+AMR or AMR-WB in both layouts, the bandwidth-efficient one is chosen.
 """
 
 from __future__ import annotations
