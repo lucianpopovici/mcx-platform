@@ -29,5 +29,4 @@ Encrypted or malformed location reports never refuse a call. They leave it witho
 ## Still open
 ICD-OP-12: annex F.3 writes a PLMN as six digits and doesn't say how a two-digit MNC fills three. The
 platform compares the six digits as written and doesn't guess. Settle this before any two-digit-MNC
-deployment. SVC-OP-03: group configuration is also deployment data (`MCX_GROUPS_FILE`), which is not
-yet confirmed as intended.
+deployment. SVC-OP-03 was closed on 2026-09-26: groups and users joined this file (decisions/0012).

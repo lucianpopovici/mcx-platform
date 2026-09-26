@@ -18,8 +18,8 @@ PRF-OP-01:
   note: Profile-owner call. TS 24.379 cannot distinguish two pairs of call types; do not invent a signature.
 OP-06:
   owner: lucian
-  note: Same question as VP-OP-03 and MED-OP-01 (codec set per profile). Blocks VP1-MED-001.
-  see: [VP-OP-03, MED-OP-01]
+  note: Decided 2026-09-25 with VP-OP-03 and MED-OP-01 (decisions/0011).
+  see: [VP-OP-03, MED-OP-01, decisions/0011-codec-set-one-codec-per-call.md]
 VP-OP-05:
   owner: lucian
   note: The production indicator. Three requirements (PLT-GEN-005, PLT-IDM-007, PLT-SEC-008) depend on it.
