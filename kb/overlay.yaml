@@ -22,7 +22,12 @@ OP-06:
   see: [VP-OP-03, MED-OP-01, decisions/0011-codec-set-one-codec-per-call.md]
 VP-OP-05:
   owner: lucian
-  note: The production indicator. Three requirements (PLT-GEN-005, PLT-IDM-007, PLT-SEC-008) depend on it.
+  note: >-
+    The production indicator. Three requirements (PLT-GEN-005, PLT-IDM-007, PLT-SEC-008) depend on it.
+    2026-09-26: kept open in R1 with options A/B/C written into the VP; the owner has not chosen.
+  trap: >-
+    Making MCX_ENV required does not stop the administrator who configures the stubs from switching it;
+    do not present option A as closing the risk, only the forgotten-variable case.
 FRMCS-OP-01:
   owner: uic
   note: >-
