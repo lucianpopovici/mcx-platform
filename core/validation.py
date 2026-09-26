@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import mcinfo
+from . import codec as codec_mod
 from . import model
 from . import qos as qos_spec
 from .errors import CORE_ORIGINATED, ProfileValidationError
@@ -1045,8 +1046,10 @@ def _admission(c: _Checker, node: Any, urgencies: Set[str]) -> model.Admission:
 
 
 def _media(c: _Checker, node: Any) -> model.Media:
-    """PLT-MED-001: the codecs the deployment may carry. Static payload types
-    (0-95) and dynamic ones (96-127) are both valid; the pair must be unique."""
+    """PLT-MED-001: the codecs the deployment may carry, by rtpmap name, in
+    the profile's order of preference (VP-OP-03, decided 2026-09-25). A
+    payload type number is not part of it: dynamic codecs are numbered by
+    each party (RFC 3264 6.1), and the static ones by RFC 3551."""
     p = "media"
     if not c.keys(p, node, allowed=("codecs",), required=("codecs",)):
         return model.Media(())
@@ -1056,26 +1059,27 @@ def _media(c: _Checker, node: Any) -> model.Media:
         c.add(cp, "bad-value", "expected a non-empty list of codecs")
         return model.Media(())
     out: List[model.Codec] = []
-    seen: Set[int] = set()
+    seen: Set[Tuple[str, int, int]] = set()
     for i, item in enumerate(raw):
         ip = f"{cp}[{i}]"
-        if not c.keys(ip, item, allowed=("payload_type", "name"),
-                      required=("payload_type", "name")):
+        if not c.keys(ip, item, allowed=("name",), required=("name",)):
             continue
-        pt = c.typed(ip, item, "payload_type", int)
         name = c.typed(ip, item, "name", str)
-        if pt is None or name is None:
+        if name is None:
             continue
-        if not 0 <= pt <= 127:
-            c.add(f"{ip}.payload_type", "bad-value", "must be in 0..127")
-            continue
-        if not name.strip() or any(ch in name for ch in " \r\n"):
+        if not codec_mod.NAME.match(name):
             c.add(f"{ip}.name", "bad-value",
-                  "must be a non-empty rtpmap value with no whitespace")
+                  "must be an rtpmap name, encoding/clock[/channels], "
+                  "e.g. AMR-WB/16000")
             continue
-        if pt in seen:
-            c.add(f"{ip}.payload_type", "duplicate", f"payload type {pt} repeated")
+        key = codec_mod.key_of(name)
+        if key[0] in codec_mod.NOT_VOICE:
+            c.add(f"{ip}.name", "bad-value",
+                  f"{name} carries no voice and cannot be a call's codec")
             continue
-        seen.add(pt)
-        out.append(model.Codec(pt, name))
+        if key in seen:
+            c.add(f"{ip}.name", "duplicate", f"codec {name} repeated")
+            continue
+        seen.add(key)
+        out.append(model.Codec(name))
     return model.Media(tuple(out))

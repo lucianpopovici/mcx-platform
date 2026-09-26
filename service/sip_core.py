@@ -36,12 +36,12 @@ from core.session import Session, Signal, SignalType
 from core.sip import (
     ALLOW, Adapter, DialogContext, Headers, InboundGuard, ReceivedResponse, Request,
     RegistrationStore, Response, SipError, Status, build_sdp, canonical_uri,
-    negotiate,
     parse_message, parse_sdp,
     OPTION_TIMER, SUPPORTED_ON_ANSWER, SUPPORTED_ON_PROVISIONAL, allows,
     parse_min_se, uac_session_timer, uas_session_timer,
 )
 
+from core import codec as codec_mod
 from core import mcinfo
 from core.mcinfo import sdp_of
 
@@ -112,7 +112,9 @@ class Call:
     bye_sent_to_initiator: bool = False
     cseq_out: int = 0
     media: Optional[MediaSession] = None
-    payload_type: Optional[int] = None
+    # The call's codec (core/codec.py): chosen from the caller's offer by the
+    # profile's preference, the one every party uses (VP-OP-03).
+    choice: Any = None
     media_error: Optional[str] = None
     # RFC 3261 12.1.1, from the INVITE: where requests toward the initiator go.
     remote_target: str = ""
@@ -284,8 +286,8 @@ class SipCore:
         else:
             media.lock = self.lock
         self.media = media
-        self._codecs = {c.payload_type: c.name
-                        for c in runtime.loaded.profile.media.codecs}
+        # By rtpmap name, in preference order (VP-OP-03, decided 2026-09-25).
+        self._preference = tuple(c.name for c in runtime.loaded.profile.media.codecs)
         # How long an invited member may ring, per call type (SIP-OP-15).
         self._no_answer_s = {ct.id: ct.no_answer_s
                              for ct in runtime.loaded.profile.call_types}
@@ -584,16 +586,19 @@ class SipCore:
         except SipError as exc:
             call.media_error = f"unusable SDP offer: {exc}"
             return
-        pt = negotiate(offer, tuple(self._codecs))
-        if pt is None:
+        choice = codec_mod.choose(offer, self._preference)
+        if choice is None:
             call.media_error = "no codec in the offer is declared by the profile"
             return
+        pt = choice.offered.pt
         ms = self.media.open(call.cid, session.floor, pt,
                              self._priority_of(session))
         ms.add(call.initiator)
         ms.set_remote(call.initiator, (info.address, info.audio_port),
                       (info.address, info.floor_port) if info.floor_port else None)
-        call.media, call.payload_type = ms, pt
+        # The relay's answer uses the caller's own number (RFC 3264 6.1).
+        ms.set_payload_types(call.initiator, rx=pt, tx=pt)
+        call.media, call.choice = ms, choice
 
     def _priority_of(self, session: Session):
         """A participant's floor priority, from IF-PRI (PLT-FC-005)."""
@@ -614,9 +619,17 @@ class SipCore:
         return priority
 
     def _relay_sdp(self, call: Call, uri: str) -> str:
+        """The relay's SDP toward one party: the call's codec, under the
+        number the relay receives it with from that party (the caller's
+        number, until that party offers another), with the caller's format
+        parameters -- the ones that must match end to end are the same for
+        every party."""
         ep = call.media.endpoints[uri]                       # type: ignore[union-attr]
+        choice = call.choice
+        pt = ep.rx_pt if ep.rx_pt is not None else choice.offered.pt
         return build_sdp(self.media.address, ep.rtp_port, ep.floor_port,
-                         [(call.payload_type, self._codecs[call.payload_type])])
+                         [(pt, choice.offered.name)],
+                         {pt: choice.offered.fmtp} if choice.offered.fmtp else None)
 
     def _invite_leg(self, call: Call, sig: Signal) -> None:
         if call.media_error:
@@ -636,6 +649,9 @@ class SipCore:
         sdp = _offer_of(call.invite)
         if call.media is not None:
             call.media.add(target)
+            # The callee sends with the numbers of the relay's offer (RFC
+            # 3264 6.1): the caller's number.
+            call.media.set_payload_types(target, rx=call.choice.offered.pt)
             sdp = self._relay_sdp(call, target)
         secs = self._no_answer_s.get(call.sr.call_type)
         leg.sig, leg.offer_sdp = sig, sdp
@@ -781,7 +797,10 @@ class SipCore:
         if call.media is not None:
             try:
                 info = parse_sdp(resp.body)
-                usable = call.payload_type in info.payload_types
+                # The call's codec, in the same payload layout, under
+                # whatever number the callee chose (core/codec.py).
+                leg_pt = codec_mod.match(resp.body, call.choice)
+                usable = leg_pt is not None
             except SipError:
                 usable = False
             if not usable:
@@ -792,6 +811,9 @@ class SipCore:
                 leg.state = "failed"
                 self._maybe_fail(call, 488)
                 return
+            # The relay sends to the callee with the answer's number (RFC
+            # 3264 5.1); the callee still sends with the offer's.
+            call.media.set_payload_types(leg.uri, tx=leg_pt)
             call.media.set_remote(leg.uri, (info.address, info.audio_port),
                                   (info.address, info.floor_port)
                                   if info.floor_port else None)
@@ -1352,21 +1374,28 @@ class SipCore:
     def _answer_offer(self, call: Call, leg: Optional[Leg], offer: str) -> Optional[str]:
         """The answer to an in-dialog offer, or None (488)."""
         if call.media is not None:
-            if not self._accept_remote(call, leg, offer):
+            if not self._accept_remote(call, leg, offer, is_offer=True):
                 return None
             return self._our_sdp(call, leg)
         original = leg.remote_sdp if leg is not None else _offer_of(call.invite)
         return self._our_sdp(call, leg) if _same_sdp(offer, original) else None
 
-    def _accept_remote(self, call: Call, leg: Optional[Leg], sdp: str) -> bool:
+    def _accept_remote(self, call: Call, leg: Optional[Leg], sdp: str,
+                       is_offer: bool) -> bool:
         """Point the relay at the address `sdp` gives, if it keeps the
-        call's codec (there is no transcoding)."""
+        call's codec (there is no transcoding). The relay sends with the
+        number `sdp` gives (RFC 3264 5.1, 6.1); when `sdp` is the party's
+        offer, the relay's answer uses that number too (6.1), and so the
+        party sends with it."""
         try:
             info = parse_sdp(sdp)
         except SipError:
             return False
-        if call.payload_type not in info.payload_types:
+        pt = codec_mod.match(sdp, call.choice)
+        if pt is None:
             return False
+        call.media.set_payload_types(                        # type: ignore[union-attr]
+            leg.uri if leg else call.initiator, tx=pt, rx=pt if is_offer else None)
         call.media.set_remote(                               # type: ignore[union-attr]
             leg.uri if leg else call.initiator, (info.address, info.audio_port),
             (info.address, info.floor_port) if info.floor_port else None)
@@ -1379,7 +1408,7 @@ class SipCore:
         sdp = self._offer_in(message)
         if not sdp or call.ended or call.media is None:
             return
-        if not self._accept_remote(call, leg, sdp):
+        if not self._accept_remote(call, leg, sdp, is_offer=False):
             log.warning("unusable SDP answer on call %s ignored", call.cid)
 
     def _send_refresh(self, call: Call, leg: Optional[Leg]) -> None:

@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.errors import StartupRefused  # noqa: E402
 from core.sip import (Headers, ReceivedResponse, SessionTimer, SipError,  # noqa: E402
-                      parse_min_se, parse_session_expires, uac_session_timer,
+                      parse_min_se, parse_sdp, parse_session_expires, uac_session_timer,
                       uas_session_timer)
 from service.session_timer import DialogTimer  # noqa: E402
 from service.sip_core import _tag  # noqa: E402
@@ -338,6 +338,144 @@ def test_a_re_invite_changing_the_codec_is_488_and_changes_nothing(core, rt, wor
     assert responses(world[U[0]])[-1].code == 488
     assert core.calls["r5"].media.endpoints[U[0]].remote_rtp == ("10.0.0.1", 49170)
     assert rt.manager.session("r5").state.value == "established"
+
+
+def test_a_re_invite_renumbering_the_codec_is_accepted_under_the_new_number(core, rt, world):
+    """MED-OP-01: the same codec under another payload type number is the
+    same call codec; the relay's answer uses the offer's number (RFC 3264
+    6.1), and both directions use it from then on."""
+    call(core, world, "r5b")
+    other = SDP.replace("RTP/AVP 0", "RTP/AVP 100").replace("a=rtpmap:0 PCMU/8000",
+                                                            "a=rtpmap:100 PCMU/8000")
+    assert other != SDP
+    core.on_bytes(from_initiator("INVITE", "r5b", 2, body=other, ctype="application/sdp"),
+                  world[U[0]])
+    last = responses(world[U[0]])[-1]
+    assert last.code == 200
+    assert parse_sdp(last.body).payload_types == (100,)
+    ep = core.calls["r5b"].media.endpoints[U[0]]
+    assert (ep.rx_pt, ep.tx_pt) == (100, 100)
+
+
+# -- MED-OP-01 in dialog, with a codec whose payload layout can differ --------
+
+AMRWB = ("v=0\r\no=- 0 0 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n"
+         "m=audio 49170 RTP/AVP 97\r\na=rtpmap:97 AMR-WB/16000\r\n"
+         "a=fmtp:97 mode-set=0,1,2\r\n")
+
+
+def amr_sdp(pt=97, fmtp="", host="10.0.0.1"):
+    body = AMRWB.replace("10.0.0.1", host).replace("RTP/AVP 97", f"RTP/AVP {pt}") \
+        .replace("rtpmap:97", f"rtpmap:{pt}").replace("a=fmtp:97 mode-set=0,1,2\r\n", "")
+    return body + (f"a=fmtp:{pt} {fmtp}\r\n" if fmtp else "")
+
+
+def amr_call(core, world, cid, callee_pt=101):
+    """u0 calls u1 (private) with AMR-WB as 97; u1 answers it as
+    `callee_pt`."""
+    from tests import mcpttinfo_fixture as mcf
+    core.on_bytes(msg("INVITE", LOCAL, cid, 1, U[0], LOCAL,
+                      body=mcf.body_for("private", U[1], AMRWB),
+                      ctype=mcf.CONTENT_TYPE, extra=list(TIMER)), world[U[0]])
+    leg = world[U[1]].requests("INVITE")[-1]
+    core.on_bytes(answer(leg, 200, amr_sdp(callee_pt, host="10.0.0.2"),
+                         extra=list(CALLEE_REFRESHES)), world[U[1]])
+    (ok,) = responses(world[U[0]], 200)
+    core.on_bytes(msg("ACK", contact_uri(ok.headers.get("Contact")), cid, 1, U[0], LOCAL,
+                      branch=f"z9hG4bKack{cid}", to_tag=_tag(cid)), world[U[0]])
+    return ok, leg
+
+
+def pts(core, cid, uri):
+    ep = core.calls[cid].media.endpoints[uri]
+    return ep.rx_pt, ep.tx_pt, ep.remote_rtp
+
+
+def test_amr_call_numbers(core, world):
+    ok, leg = amr_call(core, world, "m1")
+    assert "a=fmtp:97 mode-set=0,1,2" in leg.body
+    assert pts(core, "m1", U[0]) == (97, 97, ("10.0.0.1", 49170))
+    assert pts(core, "m1", U[1]) == (97, 101, ("10.0.0.2", 49170))
+
+
+@pytest.mark.parametrize("fmtp", ["octet-align=1", "crc=1", "interleaving=4"])
+def test_a_re_invite_changing_the_payload_layout_is_488_and_changes_nothing(core, world, fmtp):
+    amr_call(core, world, "m2")
+    before = pts(core, "m2", U[0])
+    core.on_bytes(from_initiator("INVITE", "m2", 2, body=amr_sdp(97, fmtp, "10.7.7.7"),
+                                 ctype="application/sdp"), world[U[0]])
+    assert responses(world[U[0]])[-1].code == 488
+    assert pts(core, "m2", U[0]) == before
+
+
+def test_a_callee_update_renumbering_is_answered_with_its_number(core, world):
+    _, leg = amr_call(core, world, "m3")
+    core.on_bytes(from_callee("UPDATE", leg, 2, body=amr_sdp(102, host="10.0.0.9"),
+                              ctype="application/sdp"), world[U[1]])
+    r = responses(world[U[1]], method="UPDATE")[-1]
+    assert r.code == 200 and parse_sdp(r.body).payload_types == (102,)
+    assert pts(core, "m3", U[1]) == (102, 102, ("10.0.0.9", 49170))
+    assert pts(core, "m3", U[0]) == (97, 97, ("10.0.0.1", 49170))   # untouched
+
+
+def test_a_callee_update_changing_the_layout_is_488_and_changes_nothing(core, world):
+    _, leg = amr_call(core, world, "m4")
+    before = pts(core, "m4", U[1])
+    core.on_bytes(from_callee("UPDATE", leg, 2, body=amr_sdp(101, "octet-align=1", "10.0.0.9"),
+                              ctype="application/sdp"), world[U[1]])
+    assert responses(world[U[1]], method="UPDATE")[-1].code == 488
+    assert pts(core, "m4", U[1]) == before
+
+
+def test_an_ack_answer_renumbering_changes_only_what_the_relay_sends(core, world):
+    """The relay offered (offerless re-INVITE) its receive number, 97; the
+    answer's 99 is what the caller wants to receive (RFC 3264 5.1), and the
+    caller still sends 97 (6.1)."""
+    amr_call(core, world, "m5")
+    core.on_bytes(from_initiator("INVITE", "m5", 2), world[U[0]])
+    offer = responses(world[U[0]])[-1]
+    assert offer.code == 200 and parse_sdp(offer.body).payload_types == (97,)
+    assert "a=fmtp:97 mode-set=0,1,2" in offer.body
+    core.on_bytes(msg("ACK", LOCAL, "m5", 2, U[0], LOCAL, to_tag=_tag("m5"),
+                      branch="z9hG4bKm5ack2", body=amr_sdp(99, host="10.8.8.8"),
+                      ctype="application/sdp"), world[U[0]])
+    assert pts(core, "m5", U[0]) == (97, 99, ("10.8.8.8", 49170))
+
+
+def test_the_relays_later_offer_to_a_callee_carries_its_receive_number(core, world):
+    """The callee answered 101 to the relay's 97 and sends 97: an offer the
+    relay makes later keeps 97 (RFC 3264 8.3.2), not the callee's 101."""
+    _, leg = amr_call(core, world, "m5b")
+    core.on_bytes(from_callee("INVITE", leg, 2), world[U[1]])
+    r = responses(world[U[1]])[-1]
+    assert r.code == 200 and parse_sdp(r.body).payload_types == (97,)
+    assert "a=rtpmap:97 AMR-WB/16000" in r.body
+    assert pts(core, "m5b", U[1])[:2] == (97, 101)
+
+
+def test_an_ack_answer_changing_the_layout_is_ignored(core, world):
+    amr_call(core, world, "m6")
+    before = pts(core, "m6", U[0])
+    core.on_bytes(from_initiator("INVITE", "m6", 2), world[U[0]])
+    core.on_bytes(msg("ACK", LOCAL, "m6", 2, U[0], LOCAL, to_tag=_tag("m6"),
+                      branch="z9hG4bKm6ack2", body=amr_sdp(99, "crc=1", "10.8.8.8"),
+                      ctype="application/sdp"), world[U[0]])
+    assert pts(core, "m6", U[0]) == before
+
+
+@pytest.mark.parametrize("m_line", ["RTP/AVP 300", "RTP/AVP 128", "RTP/AVP ²"])
+def test_a_re_offer_with_a_number_rtp_cannot_carry_is_488(core, world, m_line):
+    """Review of MED-OP-01: a number outside 0..127 (or not ASCII digits)
+    names nothing; it neither crashes the relay nor is accepted."""
+    amr_call(core, world, "m7")
+    before = pts(core, "m7", U[0])
+    pt = m_line.split()[-1]
+    body = AMRWB.replace("RTP/AVP 97", m_line).replace("rtpmap:97", f"rtpmap:{pt}") \
+        .replace("fmtp:97", f"fmtp:{pt}")
+    core.on_bytes(from_initiator("INVITE", "m7", 2, body=body, ctype="application/sdp"),
+                  world[U[0]])
+    assert responses(world[U[0]])[-1].code == 488
+    assert pts(core, "m7", U[0]) == before
 
 
 def test_an_offerless_re_invite_gets_our_offer_and_its_ack_the_answer(core, world):

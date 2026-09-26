@@ -1,8 +1,8 @@
 # Mission-critical services platform — Software Requirements Specification
 
 **Document:** PLT-SRS
-**Version:** 0.3 (draft)
-**Date:** 2026-09-25
+**Version:** 0.4 (draft)
+**Date:** 2026-09-26
 **Status:** Draft for review — not baselined
 
 ---
@@ -578,7 +578,7 @@ requirements below are written as constraints on what a partner cannot do.
 | OP-03 | Determine software safety integrity level applicable to the FRMCS deployment, and which components fall in scope | — | R3 start |
 | OP-04 | Decide whether MCVideo is in the target scope or is deferred indefinitely | — | R4 planning |
 | OP-05 | Select the SIP core, IdMS and KMS products, and confirm each supports the interfaces in §3.1 | — | R2 start |
-| OP-06 | Confirm codec set per profile | — | R1 exit |
+| OP-06 | ~~Confirm codec set per profile~~ **Decided 2026-09-25:** one set for every profile, in order of preference: EVS, AMR-WB, AMR, G.722, G.711 A-law, G.711 µ-law. No transcoding before R4 (PLT-VP-R1 VP-OP-03, MED-OP-03). | — | closed |
 | OP-07 | Define the load profile underlying §16 | — | R2 start |
 | OP-08 | Decide off-network (ProSe) scope and whether it applies to both profiles | — | R4 planning |
 
@@ -588,6 +588,7 @@ requirements below are written as constraints on what a partner cannot do.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.4 | 2026-09-26 | OP-06 closed: the codec set is decided and the same for every profile. |
 | 0.3 | 2026-09-25 | PLT-GEN-001 revised by decision: one codebase, one release image per profile, the core byte-identical across images (was: a single image carrying every profile). §1.1 and PLT-VER-001 follow. Each delivery now contains only the profile its deployment uses. |
 | 0.2 | 2026-09-19 | Added §14A (PLT-ICX, 26 requirements) for interconnection with partner MC systems, distinct from interworking. R3 exit criterion extended. |
 | 0.1 | 2026-09-19 | Initial draft |

@@ -275,10 +275,17 @@ admission:
     - unknown-target
     - call-type-not-permitted
 
-# Voice codecs the deployment may carry (PLT-MED-001). PROVISIONAL: the codec
-# set per profile is an open point (PLT-SRS OP-06, VP-OP-03) and these values
-# are placeholders, not a confirmed selection.
+# Voice codecs the deployment may carry (PLT-MED-001), in order of
+# preference: a call uses the first of these the caller offers, and every
+# party of the call uses that one (no transcoding before R4). Decided
+# 2026-09-25 (PLT-VP-R1 VP-OP-03), the same for every profile. AMR-WB is the
+# codec MCPTT clients must support (TS 26.179 4.1.1), EVS the optional one;
+# G.722 and G.711 are for interworking with dispatch consoles and PBXs.
 media:
   codecs:
-    - {payload_type: 97, name: "AMR-WB/16000"}
-    - {payload_type: 0, name: "PCMU/8000"}
+    - {name: "EVS/16000"}
+    - {name: "AMR-WB/16000"}
+    - {name: "AMR/8000"}
+    - {name: "G722/8000"}      # 16 kHz audio; 8000 in SDP (RFC 3551 4.5.2)
+    - {name: "PCMA/8000"}
+    - {name: "PCMU/8000"}
