@@ -19,11 +19,16 @@ Two things are protocol knowledge and live here, read from the RFCs:
         through from the caller's offer. mode-set among them is a limit on
         what the SDP's author wants to receive, and the relay does not
         reconcile it across parties (PLT-VP-R1 MED-OP-05).
-      - EVS: hf-only (header-full format only) and evs-mode-switch (AMR-WB
-        IO mode), both defaulting to 0. NOT verified against TS 26.445 annex
-        A, which is not in docs/3GPP (PLT-VP-R1 MED-OP-04): treated as
-        must-match because that is the safe side -- a mismatch is a 488, not
-        a relay of a payload layout the receiver cannot parse.
+      - EVS, TS 26.445 annex A (V12.17.0, V16.4.0 and V19.1.0 agree): hf-only
+        (Header-Full format only), evs-mode-switch (AMR-WB IO mode) and cmr
+        (-1: no CMR in the payload in primary mode; 1: a CMR in every
+        packet), each defaulting to 0 (A.3.1). For each, "when [it] is
+        offered ... and the payload type is accepted, the answerer shall not
+        modify or remove" it (A.3.3.1), and each decides how the payload is
+        framed. An answerer may add one that was not offered; to a relay
+        that cannot reframe, that is a mismatch too. dtx, br, bw and the
+        AMR-WB IO mode-set limit what is sent, not how, and are carried
+        through like mode-set above.
     Absent parameters take their defaults (RFC 4867 8.1: 0 for octet-align,
     crc and robust-sorting; interleaving absent means none).
 
@@ -52,7 +57,7 @@ MUST_MATCH: Mapping[str, Mapping[str, str]] = MappingProxyType({
                              "robust-sorting": "0", "interleaving": ""}),
     "AMR-WB": MappingProxyType({"octet-align": "0", "crc": "0",
                                 "robust-sorting": "0", "interleaving": ""}),
-    "EVS": MappingProxyType({"hf-only": "0", "evs-mode-switch": "0"}),
+    "EVS": MappingProxyType({"hf-only": "0", "evs-mode-switch": "0", "cmr": "0"}),
 })
 
 # Payload formats that carry no voice and so can never be the call's codec:
