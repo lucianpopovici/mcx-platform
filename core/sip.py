@@ -50,6 +50,7 @@ from .errors import (
     UNKNOWN_TARGET,
 )
 from .hooks import LocationContext, MediaKind, SessionRequest
+from . import codec as codec_mod
 from . import mcinfo
 from .release import Release, supports_session_type, supports_sip_warning
 from .session import Signal, SignalType
@@ -1164,26 +1165,6 @@ def build_offer(codecs: Sequence[Tuple[int, str]], port: int = 49170,
     return "\r\n".join(lines) + "\r\n"
 
 
-def offered_payload_types(sdp: str) -> Tuple[int, ...]:
-    for line in sdp.splitlines():
-        if line.startswith("m=audio"):
-            parts = line.split()
-            return tuple(int(p) for p in parts[3:] if p.isdigit())
-    return ()
-
-
-def negotiate(offer_sdp: str, supported: Sequence[int]) -> Optional[int]:
-    """Return the first mutually supported payload type, or None.
-
-    None means the offer is not acceptable: the caller answers 488, it does not
-    pick a codec the other side did not offer (PLT-MED-002).
-    """
-    for pt in offered_payload_types(offer_sdp):
-        if pt in supported:
-            return pt
-    return None
-
-
 # --------------------------------------------------------------------------
 # SDP endpoint description (for media anchoring)
 # --------------------------------------------------------------------------
@@ -1211,24 +1192,32 @@ def parse_sdp(body: str) -> SdpInfo:
     audio_addr: Optional[str] = None
     floor_port: Optional[int] = None
     current: Optional[str] = None
+    # The audio line is the first usable one, the same line core/codec.py
+    # reads the codec from; its c= is the one that counts (review of
+    # MED-OP-01: a malformed or second audio line must not lend its address).
+    in_audio = False
     for raw in body.splitlines():
         line = raw.strip()
         if line.startswith("m="):
             parts = line[2:].split()
             current = parts[0] if parts else None
-            if current == "audio" and audio is None and len(parts) >= 4 \
-                    and parts[1].isdigit():
+            in_audio = False
+            # ASCII digits only: str.isdigit takes characters like "²" that
+            # int() refuses.
+            if audio is None and codec_mod.is_audio_line(parts):
+                in_audio = True
                 audio = (int(parts[1]),
-                         tuple(int(p) for p in parts[3:] if p.isdigit()))
+                         tuple(pt for pt in map(codec_mod.payload_type, parts[3:])
+                               if pt is not None))
             elif current == "application" and "MCPTT" in line.upper() \
-                    and len(parts) >= 2 and parts[1].isdigit():
+                    and len(parts) >= 2 and parts[1].isascii() and parts[1].isdigit():
                 floor_port = int(parts[1])
         elif line.startswith("c="):
             fields = line[2:].split()
             addr = fields[2] if len(fields) >= 3 else None
             if current is None:
                 session_addr = addr
-            elif current == "audio" and audio_addr is None:
+            elif in_audio and audio_addr is None:
                 audio_addr = addr
     if audio is None:
         raise SipError("SDP has no audio media line")
@@ -1261,15 +1250,20 @@ def _check_media_address(address: str) -> None:
 
 
 def build_sdp(address: str, audio_port: int, floor_port: Optional[int],
-              codecs: Sequence[Tuple[int, str]]) -> str:
-    """An SDP body advertising exactly `codecs` at `address`."""
+              codecs: Sequence[Tuple[int, str]],
+              fmtp: Optional[Mapping[int, str]] = None) -> str:
+    """An SDP body advertising exactly `codecs` at `address`, with the
+    format parameters in `fmtp` (by payload type) where given."""
     if not codecs:
         raise SipError("an SDP body must advertise at least one codec")
     lines = ["v=0", f"o=- 0 0 IN IP4 {address}", "s=-",
              f"c=IN IP4 {address}", "t=0 0",
              f"m=audio {audio_port} RTP/AVP "
              + " ".join(str(pt) for pt, _ in codecs)]
-    lines += [f"a=rtpmap:{pt} {name}" for pt, name in codecs]
+    for pt, name in codecs:
+        lines.append(f"a=rtpmap:{pt} {name}")
+        if fmtp and fmtp.get(pt):
+            lines.append(f"a=fmtp:{pt} {fmtp[pt]}")
     if floor_port is not None:
         lines.append(f"m=application {floor_port} udp MCPTT")
     return "\r\n".join(lines) + "\r\n"

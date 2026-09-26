@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import shutil
+import re
 import signal
 import socket
 import ssl
@@ -293,6 +294,10 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
                      "tag=mcx-" in to, f"To: {to}")
 
     # 2. Group call: u1 originates, the platform invites u2 through the core.
+    # AMR-WB, numbered 97 by the caller and 101 by the callee (VP-OP-03,
+    # MED-OP-01: one codec, each party's own number, RFC 3264 6.1).
+    u1.codec = (97, "AMR-WB/16000", "mode-set=0,1,2")
+    u2.codec = (101, "AMR-WB/16000", "mode-set=0,1,2")
     inv = u1.invite(AS_URI, "prearranged", "grp:alpha", media_port=41000)
     try:
         incoming = u2.wait(r"^INVITE ", timeout=10)
@@ -317,6 +322,12 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
     report.observe("INVITE to callee: Record-Route as received",
                    " | ".join(headers(incoming, "Record-Route")) or "(none)")
     report.observe("INVITE to callee: Contact", header(incoming, "Contact") or "(none)")
+    sdp_in = body_part(incoming, "application/sdp") or ""
+    report.check("MED-OP-01: the callee is offered the caller's codec, number and fmtp",
+                 "RTP/AVP 97" in sdp_in and "a=rtpmap:97 AMR-WB/16000" in sdp_in
+                 and "a=fmtp:97 mode-set=0,1,2" in sdp_in,
+                 " / ".join(l for l in sdp_in.splitlines()
+                            if l.startswith(("m=audio", "a=rtpmap", "a=fmtp"))) or "(no SDP)")
 
     u2.respond(incoming, 180, "Ringing")
     u2.respond(incoming, 200, "OK", body=u2.sdp(41002, 2))
@@ -328,6 +339,12 @@ def scenario(core: str, work: Path, core_port: int, platform_port: int,
         return
     report.check("originator receives 200 OK through the core",
                  first_line(final).startswith("SIP/2.0 200"), first_line(final))
+    sdp_ok = body_part(final, "application/sdp") or ""
+    report.check("MED-OP-01: the callee's own number (101) is accepted; "
+                 "the caller is answered with its own (97)",
+                 "RTP/AVP 97" in sdp_ok and "a=rtpmap:97 AMR-WB/16000" in sdp_ok,
+                 " / ".join(l for l in sdp_ok.splitlines()
+                            if l.startswith(("m=audio", "a=rtpmap", "a=fmtp"))) or "(no SDP)")
     report.observe("200 OK to originator: Record-Route",
                    " | ".join(headers(final, "Record-Route")) or
                    "(none -- RFC 3261 12.1.1 requires the UAS to copy it)")
@@ -510,6 +527,9 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
     # -- terminating: platform -> B2BUA -> callee ---------------------------
     direct = UA(U1, "127.0.0.1", platform_port, ca); uas.append(direct)
     r = direct.register()          # u1's flow is now this direct connection
+    # G.722, static payload type 9 (VP-OP-03: the PBX interworking codec).
+    direct.codec = (9, "G722/8000", "")
+    u2.codec = (9, "G722/8000", "")
     inv = direct.invite(AS_URI, "prearranged", "grp:alpha", media_port=41020)
     try:
         incoming = u2.wait(r"^INVITE ", timeout=10)
@@ -527,6 +547,10 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
                        f"Accept-Contact: {' | '.join(headers(incoming, 'Accept-Contact')) or '(none)'}; "
                        f"Contact: {header(incoming, 'Contact')}; "
                        f"Content-Type: {header(incoming, 'Content-Type')}")
+        sdp_in = body_part(incoming, "application/sdp") or ""
+        report.observe("terminating: codecs the B2BUA offered the callee",
+                       " / ".join(l.strip() for l in sdp_in.splitlines()
+                                  if l.startswith(("m=audio", "a=rtpmap"))) or "(no SDP)")
         u2.respond(incoming, 180, "Ringing")
         u2.respond(incoming, 200, "OK", body=u2.sdp(41022, 2))
         try:
@@ -534,6 +558,11 @@ def scenario_b2bua(core: str, work: Path, core_port: int, platform_port: int,
                                 call_id=inv["call_id"], method="INVITE")
             report.check("terminating: the originator receives 200 OK",
                          first_line(final).startswith("SIP/2.0 200"), first_line(final))
+            sdp_ok = body_part(final, "application/sdp") or ""
+            report.check("VP-OP-03: G.722 end to end through the B2BUA (payload type 9)",
+                         re.search(r"(?m)^m=audio \d+ RTP/AVP 9\s*$", sdp_ok) is not None,
+                         " / ".join(l.strip() for l in sdp_ok.splitlines()
+                                    if l.startswith(("m=audio", "a=rtpmap"))) or "(no SDP)")
         except TimeoutError as exc:
             report.check("terminating: the originator receives 200 OK", False, str(exc))
             final = None

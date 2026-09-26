@@ -1,8 +1,8 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.7
-**Date:** 2026-09-25
+**Version:** 2.8
+**Date:** 2026-09-26
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
 
@@ -1629,6 +1629,30 @@ them, decided 2026-09-25: the four REFER option tags (the platform does not
 implement REFER, and Allow omits it), and `explicitsub`/`nosub` from RFC 7614.
 The limits of the refresh implementation are recorded as PLT-VP-R1 SIP-OP-18.
 
+### 4.40 CA-27 — voice codecs: numbers, layouts and the direction of a payload type
+
+The codec layer (PLT-VP-R1 MED-OP-01) was written against these sources:
+
+| Constant or rule | Source | Where |
+|---|---|---|
+| Static audio payload types 0 PCMU/8000, 8 PCMA/8000, 9 G722/8000; G.722's SDP clock rate 8000 | RFC 3551 table 4, 4.5.2 | `codec.STATIC_PAYLOAD_TYPES` |
+| AMR/AMR-WB `octet-align`, `crc`, `robust-sorting`, `interleaving` are declarative and must be equal in offer and answer; defaults 0, and no interleaving | RFC 4867 8.3.1, 8.1 | `codec.MUST_MATCH` |
+| AMR-WB mandatory for MCPTT clients, EVS optional; the bandwidth-efficient format shall be supported | TS 26.179 4.1.1, 4.1.3 (ETSI TS 126 179 V19.0.0, read online, not archived) | `codec.choose` |
+| A number in an SDP is what its author expects to receive; the offerer sends with the answer's numbers, the answerer with the offer's | RFC 3264 5.1, 6.1 | `Endpoint.rx_pt`, `tx_pt` |
+| A dynamic number's mapping must not change within a session | RFC 3264 8.3.2 | `SipCore._relay_sdp` (the relay's offers keep its number) |
+| The payload type is 7 bits | RFC 3550 5.1 | `codec.payload_type` |
+| Encoding names compare without case | RFC 4855 3 | `codec.key_of` |
+
+The first version had the direction of RFC 3264 backwards: it took the
+number in a party's SDP as the one that party sends with. A callee that
+answered the relay's 97 with 101 would then have had every talk burst
+dropped, since it conformantly sends 97. The independent review found it by
+reading 6.1; it is fixed and pinned in both directions over real UDP.
+
+Not verified: the EVS parameters `hf-only` and `evs-mode-switch`, taken as
+must-match from recollection of TS 26.445 annex A (PLT-VP-R1 MED-OP-04);
+the safe side is taken.
+
 ## 5. NOT verified — the work that remains
 
 CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
@@ -1642,6 +1666,7 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-27 | Voice codec constants: static payload types, AMR/AMR-WB layout parameters, EVS parameters, payload type direction | RFC 3551, RFC 4867 8.3.1, RFC 3264 5.1/6.1/8.3.2, RFC 3550 5.1, TS 26.179 4.1 (ETSI V19.0.0) | **Closed, with one item unverified.** See 4.40. The EVS parameters are not read from TS 26.445 (MED-OP-04). |
 | CA-26 | Ad hoc refusal rendering: warnings 150, 185 and 186, and the 3B/3C bodies | TS 24.379 17.4.2.2 steps 3A-5, 6.3.3.1.13.11-12, 6.3.3.1.25, table 4.4.2-2 (V18.13.0 and V20.0.0 agree) | **Closed.** The texts follow the table. Step 4 writes 185 as "user is not authorised"; the table's "user not authorised" is used, as for 187. The bodies are schema-valid at Rel-18 and Rel-20. The step order is honoured: 3A, then 3B/3C, then 4, then 5. 186 is used only where it is true, for a system with no ad hoc call type. |
 | CA-25 | The order of authorisation and target determination in §8.1 | TS 24.379 17.4.2.2 steps 1–12 (V20.0.0) for ad hoc calls; 10.1.1.4.2 for prearranged groups | **Closed, with one deliberate deviation and one gap.** For ad hoc calls the order is now the specification's: the caller is authorised (steps 4 and 5), then the list is checked (step 6), then the participants are determined (step 12). Deviation: for prearranged groups the specification looks the group up first (404, warning 163) and authorises after it (403, warning 119). The platform authorises first for every call type (PLT-ICD-001 §5.0). The former gap, warning 100 where 185, 186 or the step 3B body are specified, is closed by CA-26. The specification also puts steps 1–2 (500 for lack of resources, 488 for media) before authorisation. The platform checks both after authorisation, and only an authorised caller reaches them. |
 | CA-24 | The PLMN identity in the network profile's `plmns`, and the check that a cell belongs to one | TS 24.379 annex F.3, `tPlmnIdentityFormat` (the same in V17.15.0, V18.13.0 and V20.0.0) | **Closed, with one question left to the specification.** `tPlmnIdentityFormat` is `\d{3}\d{3}`: MCC then MNC, six digits. tEcgi and tNcgi begin with the same six, so a cell's PLMN is its first six digits. They are read as ASCII digits, `[0-9]`, as for CA-23. Annex F.3 does not say how a two-digit MNC fills three digits. The platform does not guess: it compares the six digits as written, and PLT-ICD-001 ICD-OP-12 records the question. |
@@ -1779,6 +1804,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.8 | 2026-09-26 | CA-27 (4.40): voice codec constants and the direction of payload type numbers, read from RFC 3551, 4867, 3264, 3550 and TS 26.179. |
 | 2.7 | 2026-09-25 | CA-20b closed (4.39): session timers (RFC 4028) with in-dialog UPDATE and re-INVITE, the session identity and the focus Contact, read from TS 24.379 V20.0.0 and the RFCs. |
 | 2.6 | 2026-09-25 | CA-26: ad hoc refusal rendering (150, 185, 186, 3B/3C bodies), read from 17.4.2.2 and table 4.4.2-2 of two versions. |
 | 2.5 | 2026-09-25 | CA-25: authorisation before target determination, read from 17.4.2.2 and 10.1.1.4.2. One deliberate deviation (prearranged groups are authorised first too) and one gap (warnings 185/186, ADHOC-OP-05). |
