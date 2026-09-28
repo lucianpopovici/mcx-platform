@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from . import identity
 from . import floor as floor_mod
 from .audit import Auditor, RecordType
 from .errors import (
@@ -566,8 +567,14 @@ class SessionManager:
                 f"refused with reason code {admission.reason_code!r}, which the "
                 "profile does not declare")
 
+    def _outside_domains(self, members) -> List[str]:
+        """PLT-ICD-001 §3.2 POST-3 (PLT-IDM-008): the members not within one
+        of the profile's declared domains (core/identity.py, RES-OP-01)."""
+        return identity.outside(members, self._profile.identity.domains)
+
     def _check_resolution(self, resolution: Resolution) -> None:
-        """PLT-ICD-001 §3.2 POST-1: kind and member count must agree."""
+        """PLT-ICD-001 §3.2 POST-1: kind and member count must agree; POST-2:
+        no duplicates; POST-3: every member within a declared domain."""
         from .errors import HookContractViolation
         if resolution.kind is ResolutionKind.USER and len(resolution.members) != 1:
             raise HookContractViolation(
@@ -588,6 +595,11 @@ class SessionManager:
                     "in resolved_from")
         if len(set(resolution.members)) != len(resolution.members):
             raise HookContractViolation("resolution contains duplicate members")
+        outside = self._outside_domains(resolution.members)
+        if outside:
+            raise HookContractViolation(
+                f"resolution returned {len(outside)} member(s) outside the "
+                f"profile's declared domains: {', '.join(map(repr, outside[:3]))}")
 
     def _located(self, request: SessionRequest) -> SessionRequest:
         """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains
@@ -696,8 +708,7 @@ class SessionManager:
                           group_id=group_id,
                           resolved_from=found.resolved_from or "adhoc:criteria"), None
 
-    @staticmethod
-    def _check_participants(resolution: Resolution) -> None:
+    def _check_participants(self, resolution: Resolution) -> None:
         """§3.5 POST: a GROUP resolution with at least one member, no
         duplicates, and no group identity -- the ad hoc identity is the
         controlling function's to generate (17.4.2.2 step 10), not the
@@ -712,6 +723,11 @@ class SessionManager:
             raise HookContractViolation("determine_participants returned no members")
         if len(set(resolution.members)) != len(resolution.members):
             raise HookContractViolation("determine_participants returned duplicates")
+        outside = self._outside_domains(resolution.members)
+        if outside:
+            raise HookContractViolation(
+                f"determine_participants returned {len(outside)} member(s) outside "
+                f"the profile's declared domains: {', '.join(map(repr, outside[:3]))}")
 
     def _refuse(self, cid: str, request: SessionRequest, reason_code: str,
                 detail: str, step: str = ""):

@@ -639,19 +639,19 @@ VP1-HOOK-011:
   note: A duplicated member is configured; the result is asserted equal to the deduplicated, ordered tuple
     across 6 calls.
 VP1-HOOK-012:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
   date: '2026-09-28'
   evidence:
+  - tests/test_loader.py::test_a_group_source_supplying_a_foreign_member_refuses_the_group
   - tests/test_loader.py::test_vp1_hook_012_domain_restriction
-  gap: 'The test never resolves anything. It only shows that register_user refuses a foreign-domain URI.
-    The clause ''no member returned from an undeclared domain'' is unasserted for resolve(). It is actually
-    violated: with group_source returning [''sip:evil@other.example''] for ''grp:x'', mcx resolve(''grp:x'')
-    returns a GROUP containing that member. tables.py:394-405 applies no domain check to group_source
-    members, and core _check_resolution has no POST-3 check. Close with (a) resolve() of a foreign-domain
-    target -> refused, (b) register_group with a foreign member -> refused, (c) group_source returning
-    a foreign member -> resolve raises and returns no member.'
-  note: Ahead of phase (R2, PLT-IDM-008). The probe run by the reviewer confirms the leak.
+  - tests/test_session.py::test_a_domain_in_another_case_is_the_same_domain
+  - tests/test_session.py::test_a_resolution_with_a_member_outside_the_domains_is_a_contract_violation
+  - tests/test_session.py::test_ad_hoc_participants_outside_the_domains_are_a_contract_violation
+  - tests/test_session.py::test_the_domain_of_an_identity
+  note: 'Re-reviewed after RES-OP-01: a foreign target or member is refused by the resolver and by the
+    core, for resolve and ad hoc participants, in every spelling probed (second @, scheme, port, parameters,
+    brackets, case).'
 VP1-HOOK-013:
   verdict: partial
   by: independent review (agent)

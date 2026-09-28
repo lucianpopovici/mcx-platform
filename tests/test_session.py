@@ -330,6 +330,123 @@ def test_vp1_hook_002_contract_violation_is_distinguished(mcx, sink):
 
 
 # --------------------------------------------------------------------------
+# VP1-HOOK-012 — the core enforces §3.2 POST-3 (RES-OP-01)
+# --------------------------------------------------------------------------
+
+
+def _with_resolver(mcx, sink, resolve):
+    class Resolver:
+        def __init__(self, profile):
+            pass
+
+        def resolve(self, target, request):
+            return resolve(target)
+
+        def bind(self, i, s, l):
+            pass
+
+        def unbind(self, i, s):
+            pass
+
+        def identities_of(self, s):
+            return ()
+
+    hooks = loader.LoadedHooks(
+        identity_resolver=Resolver(mcx.profile),
+        priority_policy=mcx.hooks.priority_policy,
+        session_policy=mcx.hooks.session_policy,
+        bearer_selector=mcx.hooks.bearer_selector,
+        interworking_gateway=mcx.hooks.interworking_gateway,
+        interconnection_gateway=mcx.hooks.interconnection_gateway)
+    lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+
+
+@pytest.mark.vp("VP1-HOOK-012")
+@pytest.mark.parametrize("foreign", [
+    "sip:evil@other.example",            # another domain
+    "sip:evil@frmcs.example",            # another profile's domain
+    "sip:evil@mcptt.example:5060",       # a port: not written as a member is
+    "sip:evil@mcptt.example;x=1",        # parameters, likewise
+    "sip:evil@sub.mcptt.example",        # a subdomain is not the domain
+    "evil@mcptt.example",                # no scheme
+    "sip:mcptt.example",                 # no user
+    "sip:@mcptt.example",                # empty user
+    "sip:evil@other.example@mcptt.example",     # a second "@" (RFC 3261: escaped)
+    "sip:evil@other.example;x=@mcptt.example",  # an "@" in a parameter
+    "sip:evil@other.example?h=@mcptt.example",  # an "@" in a header
+    "http:evil@mcptt.example",           # not a SIP URI
+    "grp:evil@mcptt.example",
+    "sip:evil@mcptt.example.",           # a trailing dot is another name
+    "<sip:evil@mcptt.example>",          # brackets are not part of an identity
+])
+def test_a_resolution_with_a_member_outside_the_domains_is_a_contract_violation(
+        mcx, sink, foreign):
+    """A resolver, in-tree or substituted, that returns a member outside the
+    profile's declared domains is refused by the core: no session, no
+    invitation to anyone, the violation audited."""
+    mgr = _with_resolver(mcx, sink, lambda t: Resolution(
+        kind=ResolutionKind.GROUP, group_id=t,
+        members=("sip:u0@mcptt.example", "sip:u1@mcptt.example", foreign)))
+    session, signals, refusal = mgr.establish(req())
+    assert session is None and refusal.reason_code == "hook-contract-violation"
+    assert SignalType.INVITE not in types(signals)
+    failed = sink.of_type(RecordType.SESSION_FAILED)
+    assert failed and failed[0].detail["interface"] == "IF-IDR"
+    assert not sink.of_type(RecordType.SESSION_ESTABLISHED)
+
+    mgr = _with_resolver(mcx, sink, lambda t: Resolution(
+        kind=ResolutionKind.USER, members=(foreign,)))
+    session, _, refusal = mgr.establish(req(call_type="private", target=foreign))
+    assert session is None and refusal.reason_code == "hook-contract-violation"
+
+
+@pytest.mark.vp("VP1-HOOK-012")
+def test_a_domain_in_another_case_is_the_same_domain(mcx, sink):
+    """RFC 3261 19.1.4: hosts compare without case."""
+    mgr = _with_resolver(mcx, sink, lambda t: Resolution(
+        kind=ResolutionKind.GROUP, group_id=t,
+        members=("sip:u0@mcptt.example", "sip:u1@MCPTT.Example")))
+    session, _, refusal = mgr.establish(req())
+    assert refusal is None and session is not None
+
+
+@pytest.mark.vp("VP1-HOOK-012")
+@pytest.mark.parametrize("member,domain", [
+    ("sip:u@mcptt.example", "mcptt.example"), ("sips:u@mcptt.example", "mcptt.example"),
+    ("SIP:u@MCPTT.Example", "mcptt.example"), ("sip:u%40x@mcptt.example", "mcptt.example"),
+    ("sip:u@x@mcptt.example", None), ("sip:u:pw@mcptt.example", None),
+    ("sip:u@mcptt.example;transport=tls", None), ("sip: u@mcptt.example", None),
+    ("sip:u@mcptt.example ", None), ("tel:+331234", None), ("", None), (None, None),
+    ("sip:u;x=1@mcptt.example", None), ("sip:u?h=1@mcptt.example", None),
+    ("sip:<u>@mcptt.example", None), ("sip:u/v@mcptt.example", None),
+])
+def test_the_domain_of_an_identity(member, domain):
+    """Stricter than RFC 3261, which lets a user part hold ';', '?' and '/':
+    no MC service identity needs them, and each is a place for two parsers
+    to disagree."""
+    from core import identity
+    assert identity.domain_of(member) == domain
+
+
+def test_outside_compares_declared_domains_without_case():
+    from core import identity
+    assert identity.outside(["sip:u@mcptt.example", "sip:v@other.example"],
+                            ["MCPTT.EXAMPLE"]) == ["sip:v@other.example"]
+
+
+@pytest.mark.vp("VP1-HOOK-012")
+def test_ad_hoc_participants_outside_the_domains_are_a_contract_violation(manager):
+    """§3.5: determine_participants is held to the same rule."""
+    good = Resolution(kind=ResolutionKind.GROUP, members=("sip:u1@mcptt.example",))
+    manager._check_participants(good)
+    bad = Resolution(kind=ResolutionKind.GROUP,
+                     members=("sip:u1@mcptt.example", "sip:x@other.example"))
+    with pytest.raises(HookContractViolation, match="outside the profile's declared"):
+        manager._check_participants(bad)
+
+
+# --------------------------------------------------------------------------
 # VP1-HOOK-003/004 — audit
 # --------------------------------------------------------------------------
 

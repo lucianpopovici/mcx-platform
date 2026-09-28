@@ -586,11 +586,68 @@ def test_vp1_hook_011_members_deduplicated_and_ordered(mcx):
 
 
 def test_vp1_hook_012_domain_restriction(mcx):
-    """PLT-IDM-008 — nothing resolves outside the profile's declared domains."""
+    """PLT-IDM-008 — nothing resolves outside the profile's declared domains:
+    not a provisioned user, not a provisioned group member, and not a member
+    a group source supplies (RES-OP-01). The core's own check is in
+    tests/test_session.py."""
     r = mcx.hooks.identity_resolver
     with pytest.raises(ResolutionFailure) as exc:
         r.register_user("sip:intruder@frmcs.example")
     assert exc.value.reason_code == "not-authorised"
+    with pytest.raises(ResolutionFailure) as exc:
+        r.register_group("grp:mixed", ["sip:a@mcptt.example", "sip:b@frmcs.example"])
+    assert exc.value.reason_code == "not-authorised"
+    req = request_for("prearranged-group", target="grp:mixed")
+    with pytest.raises(ResolutionFailure) as exc:        # nothing half-registered
+        r.resolve("grp:mixed", req)
+    assert exc.value.reason_code == "unknown-target"
+    for odd in ("sip:evil@other.example@mcptt.example", "grp:evil@mcptt.example",
+                "sip:evil@mcptt.example;x=1", "sip:evil;x=1@mcptt.example"):
+        with pytest.raises(ResolutionFailure) as exc:
+            r.register_user(odd)
+        assert exc.value.reason_code == "not-authorised", odd
+    r.register_user("sip:Case@MCPTT.example")          # host compared without case
+    with pytest.raises(ResolutionFailure) as exc:        # a foreign target
+        r.resolve("sip:intruder@frmcs.example", request_for("private",
+                                                            target="sip:intruder@frmcs.example"))
+    assert exc.value.reason_code == "unknown-target"
+
+
+@pytest.mark.parametrize("domain", ["MCPTT.example", "mcptt", "mcptt.example.",
+                                    "-mcptt.example", "mcptt..example", "mcptt example",
+                                    "sip:mcptt.example", ""])
+def test_a_declared_domain_is_a_lower_case_dns_name(mutate, domain):
+    """RES-OP-01 review: one spelling, so the resolver, the core, the
+    registration store and call routing agree on what is local."""
+    raw = mutate()
+    raw["identity"]["domains"] = [domain]
+    expect_defects(raw, codes=["bad-value"], path_contains="identity.domains[0]")
+
+
+class _Source:
+    def __init__(self, members):
+        self._members = members
+
+    def members(self, group_id):
+        return self._members
+
+
+@pytest.mark.vp("VP1-HOOK-012")
+@pytest.mark.parametrize("foreign", ["sip:evil@other.example", "sip:evil@frmcs.example",
+                                     "sip:evil@mcptt.example.other",
+                                     "sip:evil@other.example@mcptt.example",
+                                     "http:evil@mcptt.example"])
+def test_a_group_source_supplying_a_foreign_member_refuses_the_group(mcx, foreign):
+    """RES-OP-01: the whole group is refused, never returned without the
+    foreign member (PLT-ICD-001 §3.2 POST-5, no partial group)."""
+    r = mcx.hooks.identity_resolver
+    r.group_source = _Source(["sip:a@mcptt.example", foreign])
+    with pytest.raises(ResolutionFailure) as exc:
+        r.resolve("grp:remote", request_for("prearranged-group", target="grp:remote"))
+    assert exc.value.reason_code == "not-authorised"
+    r.group_source = _Source(["sip:a@mcptt.example", "sip:b@mcptt.example"])
+    res = r.resolve("grp:remote", request_for("prearranged-group", target="grp:remote"))
+    assert res.members == ("sip:a@mcptt.example", "sip:b@mcptt.example")
 
 
 def test_vp1_hook_013_resolved_from_recorded(frmcs):

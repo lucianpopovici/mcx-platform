@@ -15,6 +15,7 @@ tells the author everything that is wrong with the profile.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -142,6 +143,9 @@ class _Checker:
                 continue
             out[k] = v
         return out
+
+
+_DOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 
 
 def _typename(v: Any) -> str:
@@ -501,8 +505,13 @@ def _identity(c: _Checker, node: Any) -> model.Identity:
               "expected a non-empty list; a profile must declare its domains")
     else:
         for i, d in enumerate(domains):
-            if not isinstance(d, str) or not d:
-                c.add(f"{p}.domains[{i}]", "bad-value", "expected a non-empty string")
+            if not isinstance(d, str) or not _DOMAIN.fullmatch(d):
+                # Lower case, DNS characters: members are compared with it
+                # without case (core/identity.py), and one spelling keeps the
+                # registration store, routing and the resolver agreeing
+                # (RES-OP-01 review).
+                c.add(f"{p}.domains[{i}]", "bad-value",
+                      "expected a DNS name in lower case, such as mcptt.example")
                 continue
             parsed_domains.append(d)
 

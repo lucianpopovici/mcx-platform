@@ -350,6 +350,47 @@ def test_register_outside_declared_domain_is_refused_403(core):
     assert not core.registrations.is_registered("sip:a@elsewhere.example")
 
 
+@pytest.mark.parametrize("aor", ["sip:a@elsewhere.example@mcptt.example",
+                                 "sip:a@mcptt.example:5060", "http:a@mcptt.example"])
+def test_register_of_an_address_in_no_plain_domain_is_refused_403(core, aor):
+    """RES-OP-01 review: an address the SIP layer would read as local by its
+    last "@" is in no domain at all (core/identity.py)."""
+    from core.sip import canonical_uri
+    f = Flow(uris=[canonical_uri(aor)])       # authenticated as the address itself
+    core.on_bytes(msg("REGISTER", "sip:x", "r1", 1, aor, aor,
+                      extra=[f"Contact: <{aor}>"]), f)
+    assert f.codes() == [403]
+    assert not core.registrations.is_registered(aor)
+    # Control: the same kind of flow registers a plain local address.
+    ok = Flow(uris=["sip:a@mcptt.example"])
+    core.on_bytes(msg("REGISTER", "sip:x", "r2", 1, "sip:a@mcptt.example",
+                      "sip:a@mcptt.example",
+                      extra=["Contact: <sip:a@mcptt.example>"]), ok)
+    assert ok.codes() == [200]
+
+
+def test_a_member_spelled_with_an_upper_case_host_is_invited(tmp_path, pki, clock):
+    """RES-OP-01 review: the directory may spell a member's host in any case;
+    the leg reaches the user registered under the canonical form."""
+    shouting = [U[0], U[1].replace("mcptt.example", "MCPTT.Example")]
+    net = network_yaml(tmp_path, trusted_cores=["core-client.example"],
+                       core_ca=pki / "core-ca.crt", fname="shout.yaml",
+                       groups=[{"id": "grp:alpha", "members": shouting}])
+    r = build_runtime(sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(net)), clock,
+                      platform=Platform())
+    c = SipCore(r, LOCAL, clock)
+    try:
+        flows = {u: Flow(u) for u in U[:2]}
+        for u in U[:2]:
+            register(c, u, flows[u])
+            flows[u].sent.clear()
+        c.on_bytes(invite("shout", U[0], "grp:alpha", "prearranged-group"), flows[U[0]])
+        assert flows[U[1]].requests("INVITE")
+    finally:
+        c.close()
+        r.close()
+
+
 # ============================================================ guard and retransmission
 
 

@@ -46,7 +46,7 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (1267 tests)
+python3 -m pytest tests/ -q                   # must stay green (1318 tests)
 python3 tools/check_boundary.py --root .      # must stay 20/20
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
@@ -81,6 +81,7 @@ core/qos.py         TS 23.501 standardised 5QI table; 3GPP, never profile
 core/floor.py       TS 24.380 floor control; no SIP, no media, injected clock
 core/sip.py         TS 24.379 adapter; renders/parses, touches no socket
 core/mcinfo.py      TS 24.379 annex F.1 MCPTT info body and multipart; no call types
+core/identity.py    the domain of an MC service identity (PLT-IDM-008): one strict grammar
 core/codec.py       the call's voice codec from the offer and the profile's order; payload layouts (RFC 4867), payload type numbers (RFC 3264)
 service/            the host process: `python -m service` (env config, SQLite store, HTTP)
 service/sip_*.py    SIP over TLS: sip_txn (transactions), sip_core (dispatch, no socket), sip_tls (the only SIP socket)

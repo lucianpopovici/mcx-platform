@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.16 (draft)
+**Version:** 0.17 (draft)
 **Date:** 2026-09-26
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -224,7 +224,12 @@ consult mutable state, because functional-identity bindings change at runtime.
    `BROADCAST_AREA` → ≥ 0 members; `EXTERNAL` → **no** members, and
    `resolved_from` carries the foreign target.
 2. `members` contains no duplicates and is stably ordered.
-3. Every member is within a domain declared by the profile (PLT-IDM-008).
+3. Every member is within a domain declared by the profile (PLT-IDM-008): it
+   is written `sip:user@host` or `sips:user@host`, with one `@` and no
+   parameters, headers or port, and its host is a declared domain (compared
+   without case). The core checks this on every result: a member outside is a
+   contract violation (`hook-contract-violation`), and the session is refused
+   (v0.17, PLT-VP-R1 RES-OP-01).
 4. `resolved_from` records the reference actually used, where it differs from
    `target` — mandatory for any functional or location-dependent resolution
    (PLT-HOK-014).
@@ -305,6 +310,8 @@ profile knowledge, so it is a hook. `SessionRequest` gains
 1. Returns a `GROUP` resolution with at least one member, no duplicates, and
    `group_id` None. The ad hoc group identity is the controlling function's
    to generate (17.4.2.2 step 10), and the core does so.
+3. Every member is within a declared domain, as in §3.2 POST-3; the core
+   checks it (v0.17).
 2. If nobody meets the criteria, or a criterion is not understood, raises with
    `adhoc-participants-undetermined`. A profile with no criteria vocabulary
    always raises.
@@ -695,6 +702,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.17 | 2026-09-28 | §3.2 POST-3 made precise and enforced by the core; §3.5 gains POST-3 (PLT-VP-R1 RES-OP-01). The service profile's `identity.domains` must be lower-case DNS names. A minor change: no hook signature changes, but a resolver that returned members outside the declared domains, or written other than `sip[s]:user@host`, is now a contract violation. |
 | 0.16 | 2026-09-26 | §2.8: the network profile gains `groups` and `users` (ICD-NET-005; PLT-VP-R1 SVC-OP-03 decided). `MCX_GROUPS_FILE` is withdrawn and refused. A minor change: no hook or parameter object changes. |
 | 0.15 | 2026-09-25 | ICD-OP-08 amended: a dialog follows its party to a new connection that proves the same identity, and the old connection is dropped from it. The hook surface is unchanged. |
 | 0.14 | 2026-09-25 | ICD-ADH-006 (step 3A, warning 150) and ICD-ADH-007 (how a step-0 refusal of an ad hoc call is rendered: 3B/3C body, 185, 186). A minor change: no hook or parameter object changes. |

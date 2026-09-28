@@ -42,6 +42,7 @@ from core.sip import (
 )
 
 from core import codec as codec_mod
+from core import identity
 from core import mcinfo
 from core.mcinfo import sdp_of
 
@@ -455,9 +456,11 @@ class SipCore:
         contact = req.headers.get("Contact") or ""
         if not aor:
             raise SipError("REGISTER has no To")
-        domain = aor.rpartition("@")[2]
-        if domain not in self.rt.loaded.profile.identity.domains:
-            return self._reject(txn, NOT_AUTHORISED)       # PLT-IDM-008
+        # PLT-IDM-008, in the one plain form the core checks members in
+        # (core/identity.py): a second "@", parameters or a port put an
+        # address in no domain, so it cannot be registered (RES-OP-01).
+        if identity.outside((aor,), self.rt.loaded.profile.identity.domains):
+            return self._reject(txn, NOT_AUTHORISED)
         if not self._authenticated_as(flow, aor):
             # Registering someone else's address would route their calls here.
             return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
@@ -635,7 +638,10 @@ class SipCore:
         if call.media_error:
             return
         target = sig.target or ""
-        flow = self.flows_by_user.get(target)
+        # Registrations are keyed by the canonical form (_register); a member
+        # the directory spells with an upper-case host is the same user
+        # (RFC 3261 19.1.4), and must not get a dead leg (RES-OP-01 review).
+        flow = self.flows_by_user.get(canonical_uri(target))
         # Random, not "<call>.legN": every member would otherwise know the
         # caller's Call-ID and every other leg's, and with them the platform's
         # tag on each ("<Call-ID>-l"). The tags are part of what binds a dialog

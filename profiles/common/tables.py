@@ -9,6 +9,8 @@ profile (PLT-ICD-001 §2.1 ICD-GEN-005), so they are directly property-testable.
 
 from __future__ import annotations
 
+import re
+
 from typing import Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from core import model
@@ -314,6 +316,9 @@ class GroupSource(Protocol):
     def members(self, group_id: str) -> Optional[Sequence[MCServiceId]]: ...
 
 
+_IDENTITY = re.compile(r"(?i:sips?):([^@;?<>:\s/]+)@([A-Za-z0-9.-]+)")
+
+
 class DirectoryResolver:
     """Directory-backed resolution. No functional addressing.
 
@@ -368,8 +373,12 @@ class DirectoryResolver:
 
     def _require_declared_domain(self, service_id: MCServiceId) -> None:
         # PLT-IDM-008: never resolve outside the profile's declared domains.
-        domain = service_id.rpartition("@")[2]
-        if domain not in self._profile.identity.domains:
+        # The same plain form the core requires (core/identity.py; a profile
+        # may not import it): sip[s]:user@host, one "@", the host compared
+        # without case. Anything else is within no domain (RES-OP-01).
+        m = _IDENTITY.fullmatch(service_id) if isinstance(service_id, str) else None
+        if m is None or m.group(2).lower() not in {
+                d.lower() for d in self._profile.identity.domains}:
             raise ResolutionFailure(
                 NOT_AUTHORISED,
                 f"{service_id!r} is outside this profile's declared domains")
@@ -401,6 +410,11 @@ class DirectoryResolver:
                 raise ResolutionFailure(RESOLVER_UNAVAILABLE, str(exc)) from exc
             if fetched is not None:
                 members = tuple(dict.fromkeys(fetched))
+                # PLT-IDM-008, as for provisioned groups: a source is data
+                # from outside, and one foreign member refuses the whole
+                # group -- never a group quietly missing someone (POST-5).
+                for m in members:
+                    self._require_declared_domain(m)
         if members is not None:
             if not members:
                 raise ResolutionFailure(UNKNOWN_TARGET,
