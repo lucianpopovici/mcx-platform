@@ -660,7 +660,7 @@ def test_mcx_resolver_declares_no_functional_identities(mcx):
 # --------------------------------------------------------------------------
 
 
-def test_vp1_hook_050_route_matches_prefix(mcx):
+def test_iwf_route_matches_prefix(mcx):
     res = Resolution(kind=ResolutionKind.USER, members=("x",))
     route = mcx.hooks.interworking_gateway.route(
         request_for("private", target="tetra:1234"), res)
@@ -669,7 +669,7 @@ def test_vp1_hook_050_route_matches_prefix(mcx):
         request_for("private", target="sip:a@mcptt.example"), res) is None
 
 
-def test_vp1_hook_051_inbound_mapping_rejects_undeclared(mcx):
+def test_iwf_inbound_mapping_rejects_undeclared(mcx):
     with pytest.raises(HookContractViolation):
         mcx.hooks.interworking_gateway.map_inbound(
             {"call_type": "rec-broadcast", "initiator": "sip:a@mcptt.example"})

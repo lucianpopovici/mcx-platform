@@ -34,10 +34,12 @@ RELEASES = tuple(range(13, 21))
     ("17", Release.REL_17), ("Rel-17", Release.REL_17),
     ("rel-20", Release.REL_20), (" 13 ", Release.REL_13),
 ])
+@pytest.mark.vp("VP1-REL-001")
 def test_release_is_parsed_from_the_forms_an_operator_would_write(text, expected):
     assert parse(text) is expected
 
 
+@pytest.mark.vp("VP1-REL-001")
 @pytest.mark.parametrize("text", ["", "  ", "21", "12", "seventeen", "17.1", "R17x"])
 def test_an_unsupported_release_is_refused_not_guessed(text):
     """PLT-REL-002. There is no default and no nearest match: a deployment
@@ -61,6 +63,7 @@ FIRST_RELEASE_OF_SUBTYPE = {
 }
 
 
+@pytest.mark.vp("VP1-REL-003")
 @pytest.mark.parametrize("release", RELEASES)
 def test_a_release_encodes_exactly_what_it_defines(release):
     codec = rtcp.Codec(Release(release))
@@ -73,6 +76,7 @@ def test_a_release_encodes_exactly_what_it_defines(release):
                 codec.encode(msg)
 
 
+@pytest.mark.vp("VP1-REL-003")
 @pytest.mark.parametrize("release", RELEASES)
 def test_a_release_refuses_a_field_it_does_not_define(release):
     """Field 25 (Floor Revoke Request User ID) arrives in Rel-19; fields 21-24
@@ -87,6 +91,7 @@ def test_a_release_refuses_a_field_it_does_not_define(release):
                 codec.encode(msg)
 
 
+@pytest.mark.vp("VP1-REL-003")
 @pytest.mark.parametrize("release", RELEASES)
 def test_floor_revoke_cause_7_is_refused_before_rel_19(release):
     """Clause 8.2.10.2. The cause is only checkable on a Floor Revoke: the
@@ -106,6 +111,7 @@ def test_floor_revoke_cause_7_is_refused_before_rel_19(release):
 # -- the hazard this parameter exists for --------------------------------------
 
 
+@pytest.mark.vp("VP1-REL-004")
 def test_subtype_14_means_different_messages_either_side_of_rel_18():
     """The reason a release parameter is not a feature flag.
 
@@ -125,6 +131,7 @@ def test_subtype_14_means_different_messages_either_side_of_rel_18():
         rtcp.Codec(Release.REL_18).name_of(msg)
 
 
+@pytest.mark.vp("VP1-REL-005")
 def test_a_rel_17_deployment_refuses_a_rel_19_message_on_the_wire():
     """Receiving, not just sending. A Rel-17 deployment handed a Floor Revoke
     Request must say so rather than interpret it."""
@@ -136,6 +143,7 @@ def test_a_rel_17_deployment_refuses_a_rel_19_message_on_the_wire():
     assert "Rel-17" in str(exc.value) and "Rel-19" in str(exc.value)
 
 
+@pytest.mark.vp("VP1-REL-005")
 def test_wrong_release_is_distinguishable_from_malformed():
     """An operator must be able to tell "my peer is newer than me" from "my
     peer is broken". Both would otherwise be one counter and one log line."""
@@ -144,6 +152,7 @@ def test_wrong_release_is_distinguishable_from_malformed():
     assert not issubclass(rtcp.RtcpError, rtcp.ReleaseRefused)
 
 
+@pytest.mark.vp("VP1-REL-002")
 def test_every_supported_release_round_trips_a_basic_call():
     """Whatever the release, the Rel-13 core of floor control still works.
     A gate that broke ordinary operation at an older release would be worse
@@ -169,6 +178,7 @@ def test_health_reports_the_release_the_process_is_speaking():
     assert health.snapshot()["release"] == "Rel-17"
 
 
+@pytest.mark.vp("VP1-REL-001")
 def test_config_refuses_a_deployment_that_did_not_state_a_release():
     """PLT-REL-002, at the configuration boundary rather than the parser."""
     from service.config import Config
@@ -181,6 +191,7 @@ def test_config_refuses_a_deployment_that_did_not_state_a_release():
     assert Config.from_env({**base, "MCX_RELEASE": "17"}).release is Release.REL_17
 
 
+@pytest.mark.vp("VP1-REL-002")
 def test_the_release_is_independent_of_the_profile():
     """PLT-REL-003. The whole point: these are two axes, not one."""
     from service.config import Config
@@ -199,6 +210,7 @@ def test_the_release_is_independent_of_the_profile():
 # -- CA-12: the TS 24.379 signalling layer -------------------------------------
 
 
+@pytest.mark.vp("VP1-REL-007")
 def test_warning_code_179_does_not_exist_before_rel_17():
     """PLT-CONF-AUDIT CA-12, the one signalling constant that is release-bound.
 
@@ -218,6 +230,7 @@ def test_warning_code_179_does_not_exist_before_rel_17():
         assert supports_sip_warning(Release.REL_20, code) is False
 
 
+@pytest.mark.vp("VP1-REL-007")
 def test_a_release_without_the_code_still_explains_the_refusal():
     """The degradation rule. A deployment older than Rel-17 must not emit 179
     -- but it must still say why it refused, and it must not raise: turning a
@@ -242,6 +255,7 @@ def test_a_release_without_the_code_still_explains_the_refusal():
     assert b.status.code < 500
 
 
+@pytest.mark.vp("VP1-REL-007")
 def test_a_release_bound_code_is_gated_but_a_rel_13_code_is_not():
     """Codes 100 and 145 are Rel-13 and must be emitted at every release --
     a gate that suppressed them would make every deployment less legible."""

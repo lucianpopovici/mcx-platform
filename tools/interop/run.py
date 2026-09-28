@@ -659,6 +659,8 @@ def main() -> int:
     ap.add_argument("--workdir")
     ap.add_argument("--keep", action="store_true",
                     help="keep the working directory (always kept with --workdir)")
+    ap.add_argument("--results", metavar="PATH",
+                    help="also write the run as JSON, for tools/vp_results.py")
     args = ap.parse_args()
 
     work = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="mcx-interop-"))
@@ -696,6 +698,16 @@ def main() -> int:
     for verdict, name, evidence in report.steps:
         print(f"  {verdict:<8} {name:<{width}}  {evidence}")
     print(f"\n  {'PASSED' if report.passed else 'FAILED'}")
+    if args.results:
+        # Evidence for VP1-SIG-001 in the results register: which core, which
+        # commit, and every check with its verdict.
+        commit = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"],
+                                cwd=HERE, capture_output=True, text=True).stdout.strip()
+        Path(args.results).write_text(json.dumps({
+            "case": "VP1-SIG-001", "core": args.core, "topology": TOPOLOGY[args.core],
+            "commit": commit or None, "passed": report.passed,
+            "steps": [{"verdict": v, "name": n, "evidence": e}
+                      for v, n, e in report.steps]}, indent=1))
     if not (args.keep or args.workdir):
         shutil.rmtree(work, ignore_errors=True)
     return 0 if report.passed else 1

@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.27 (draft)
+**Version:** 0.28 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -44,7 +44,7 @@ R2 depends on them.
 | **A** Analysis | Reasoned argument over design or measurement | Signed analysis note |
 | **I** Inspection | Static examination of code, config or document | Gate result or review record |
 
-R1 requirement methods, as specified: 54 T, 26 I, 3 A, 0 D.
+R1 requirement methods, as specified: 66 T, 23 I, 3 A, 0 D (counted from §9; until 0.28 this read 54 T, 26 I, 3 A, which matched neither the old table nor PLT-SRS).
 
 ### 1.3 Test case identification
 
@@ -152,6 +152,8 @@ Environment: ENV-CI. These run on every change (PLT-VER-002) and block merge.
 | VP1-BND-016 | Time discipline | Inspect configuration, logs and audit records | All timestamps UTC; all durations in milliseconds; no local-time formatting |
 | VP1-BND-020 | Both suites run per change | Inspect CI configuration | Both profile suites execute on every change; neither is skippable by branch or label |
 | VP1-BND-021 | Per-profile suite exists | Inspect the suites | One suite per profile, all targeting the same core (same core hash, VP1-BND-006) |
+| VP1-BND-022 | Release knowledge in one module | Scan every module for a comparison of a release to a literal | None outside `core/release.py` (and its own tests) |
+| VP1-BND-023 | Release is a stated deployment parameter | Inspect the configuration code and the suites | `MCX_RELEASE` is read with no fallback value; a per-release conformance suite exists |
 
 ---
 
@@ -335,13 +337,6 @@ runs: Kamailio relays it statefully, and Asterisk mirrors it on its own leg.
 
 | Case | Title | Pass criterion |
 |---|---|---|
-| VP1-REL-001 | Release is selected, never defaulted | Process refuses to start with `MCX_RELEASE` unset, unsupported or unparseable; exit code 2 |
-| VP1-REL-002 | Release and profile are independent | Conformance suite passes for every profile at every supported release; CI runs the matrix, no combination skippable |
-| VP1-REL-003 | A release emits only what it defines | For each of the eight tabulated releases, every subtype, field id and revoke cause the release defines encodes, and everything it does not is refused |
-| VP1-REL-004 | Subtype 14 is read per release | Rel-17 reports Floor Queued Cancel, Rel-18+ reports Queued Floor Requests, from identical bytes |
-| VP1-REL-005 | Wrong release is not malformed | A Rel-19 message decoded at Rel-17 raises `ReleaseRefused`, counts `floor_wrong_release`, and does not count `floor_malformed` |
-| VP1-REL-007 | Signalling warning codes are release-gated | A refusal whose TS 24.379 warning code post-dates the configured release carries the explanatory phrase without the number, keeps its 4xx/5xx status, and does not raise |
-| VP1-REL-006 | Release is in the audit record | Every audit record's identity carries the profile triple and the release |
 | VP1-DOC-001 | Group documents served | Group documents retrievable over HTTP per TS 24.481; schema-valid; content matches the network profile's group configuration (SVC-OP-03) |
 
 ### 7.5 TS-OAM — observability (ENV-INT)
@@ -353,6 +348,23 @@ runs: Kamailio relays it statefully, and Asterisk mirrors it on its own leg.
 | VP1-OAM-003 | Session lifecycle audited | Admission, refusal, establishment and release each produce an audit record; refusals carry their reason code |
 | VP1-OAM-004 | Structured logs | Logs machine-parsable; one stable correlation identifier per session, present on every record of that session across all components |
 | VP1-OAM-005 | Restart without committed-record loss | Restart an instance mid-run | No committed session record lost; platform returns to service |
+
+
+### 7.6 TS-REL — release selection (ENV-UNIT, ENV-INT)
+
+The 3GPP release is a deployment parameter, independent of the profile
+(PLT-REL-001 to 009). These cases were listed inside the TS-DOC table until
+0.28.
+
+| Case | Title | Pass criterion |
+|---|---|---|
+| VP1-REL-001 | Release is selected, never defaulted | Process refuses to start with `MCX_RELEASE` unset, unsupported or unparseable; exit code 2 |
+| VP1-REL-002 | Release and profile are independent | Conformance suite passes for every profile at every supported release; CI runs the matrix, no combination skippable |
+| VP1-REL-003 | A release emits only what it defines | For each of the eight tabulated releases, every subtype, field id and revoke cause the release defines encodes, and everything it does not is refused |
+| VP1-REL-004 | Subtype 14 is read per release | Rel-17 reports Floor Queued Cancel, Rel-18+ reports Queued Floor Requests, from identical bytes |
+| VP1-REL-005 | Wrong release is not malformed | A Rel-19 message decoded at Rel-17 raises `ReleaseRefused`, counts `floor_wrong_release`, and does not count `floor_malformed` |
+| VP1-REL-006 | Release is in the audit record | Every audit record's identity carries the profile triple and the release |
+| VP1-REL-007 | Signalling warning codes are release-gated | A refusal whose TS 24.379 warning code post-dates the configured release carries the explanatory phrase without the number, keeps its 4xx/5xx status, and does not raise |
 
 ---
 
@@ -376,7 +388,7 @@ a concrete artefact is not evidence.
 
 ## 9. Traceability matrix
 
-All 83 R1 requirements. Method as specified in PLT-SRS.
+All 92 R1 requirements. Method as specified in PLT-SRS. (Until 0.28 this table held 83: the nine PLT-REL requirements, R1 since PLT-SRS 0.2, were missing.)
 
 | Requirement | M | Verified by |
 |---|---|---|
@@ -458,6 +470,15 @@ All 83 R1 requirements. Method as specified in PLT-SRS.
 | PLT-OAM-002 | T | VP1-OAM-003 |
 | PLT-OAM-005 | T | VP1-OAM-004 |
 | PLT-OAM-007 | T | VP1-OAM-002 |
+| PLT-REL-001 | T | VP1-REL-001 |
+| PLT-REL-002 | T | VP1-REL-001, VP1-BND-023 |
+| PLT-REL-003 | T | VP1-REL-002 |
+| PLT-REL-004 | T | VP1-REL-003, VP1-REL-004 |
+| PLT-REL-005 | T | VP1-REL-006 |
+| PLT-REL-006 | T | VP1-REL-005 |
+| PLT-REL-007 | I | VP1-REL-002 |
+| PLT-REL-008 | I | VP1-BND-022 |
+| PLT-REL-009 | T | VP1-REL-007 |
 | PLT-VER-001 | I | VP1-BND-021 |
 | PLT-VER-002 | I | VP1-BND-020 |
 | PLT-VER-003 | A | VP1-ANL-003 |
@@ -499,6 +520,19 @@ R1 verification is complete when all of the following hold:
    arbitration, captured and matched by the trace comparator.
 7. Open points affecting R1 (§11) are closed or explicitly deferred with a
    recorded decision.
+
+**How criteria 1 to 3 are shown (since 0.28).** `tools/vp_results.py` writes
+`docs/PLT-VP-R1-RESULTS.md` for one commit: every case of §3–§8 and every
+requirement of §9 with its result and evidence. A test is evidence for a case
+when it is named `test_vp1_<suite>_<nnn>` or marked `@pytest.mark.vp(...)`
+(`tests/conftest.py` refuses a link to a case this plan does not define); the
+boundary gates and `tools/interop/run.py --results` add theirs. Passing
+evidence is not a result: whether it shows the pass criterion is judged in
+`docs/PLT-VP-R1-REVIEWS.yaml`, and a review goes STALE when its evidence
+changes. The register also checks §9 against PLT-SRS. First run, 2026-09-28,
+after an independent review of every case: 16 of the 101 gating cases PASS,
+78 PARTIAL, 4 FAIL, and the 3 analyses are not signed; 11 of 92 requirements
+PASS. What the review found in the code, as opposed to in the tests, is RES-OP-01 to 10.
 
 A case may not be waived. A requirement whose case cannot pass is deferred by
 moving the requirement to a later phase in PLT-SRS, with the reason recorded —
@@ -573,6 +607,16 @@ not by relaxing its pass criterion.
 | SIP-OP-17 | **CLOSED 2026-09-25 (decided: `MCX_SESSION_EXPIRES`, a required deployment setting of at least 90 s; the REFER option tags carried as the specification says).** Every dialog now has an RFC 4028 session timer. **The caller's dialog.** The timer is negotiated on the INVITE: below 90 s, the answer is 422 with `Min-SE: 90`; a longer interval is lowered to the setting; the refresher is the request's, else `uac`; a caller without timers gets refresher `uas`, and the platform keeps that timer itself. **Each callee's leg.** The timer is negotiated from the callee's 2xx: an interval below 90 s is taken as 90; when the 2xx has no Session-Expires, the platform keeps a timer of its own and refreshes at the setting; a 422 from the callee is retried once with its Min-SE. **In-dialog UPDATE and re-INVITE** are accepted from the caller and from callees. The checks cover: the connection, both tags, and a rising CSeq; glare, and an offer while the platform's own offer awaits its answer (both 491); the early dialog (491). **Offers.** An offer that keeps the call's codec, at a unicast address, moves the relay's remote address and gets the same relay answer. Any other offer gets 488. An offerless re-INVITE gets the platform's offer, and the answer in its ACK is applied only when the ACK carries the dialog's tags. **When the platform refreshes**, it sends UPDATE at half the interval, or a re-INVITE when the peer does not allow UPDATE. Its ACK goes to the remote target that the 2xx left. On failure: 408 or 481 ends the dialog; 422 is retried with the Min-SE, which then goes with every later refresh; 491 is retried per RFC 3261 14.1; other failures are retried halfway to expiry. **Expiry.** When no refresh arrives, the platform sends BYE at the interval less min(32 s, a third). A callee's expiry ends that leg, and the call when no leg is left. **Contact.** The Contact on every dialog is a per-session GRUU with `isfocus`. The platform's dialog tags are keyed with a per-process secret, so a callee cannot compute the caller's. **Verification.** `tests/test_session_timer.py`: 102 cases. Mutation testing: every mutant killed except one equivalent (an equal CSeq is already 482 at the inbound guard). An independent review. It found six defects, all fixed, each pinned by a test: the timer stopped for peers without timers; a peer's interval was not bounded below; an ACK with foreign tags could carry the answer to an offerless re-INVITE, and so move media; the refresh retried after a 422 carried no Min-SE; in-dialog offers could point the relay at an unspecified or multicast address; the ACK to a refresh ignored the target refresh. The review also led to fault isolation in the timer tick and on the response path, and to offer/answer overlap checks. A re-review confirmed the fixes and found three more issues, fixed and pinned: a forged ACK used up the transaction, so the genuine answer was lost and later offers were refused 491; a refusal of the platform's own liveness refresh ended a live call (any final response now counts as alive); and a fault while ending an expired dialog was retried on every tick. VP1-SIG-001, re-run against Kamailio and Asterisk. It adds checks on the 200 OK's timer and focus Contact, and on a refresh UPDATE through Kamailio. Limits: SIP-OP-18. | closed |
 | SIP-OP-18 | **Open, low consequence (item 6 decided and built).** Limits of the refresh implementation (SIP-OP-17). (1) The call's media is not renegotiated. An offer that changes codec, payload layout or media gets 488; a new unicast address, or a new payload type number, for the same codec is followed (MED-OP-01). RFC 2543-style hold (`c=0.0.0.0`) therefore also gets 488. (2) In the caller's early dialog, an UPDATE or re-INVITE gets 491, and a callee's gets 481, where RFC 3311 would allow a refresh. (3) A leg's re-INVITE whose 2xx is never ACKed does not end the leg, where RFC 3261 13.3.1.4 says it SHOULD. On the caller's dialog it ends the call, as before. (4) A 422 from a callee is retried once. (5) REFER and its option tags (`tdialog`, `norefersub`, `explicitsub`, `nosub`) are advertised without REFER being implemented, as decided. (6) **Decided 2026-09-25 and built: the identity is the TLS certificate; a refresh on a new connection is accepted, and the old connection is dropped.** An in-dialog UPDATE, re-INVITE or BYE on a new connection is accepted when that connection proves the dialog's party. A user's connection proves it when its certificate names the party. A core's connection proves it only when it comes from the same trusted core (the same core CA and a shared trusted DNS name): a core may assert any identity, but it may not take a user's dialog. Both tags and a rising CSeq are still required, and the move happens only when the request is answered 200. The dialog then belongs to the new connection, and the old one is dropped from it for good (a weak set of retired connections). An ACK is still accepted on the connection its request came in on, and so is the answer to a refresh the platform had sent there, which is ACKed and ignored. The TLS connection itself is not closed: it may carry other dialogs, or a core's other users. Leg Call-IDs are now random, so no member can compute another dialog's Call-ID or the platform's tag on it. The independent review found five defects in the first version, and a re-review one more, all fixed and pinned by tests: a trusted core could take a directly attached user's dialog and its media; a BYE from another connection was checked on one tag; a move while an ACK was outstanding ended the call; the platform's abandoned re-INVITE went unACKed; a refused request moved the dialog; and a refresh answer on the old connection was dropped. Registration (`flows_by_user`) is not moved; a reconnecting client re-REGISTERs. The ACK of an initial INVITE's 2xx is not moved either, so a reconnect between the 200 and the ACK still ends the call. (7) With no route set, a peer sends its in-dialog requests to the GRUU as Request-URI. A core that resolves GRUUs against its registrar (RFC 5627) would not find it, because it is never registered. Behind a Record-Routing core (Kamailio in VP1-SIG-001) it works. (8) For calls with no media relay, in-dialog offers are compared as text, ignoring the `o=` line, so a re-offer that changes other lines gets 488. (9) An answer in an ACK that the relay cannot use is logged, and the session goes on unchanged. RFC 3261 would end it with BYE. (10) The platform's dialog tags are keyed with a per-process secret, so two processes serving the same dialogs would disagree; one process serves a call from start to end (SVC-OP-02). (11) Loopback, and the relay's own address, are accepted as media addresses (interop runs on loopback); media the relay sends to itself is dropped by its source check. Deviation, recorded in PLT-CONF-AUDIT 4.39: for a peer without timers, the platform follows RFC 4028 (refresher `uas`, no `Require: timer`), not TS 24.379's unconditional `refresher=uac` and `Require`. | R2 |
 | MED-OP-02 | One payload type per session (no transcoding). Not built: SRTP (R2), voice RTCP SR/RR relay, NAT latching (source must equal the SDP address), IPv6, media for routed/partner legs. Floor control across a gateway or interconnection is deliberately not addressed (ICD-OP-06, ICX-OP-03). | PLT-MED-* completeness |
+| RES-OP-01 | **Open, a defect (security).** Found by the review of VP1-HOOK-012. Group members that come from the resolver's group source are not checked against the profile's declared domains (`profiles/common/tables.py`, `resolve`); only `register_user` and `register_group` check. A source returning `sip:x@other.example` puts that member in the call. The core's POST-3 check of a resolution does not apply the domain rule either. | VP1-HOOK-012, PLT-IDM-008 |
+| RES-OP-02 | **Open, a defect.** Found by the review of VP1-HOOK-004. The audit records only a few fields of each hook decision (`core/session.py`): of the priority decision the label and scope, not the level, pre-emption flags or floor priority; of the session decision only `recording_required`; of the bearer decision only the QoS identifier. ICD-GEN-041 asks for each decision in full. | VP1-HOOK-004, VP1-CC-006 |
+| RES-OP-03 | **Open, a defect.** Found by the review of VP1-FC-021. Floor transitions are kept in the floor machine's memory and never written to the audit store: `RecordType.FLOOR_TRANSITION` exists and nothing emits it. A call cannot be reconstructed from the audit trail. | VP1-FC-021 |
+| RES-OP-04 | **Open, a defect.** Found by the review of VP1-OAM-004. The JSON log format (`service/logs.py`) has no correlation id, and the SIP and media log lines carry none. The audit records do. | VP1-OAM-004 |
+| RES-OP-05 | **Open, for the owner.** Found by the review of VP1-SIG-006. The HTTP interface (`service/http.py`: `/healthz`, `/readyz`, and the TS 24.481 group documents) is plain HTTP, where the case asks for plaintext refused on every external interface. Either it gets TLS (HTTP-1 in PLT-SRS §3.1 is HTTPS), or it is declared internal-only with the case amended to say so. | VP1-SIG-006 |
+| RES-OP-06 | **Open, a defect.** Found by the review of VP1-BND-004. Hook value objects are frozen but hold plain `dict` fields (`SessionRequest.attributes`, `FloorPolicy.timers_ms`, and `attributes` on four other types), which can be changed in place: `SessionRequest(...).attributes["x"] = "y"` succeeds. The gate checks `frozen=True` only. | VP1-BND-004 |
+| RES-OP-07 | **Open, a defect.** Found by the reviews of VP1-HOOK-034 and 041. The core does not check at runtime that a hook's floor policy is consistent (queueing and depth, ICD §5.3 POST-1/2) or that a bearer decision's ARP pre-emption capability agrees with the priority decision (POST-5). Only profile validation and the in-tree bearer selector enforce them, so a substituted hook returning an inconsistent decision is accepted. | VP1-HOOK-034, VP1-HOOK-041 |
+| RES-OP-08 | **Open, a defect.** Found by the review of VP1-REL-002. The CI conformance matrix runs releases 17 and 19 only, not every supported release, and `tests/test_conformance.py` never reads `MCX_RELEASE`, so the release axis of the matrix changes nothing. | VP1-REL-002, PLT-REL-003, PLT-REL-007 |
+| RES-OP-09 | **Open.** Found by the review of TS-BND, which planted violations in a scratch copy: every gate passes at least one obvious variant of what it blocks (per case in the reviews file). VP1-BND-010 checks something else: that the hook ids appear in `core/`, not that module boundaries are named for the PLT-SRS §3.1 reference points. | VP1-BND-001 to 023 |
+| RES-OP-10 | **Open, for the owner: three rulings.** (1) `core/qos.py` holds the TS 23.501 5QI table and ARP bounds, the literals VP1-BND-012 says core must not hold: a recorded exception (3GPP constants, not profile policy) or a move. (2) The floor machine's guards read profile-supplied settings (`queueing_enabled`, `override_allowed`, `max_queue_depth`), which VP1-BND-009 forbids as written. (3) VP1-FC-014's criterion contradicts the accepted FC-OP-07 behaviour (pre-emption with queueing disabled). Each needs the case amended or the code changed. | VP1-BND-012, VP1-BND-009, VP1-FC-014 |
 
 ---
 
@@ -581,6 +625,7 @@ not by relaxing its pass criterion.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
+| 0.28 | 2026-09-28 | Results register (§10): `tools/vp_results.py`, `docs/PLT-VP-R1-RESULTS.md`, `docs/PLT-VP-R1-REVIEWS.yaml`. Plan defects it found, corrected: §9 lacked the nine R1 PLT-REL requirements (83 rows for 92), §1.2's method counts were wrong, the VP1-REL cases sat in the TS-DOC table (now §7.6), and gates VP1-BND-022/023 were run but not defined (now in §4). Independent review of every case: RES-OP-01 to 10 opened. |
 | 0.27 | 2026-09-26 | VP-OP-05 widened and kept open in R1 (owner decision): how the production indicator is read today, three weaknesses (a forgotten flag, a flag its own author can switch, no record of either), and options A, B and C. |
 | 0.26 | 2026-09-26 | SVC-OP-03 closed (decided): groups and users are part of the network profile; `MCX_GROUPS_FILE` refused. VP1-DOC-001 names the network profile. |
 | 0.25 | 2026-09-26 | TS 26.179 read from docs/3GPP: citations confirmed; MED-OP-03 and MED-OP-05 annotated (4.2.1, 4.1.2, 4.1.3). |

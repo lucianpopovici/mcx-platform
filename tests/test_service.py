@@ -127,6 +127,7 @@ def stop(proc):
     {"MCX_RELEASE": "21"},                     # unpublished release
     {"MCX_RELEASE": "seventeen"},              # not a release at all
 ])
+@pytest.mark.vp("VP1-REL-001")
 def test_process_refuses_and_exits_nonzero(env, change):
     proc = spawn({**env, **change}, free_port())
     try:

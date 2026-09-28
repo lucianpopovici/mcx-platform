@@ -230,6 +230,7 @@ def test_contention_hands_the_floor_over_and_media_follows(call):
     assert ues[U[0]].voice() == pkt and ues[U[2]].voice() == pkt
 
 
+@pytest.mark.vp("VP1-FC-002")
 def test_full_call_trace_has_no_deviation(call):
     rt, core, flows, ues, _ = call
     setup_call(call)

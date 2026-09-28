@@ -507,6 +507,7 @@ def rt(tmp_path, pki):
     r.close()
 
 
+@pytest.mark.vp("VP1-REL-006")
 def test_every_audit_record_names_the_network(rt):
     """NET-OP-01, with PLT-REL-005: profile, release and network together."""
     net = rt.network.identifier()

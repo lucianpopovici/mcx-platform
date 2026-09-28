@@ -65,6 +65,21 @@ jobs:
       - name: Release gating across all eight published releases
         run: python3 -m pytest tests/test_release.py -q
 
+  results-register:
+    runs-on: ubuntu-latest
+    needs: boundary
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyyaml pytest cryptography lxml
+      # PLT-VP-R1 §10: the plan agrees with PLT-SRS, every test link names a
+      # real case, and no evidence fails. Interop needs Kamailio and Asterisk
+      # and is supplied locally (tools/interop/run.py --results).
+      - name: R1 results register
+        run: python3 tools/vp_results.py --out /tmp/results.md
+
   images:
     runs-on: ubuntu-latest
     needs: boundary

@@ -46,8 +46,9 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (600+ tests)
+python3 -m pytest tests/ -q                   # must stay green (1267 tests)
 python3 tools/check_boundary.py --root .      # must stay 20/20
+python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
 MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
   MCX_STRICT_RELEASE=true MCX_ADHOC_LIST_MAX=100 MCX_NETWORK_FILE=examples/network.yaml \

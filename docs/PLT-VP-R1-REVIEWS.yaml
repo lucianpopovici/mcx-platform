@@ -1,0 +1,1359 @@
+# PLT-VP-R1 reviews: whether a case's evidence shows its pass criterion.
+#
+# Read by tools/vp_results.py, which writes docs/PLT-VP-R1-RESULTS.md. A case
+# is PASS only when its entry here says `pass`, and the evidence listed is
+# exactly the evidence the register finds now, all passing. When tests are
+# added, removed or renamed the entry goes STALE and must be reviewed again.
+#
+#   <case>:
+#     verdict: pass | partial | fail
+#     by: who judged (a person, or "independent review (agent)")
+#     date: YYYY-MM-DD
+#     evidence: [the evidence ids judged, as the register names them]
+#     gap: what the criterion asks that the evidence does not show (partial, fail)
+#     note: anything the verdict depends on
+#     signed: who signed (analyses, §8: required for pass)
+#
+# Evidence ids: pytest test functions (tests/<file>.py::<function>), boundary
+# gates (gate:VP1-BND-nnn), interoperability runs (interop:<core>).
+
+VP1-FC-002:
+  verdict: pass
+  by: owner decision VP-OP-02, recorded in PLT-VP-R1 §6.1
+  date: 2026-09-24
+  evidence:
+    - tests/test_media_e2e.py::test_full_call_trace_has_no_deviation
+  note: >-
+    Specification-derived flows accepted in place of third-party captures (VP-OP-02). Not shown,
+    and accepted: that another implementation's encoder produces bytes this decoder accepts.
+
+VP1-SIG-001:
+  verdict: pass
+  by: owner decision VP-OP-01, recorded in PLT-VP-R1 §7.1.1
+  date: 2026-09-24
+  evidence:
+    - interop:asterisk
+    - interop:kamailio
+  note: >-
+    A B2BUA counts (VP-OP-01). Travels with SIP-OP-12 (originating calls through a B2BUA are not
+    possible) and SIP-OP-02 (TLS captures). Re-run with tools/interop/run.py --results.
+
+# Independent review, 2026-09-28: five reviewers, one per suite group, none of whom
+# wrote the code or tests. Each verdict rests on reading the assertions (and, for
+# the gates, on planting violations in a scratch copy).
+
+VP1-LOAD-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_001_frmcs_profile_loads
+  - tests/test_loader.py::test_vp1_load_001_valid_profile_loads
+  gap: Neither test reaches 'ready' or checks the log. Both call loader.load(), which never logs (only
+    loader.startup logs name/version/hash), and nothing asserts on log output. Close with a test that
+    calls service.runtime.build_runtime (or loader.startup) with MCX_PROFILE=mcx, asserts readiness is
+    true, and uses caplog to assert one record carrying name=mcx, version=<profile version> and hash=<64-hex
+    content hash>.
+  note: Asserts name, a non-empty version, a 64-char hash and five non-None hooks on the object only.
+VP1-LOAD-002:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_002_no_profile_configured
+  gap: '''No listening socket opened'' is not asserted, and the test calls loader.startup([]) directly
+    instead of starting the process, so the MCX_PROFILE path through Config.from_env is not covered. The
+    diagnostic says ''no profile configured'' but never names the configuration item (MCX_PROFILE). Close
+    with a test that runs build_runtime/the service entry point with MCX_PROFILE unset, asserts StartupRefused
+    with ''MCX_PROFILE'' in the message, and asserts that no socket was bound (for example, the configured
+    SIP and HTTP ports are still free, or socket.bind is patched to fail).'
+VP1-LOAD-003:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_003_named_profile_absent
+  note: loader.startup(['nonexistent']) raises StartupRefused and the message contains 'nonexistent'.
+    build_runtime calls loader.startup before anything else.
+VP1-LOAD-004:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_004_two_profiles_refused_outside_test_mode
+  note: startup(['mcx','frmcs'], env={}) raises StartupRefused with 'exactly one' in the message.
+VP1-LOAD-005:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_005_production_indicator_variants
+  - tests/test_loader.py::test_vp1_load_005_test_mode_refused_in_production
+  gap: 'The production indicator is still undefined. VP-OP-05 is open and states that it blocks this case,
+    so the tests only check the proposed is_production() and cannot demonstrate the criterion against
+    an indicator that has not been decided. Attribution rests on the substring ''production'' appearing
+    in the message. Close this once VP-OP-05 is decided: parametrize startup over each defined indicator
+    form, and add a control asserting that the identical profile set with the same test mode but no indicator
+    starts, so the refusal is shown to depend on the indicator alone.'
+VP1-LOAD-006:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_006_test_mode_loads_both
+  gap: '''Independently addressable'' is not asserted. The test only compares the set of profile names
+    returned by startup_all, which in fact loads each profile a second time outside startup. Close with
+    a test that, in test mode, routes an MCX-only call type and an FRMCS-only call type (for example prearranged-group
+    and rec-broadcast) through the started runtime and asserts each is handled by its own profile''s hooks,
+    with the audit identity naming that profile.'
+VP1-LOAD-010:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_010_unknown_key_rejected
+  - tests/test_loader.py::test_vp1_load_010_unknown_top_level_key_rejected
+  note: Asserts code unknown-key, with path call_types[0].colour (nested) and <root>.experimental (top
+    level).
+VP1-LOAD-011:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_011_undeclared_urgency_rejected
+  gap: The diagnostic is only checked through its path 'call_types[0].urgency'. That identifies the call
+    type by index, not by id, and nothing asserts the urgency value 'catastrophic'. Close by asserting
+    the defect message contains both the call type id (raw['call_types'][0]['id']) and 'catastrophic'.
+VP1-LOAD-012:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_012_undeclared_scope_rejected
+  gap: Only the path 'priority.rules[0].decision.scope' is asserted. That names the rule by index, and
+    the undeclared scope 'railway' is not asserted anywhere. Close by asserting the message contains 'railway'
+    and the rule's identifier (its id, or its index if index is the agreed way to name a rule).
+VP1-LOAD-013:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_013_undeclared_application_rejected
+  gap: Only the path 'call_types[0].application' is asserted. Neither the call type id nor the undeclared
+    application 'etcs' is checked in the diagnostic. Close by asserting the message contains both the
+    call type id and 'etcs'.
+VP1-LOAD-014:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_014_undeclared_initiator_role_rejected
+  gap: Only the path 'call_types[0].initiator_roles[0]' is asserted. Neither the call type id nor 'train-driver'
+    is checked in the diagnostic. Close by asserting the message contains both.
+VP1-LOAD-015:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_015_priority_table_not_total
+  note: 'Removing the catch-all gives a not-total defect at priority.rules, and a message contains ''sds''.
+    Weak point: this is an ''any'' match on a substring.'
+VP1-LOAD-016:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_016_bearer_table_not_total
+  gap: The criterion requires the uncovered (call type, media) combination to be named. The test only
+    asserts that 'data' appears in some message and never checks the call type. Close by asserting that,
+    for every call type declaring data, a not-total message contains both that call type id and 'data'.
+VP1-LOAD-017:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_017_reserved_reason_code_rejected
+  gap: 'The test covers a nearby thing: a reserved code (''hook-timeout'') added to the declared reject_reason_codes
+    list. It does not cover a session policy returning a code outside the declared set. Neither branch
+    is tested: no static rejection of a policy that can emit an undeclared code, and no runtime hook-contract-violation
+    when authorise/admit returns one. Close with a test hook whose authorise returns an undeclared reason_code,
+    run through the session manager, asserting a hook-contract-violation outcome (plus a static-validation
+    test if any such case is statically determinable).'
+  note: Ahead of phase (PLT-HOK-030); does not gate R1.
+VP1-LOAD-018:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_018_unknown_floor_timer_rejected
+  note: T999 is rejected as unknown-key, and the path contains the timer name. Ahead of phase.
+VP1-LOAD-020:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_020_missing_hook_rejected
+  note: Deleting bearer_selector gives missing-key at profile.hooks.bearer_selector.
+VP1-LOAD-021:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_021_bad_hook_specification
+  - tests/test_loader.py::test_vp1_load_021_hook_not_implementing_interface
+  - tests/test_loader.py::test_vp1_load_021_unimportable_hook_module
+  gap: 'No evidence covers the step as written, a hook lacking a required method: BadPolicy has ''compare''
+    with the wrong arity, and the ''missing method'' branch of _verify_interface is untested. ''Refuses
+    to start'' is not shown either: the test calls loader.resolve_hooks directly, not startup. Of the
+    other two tests, one covers an unimportable module and the other a malformed spec (a validation defect).
+    Close with a hook class that omits one required method (for example, no ''compare''), loaded via loader.startup
+    on a temporary profile package, asserting StartupRefused whose message contains ''priority_policy''
+    and ''compare''.'
+VP1-LOAD-022:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_022_no_default_hook_substituted
+  gap: 'The five parametrized runs only show that validation.build rejects the schema. None of them runs
+    load/startup, so a default substituted anywhere between read_package and resolve_hooks (for example,
+    filled into raw before build) would not be caught. Close by parametrizing over the five hooks: write
+    the mutated profile to a temporary package, call loader.startup, assert StartupRefused naming profile.hooks.<field>,
+    and assert that no LoadedProfile or runtime is returned.'
+VP1-LOAD-030:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_030_invalid_profile_prevents_start
+  gap: 'Only StartupRefused from loader.startup is asserted. None of the three clauses is checked: no
+    listening socket, readiness never true, non-zero exit status. Close with a test that launches the
+    service entry point as a subprocess with an invalid profile and asserts: non-zero return code; the
+    SIP/HTTP ports are never bound (connect refused) during and after the attempt; and no ready/health
+    response at any point.'
+VP1-LOAD-031:
+  verdict: fail
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_031_malformed_yaml_reports_clearly
+  gap: Neither clause is asserted. The test only checks that malformed YAML yields a diagnostic mentioning
+    YAML/well-formed, and malformed YAML is a parse failure, not a rejection after partial parse. Close
+    with a well-formed profile that fails late validation or hook resolution, run through build_runtime
+    with a spy/temporary MCX_DATA_DIR and a stub store/auditor, asserting that the store directory is
+    untouched (no files created) and that no component constructor (SessionManager, Auditor, store, transport)
+    was called.
+  note: Cannot serve as evidence for either clause. Ahead of phase.
+VP1-LOAD-040:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_040_profile_is_immutable
+  gap: '''Decisions unchanged thereafter'' is not asserted. The mutation is attempted directly on a built
+    Profile, not from a test hook as the step requires. pytest.raises(Exception) also accepts any error,
+    such as a KeyError or IndexError, and not only a rejection of the write. Close with a test hook that
+    attempts the three mutations during evaluate(), asserts a specific immutability error (FrozenInstanceError,
+    TypeError or AttributeError), and then asserts that priority, session and bearer decisions for every
+    call type equal those captured before the attempt.'
+VP1-LOAD-041:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_041_hash_ignores_key_order
+  - tests/test_loader.py::test_vp1_load_041_hash_stable_and_sensitive
+  gap: loader.content_hash is tested on in-memory dicts. The load path is not exercised, so if load()
+    stopped using content_hash(raw) for profile.content_hash, these tests would still pass (test_vp1_load_001
+    only checks len==64). Close by loading the same package twice with loader.load and asserting equal
+    profile.content_hash, then altering one value in a temporary copy of profile.yaml, reloading, and
+    asserting the hash differs.
+  note: Stable and sensitive are both asserted at the function level, and key-order independence is also
+    shown.
+VP1-LOAD-042:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_load_042_call_type_set_is_profile_determined
+  gap: Only Profile.declares_call_type is asserted. No request for rec-broadcast is made with MCX loaded,
+    so 'rejected as undeclared' and 'no session established' are both unasserted. Close with a test that
+    submits a rec-broadcast request to an MCX-loaded runtime/SessionManager and asserts a refusal with
+    reason call-type-not-permitted (or the declared undeclared-type code), that no session exists in the
+    manager or store, and that the audit record shows a refusal.
+VP1-BND-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-001
+  gap: 'Tokenised word match over core/*.py with a fixed 15-term list. Probed misses: CamelCase identifier
+    `class RailwayProfile` (token ''railwayprofile''), plurals (''trains'', ''dispatchers''), ''GSM-R''
+    (splits to gsm/r), identifier `track_section` (multiword match needs a space), in-tree profile name
+    ''utility'' (not in list), non-.py files under core/ (e.g. core/PROFILE_BOUNDARY.md, any yaml). Close
+    with: split identifiers on case and ''_'' boundaries, match stems/plurals and hyphen/underscore variants,
+    derive profile names from profiles/*/profile.yaml, scan every file under core/.'
+  note: Identifiers, literals and comments are all on the scanned lines, but only for exact whole-token
+    forms of a hand-kept list.
+VP1-BND-002:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-002
+  gap: 'Only ast.Import/ImportFrom with module ''profiles[.x]''. Probed misses: `importlib.import_module(''profiles.mcx.hooks'')`,
+    `__import__(''profiles'')`, and `from .. import profiles` (ImportFrom with module=None is skipped).
+    Close with: resolve relative imports (level + names), flag string literals starting ''profiles.''
+    / ''profiles/'' passed to importlib/__import__/Path in core/, and state explicitly that core/loader.py''s
+    config-driven import_module is the one sanctioned dynamic edge.'
+  note: Plain static imports are caught; dynamic and relative-name forms are not.
+VP1-BND-003:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-003
+  gap: 'Only matches the literal shape `<x>.<hook_field>.<method>`. Probed misses: aliasing (`p = self._hooks.session_policy;
+    p.poke()` — the pattern core/session.py:494 already uses), `getattr(self._hooks.session_policy, ''poke'')()`,
+    and aliasing in another module. It also does not detect core calling profile code by any route other
+    than the six hook fields, and HOOK_METHODS is a hand copy not checked against the Protocols in core/hooks.py.
+    Close with: derive allowed methods from the hooks.py Protocols, track names bound to hook objects
+    (dataflow within function scope), and flag getattr on hook objects; or wrap hooks in a runtime proxy
+    that rejects undeclared attributes and test that.'
+  note: Direct-shape calls to undeclared methods are caught (control probe).
+VP1-BND-004:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-004
+  gap: 'Checks only that @dataclass-decorated classes in core/hooks.py carry frozen=True; does not check
+    field types, so ''no mutable field'' is untested. Probed misses: frozen dataclass with a `list` field,
+    `@dataclasses.dataclass` (attribute-form decorator is not recognised, class skipped), plain non-dataclass
+    class. The current tree already violates ''no mutable field'': SessionRequest/LocationContext/PathSpec/PartnerRoute/InterworkingRoute.attributes
+    and FloorPolicy.timers_ms default to a plain dict (verified: SessionRequest(...).attributes[''x'']=''y''
+    mutates), and Sequence fields accept lists. Close with: require every field type to be an immutable
+    type (tuple, frozenset, MappingProxyType/frozen mapping, scalar, enum, other frozen value object),
+    reject dict/list/set defaults and annotations, recognise all dataclass decorator forms, flag any non-Enum/non-Protocol
+    class in hooks.py; add a runtime test that every value object''s containers reject mutation.'
+  note: Gate passes while the criterion's second clause is actually violated in core/hooks.py.
+VP1-BND-005:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-005
+  gap: 'Whitelist {core, core.hooks, core.errors, core.model} on the imported module name only. Probed
+    misses: `from core import session` (module ''core'' is whitelisted, the imported name is not checked),
+    `import core` + `getattr(core, ''session'')`, `importlib.import_module(''core.session'')`. Also the
+    criterion says ''other than the hook types'', yet the gate permits core.model and core.errors wholesale
+    (profiles/common/tables.py imports core.model), which needs either a ruling that these count as interface
+    types or a narrower whitelist of names. Close with: check ImportFrom names against a symbol whitelist
+    taken from core.hooks.__all__ (plus explicitly ruled error/model symbols), flag attribute access on
+    the `core` package and dynamic imports of ''core.*''.'
+  note: Direct `from core.<internal> import` is caught.
+VP1-BND-006:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-006
+  gap: 'Rules 1-2 are checked on images the gate itself stages from one tree, so core-hash identity is
+    true by construction; it is not compared against the images CI actually builds/publishes (the `images`
+    job output) or the recorded release manifests. Rule 3 (no shared code names a profile) scans only
+    .py files and only `profiles.<name>` or `/ ''<name>''`: probed misses are a bare literal `DEFAULT
+    = ''mcx''` in service/, the string ''profiles/mcx/hooks.py'', a shared YAML under profiles/common
+    naming mcx. Rule 4 (no per-profile build file) checks filenames only: `ARG PROFILE=mcx` + `COPY profiles/mcx`
+    inside the one Containerfile passes, as would a per-profile Makefile target or a script not matching
+    build-*.sh. Close with: compare core_hash across the CI-built image manifests; scan all shared files
+    (any type) and build files'' contents for any profile name as a whole token; enumerate build files
+    by content, not name pattern.'
+  note: Image count/hash invariants are exact for staged images; the naming rules are heuristic by the
+    gate's own admission.
+VP1-BND-007:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-007
+  gap: 'Scans core/ only, and the regex requires `profile...:<type> = ''<lit>''` (annotation then default).
+    Probed misses: `def f(profile=''mcx'')` (no annotation), `os.environ.get(''MCX_PROFILE'', ''mcx'')`
+    in core, and a default placed where configuration is actually read — changing service/config.py to
+    `env.get("MCX_PROFILE", "mcx")` passes. The criterion covers code AND config, every path. Close with:
+    scan service/ (config.py) and any config files/defaults, flag any default on MCX_PROFILE reads (env.get
+    with 2nd arg, `or` fallback, getenv default), match unannotated keyword defaults; pair with the runtime
+    tests VP1-LOAD-002/022 as named evidence.'
+  note: The gate docstring itself says it cannot prove absence; the evidence list relies on the gate alone.
+VP1-BND-008:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-008
+  gap: 'Substring markers in core/ only. Probed misses: `loop.add_signal_handler(signal.SIGUSR1, cb)`,
+    an mtime poll via `os.stat(p).st_mtime`, and a SIGUSR1 handler added in service/__main__.py (service/
+    is where signal handlers live and is not scanned). Close with: scan core/ and service/ (the whole
+    runtime), flag any signal handler registration other than the SIGTERM/SIGINT stop handler, add_signal_handler,
+    st_mtime/stat polling, threading timers around the loader, and any second call path into core.loader
+    after startup (call-graph check that the loader is invoked once from startup).'
+  note: SIGHUP/signal.signal/importlib.reload in core are caught.
+VP1-BND-009:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-009
+  gap: 'Covers core/floor.py only; the criterion names floor control, SIP session and document modules
+    (core/session.py, core/sip.py, document servers untouched — probe adding `p.call_types` read in session.py
+    passes). Within floor.py it only blocks five attribute names and requires a module-level *_DISPATCH;
+    a guard driven by a FloorPolicy flag passes (probe `policy.override_allowed` guard missed). The current
+    floor machine already takes profile-supplied non-timer inputs into guards (FloorPolicy.queueing_enabled,
+    override_allowed, initial_grant_to_initiator, max_queue_depth; floor.py:296) — needs an explicit ruling
+    that these are 24.380 configuration parameters, not transitions. Close with: extend to all state-machine
+    modules; enumerate every profile-derived value reaching a transition/guard (dataflow from hook return
+    types) and allowlist only timers_ms and ruled configuration parameters.'
+  note: Only one of the three named module families is inspected.
+VP1-BND-010:
+  verdict: fail
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-010
+  gap: 'The criterion is about module boundaries corresponding to 3GPP reference points in PLT-SRS §3.1
+    (SIP-2, HTTP-1, CSC-1/4/8/9, Rx/N5, MB2/xMB, OBAPP/TSAPP). The gate only checks that the six internal
+    hook ids "IF-IDR"…"IF-ICX" appear as string literals somewhere in core/ — those are platform hook
+    interfaces, not reference points, and presence of a string anywhere says nothing about how a boundary/module
+    is named. No reference-point name appears in core/ or service/ .py at all (grep SIP-2/HTTP-1: none).
+    Close with: a table mapping each §3.1 reference point in phase to the module/class implementing it,
+    and a check that the module/class name or declared constant carries that reference-point name.'
+  note: Evidence checks a different property from the one the criterion states.
+VP1-BND-011:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-011
+  gap: 'Checks profile.yaml rules are match/decision pairs and that TablePriorityPolicy in profiles/common/tables.py
+    has no int literal outside {0,1,-1}. Probed misses: imperative branching on string literals inside
+    TablePriorityPolicy (`return ct == ''emergency''`), and an MCX-profile subclass in profiles/mcx/hooks.py
+    overriding evaluate() with its own logic (the criterion is about the MCX profile''s hook; that file
+    is not inspected at all). Close with: resolve the class the MCX profile.yaml actually binds as priority_policy
+    (including subclasses) and require evaluate/compare to be the generic table interpreter unmodified
+    — flag any override of evaluate/compare in profile packages and any Compare against a non-structural
+    literal (str or int) in the priority policy.'
+  note: Data shape of the table is well checked; 'no imperative logic in the hook' is only sampled.
+VP1-BND-012:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-012
+  gap: 'Flags only `ast.Assign` of an int constant to a target named qos/arp/5qi/qci. Probed misses: AnnAssign
+    `qos_default: int = 65`, a dict `{''emergency'': 65, ''normal'': 69}` bound to a neutral name, and
+    tuple targets `ARP_EMERG, ARP_NORMAL = 1, 9`. Also, the current core/qos.py holds exactly the QoS
+    identifier and ARP literals the step says to inspect for (STANDARDISED_5QI, MC_5QI_MEDIA, ARP_MIN/ARP_MAX
+    = 1, 15) outside hooks.py; the gate passes only because these are frozenset/dict/tuple forms. Either
+    the criterion needs a recorded exception for 3GPP-table validation constants (CONF-AUDIT CA-15) or
+    this is a violation. Close with: flag any int literal in the 5QI/ARP value domain appearing in a QoS/bearer
+    context (dict values, returns, arguments to BearerDecision/PathSpec, AnnAssign/tuple targets) outside
+    hooks.py and an explicit allowlist (core/qos.py) justified in the VP.'
+  note: Detects one syntactic form of a QoS constant, not a priority-to-QoS mapping.
+VP1-BND-013:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-013
+  gap: 'Detects only dict literals mapping >=2 string keys to ints with a priority-ish name. ''All priority
+    decisions traced to IF-PRI'' is not established: probed misses are an if/elif chain returning levels
+    by label and ordering requests by `r.urgency` in core. Close with: trace every consumer of priority/urgency/level
+    values in core back to a PriorityDecision returned by IF-PRI (dataflow), flag comparisons/sorts on
+    request fields (urgency, call_type) outside that, and record the permitted core uses (floor.py queue
+    sort on IF-PRI floor_priority; session.preemption_victims gates on IF-PRI flags) as reviewed exceptions.'
+  note: Heuristic for one table shape, by the gate's own docstring.
+VP1-BND-014:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-014
+  gap: 'Only inspects calls in core/session.py whose *arguments* contain the text ''identity_resolver.resolve''
+    (i.e. invoker.call(...)) and checks some arg is literally `request`. A direct call `self._hooks.identity_resolver.resolve(target,
+    None)` is not examined (probe missed); any other module calling resolve is not scanned; and passing
+    a `request` rebuilt with location/application cleared would pass. It never checks the four named items
+    (initiator, call type, application, location) are populated. Close with: find every call to resolve
+    anywhere in core (func or arg form), require the request argument to be the unmodified inbound SessionRequest,
+    plus a spy-hook test asserting the resolver receives initiator, call_type, application and location
+    with the values of the originating request.'
+  note: Current invoker.call sites do pass `request`; the gate cannot see other shapes.
+VP1-BND-015:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-015
+  gap: 'Checks only direct imports in core/floor.py whose last dotted component is in {sip,rtp,rtcp,socket,requests,http}.
+    Probed misses: `from core import sip` (leaf ''core''), `from service.media import MediaPlane` (''media''
+    not listed), `import asyncio, ssl`; transitive dependencies through other core modules are not followed.
+    The clause ''instantiable in ENV-UNIT'' is not evidenced at all (no test in the evidence list). Close
+    with: compute floor.py''s transitive import closure and forbid core.sip/core.rtcp/core.codec/service.*/socket/ssl/asyncio/selectors/http*;
+    add the ENV-UNIT instantiation test (e.g. tests/test_floor.py constructing the machine with a fake
+    clock) as listed evidence.'
+  note: Only one of two clauses covered, and that one by leaf-name match.
+VP1-BND-016:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-016
+  gap: 'Substring markers on core/ .py and five exact parameter names. Criterion covers configuration,
+    logs and audit records; service/logs.py and service/config.py are not scanned (probe: time.localtime/strftime
+    in service/logs.py missed). Probed misses in core: `datetime.fromtimestamp(x)` (local time), a `timeout_s:
+    float` parameter (seconds, not ms). Nothing checks emitted timestamps are UTC or that configuration
+    durations are in ms. Close with: scan core/ and service/; flag fromtimestamp without tz, naive datetime
+    construction, ctime/asctime/strftime; require duration names to end in _ms (flag _s/_sec/seconds);
+    add a test that parses emitted log and audit records and asserts a UTC offset/Z and ms units, and
+    validate config duration keys.'
+  note: Covers one of three named artefact kinds, heuristically.
+VP1-BND-020:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-020
+  gap: 'Text search: every profile name occurs somewhere in the CI file, ''check_boundary'' occurs, and
+    none of ''if: '', allow_failure, continue-on-error occur. Probed misses: `on: push: branches: [main]`
+    / pull_request branch filters (skippable by branch — the exact thing the criterion forbids), `paths-ignore:
+    [''profiles/frmcs/**'']`, removing frmcs from the conformance matrix while leaving ''frmcs'' in a
+    comment, and a multi-line `if:` with no trailing space. Close with: parse the workflow YAML; require
+    `on` to include push and pull_request with no branches/branches-ignore/paths/paths-ignore; require
+    the conformance job''s matrix.profile to equal the set of profiles/*/profile.yaml; reject any `if`
+    key at job or step level; optionally require branch protection making the job a required check.'
+  note: Current ci.yml is compliant; the gate would not notice it becoming non-compliant.
+VP1-BND-021:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-021
+  gap: 'Only checks tests/test_conformance.py exists and contains the text ''MCX_PROFILE'' (probe: a file
+    with that word in a comment and one empty test passes). It does not check one suite per profile exists/executes,
+    nor the ''same core (same core hash)'' clause at all. Close with: collect the suite per profile (e.g.
+    pytest --collect-only under each MCX_PROFILE) and require non-zero profile-specific tests for each
+    profiles/*/profile.yaml; record the core hash of the tree each suite ran against and assert it equals
+    the VP1-BND-006 image core hash.'
+  note: Existence + string presence only.
+VP1-BND-022:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-022
+  gap: 'Regex for `release|rel <op> 13..20` over core/, service/, tools/ with strings blanked. Scope:
+    the criterion says every module, but profiles/ and tests/ are skipped (probe in profiles/common/tables.py
+    missed). Probed misses: `cfg.release.number >= 19`, `release >= 21` (only 13-20 recognised, so the
+    first Rel-21 comparison passes), `release in (17, 18)`, `release == ''19''` (string literals are blanked,
+    so the literal disappears). Other names (`r`, `ver`, `mcx_rel_num`) also escape. Close with: AST check
+    over all packages (tests exempt only tests/test_release.py) for any Compare/`in` where one side mentions
+    a release-typed name/attribute and the other is a numeric or numeric-string literal, any release number
+    (not a fixed 13-20 range).'
+  note: Catches the canonical inline form only.
+VP1-BND-023:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - gate:VP1-BND-023
+  gap: 'Exact substring `env.get("MCX_RELEASE", ` in service/config.py plus existence of tests/test_release.py.
+    Probed misses: `env.get("MCX_RELEASE") or "19"`, `env.get("MCX_RELEASE","19")` (no space), and a fallback
+    via os.getenv of another variable. The ''per-release conformance suite exists'' clause is a file-existence
+    check only. Close with: AST check that every read of MCX_RELEASE has no default argument and no `or`/conditional
+    fallback, plus the runtime test (VP1-REL-001) that startup is refused with MCX_RELEASE unset, listed
+    as evidence; verify test_release.py is parameterised over the supported releases.'
+  note: Current config.py reads MCX_RELEASE with `or ""` and refuses when empty; the gate itself is a
+    string match.
+VP1-HOOK-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_hook_001_hook_exception_fails_session
+  gap: 'Step requires a raising hook at each of the five interfaces; the test injects only IF-PRI.evaluate.
+    Missing: IF-IDR (identities_of/resolve), IF-SES (authorise/admit/decide/floor_policy), IF-BER.select,
+    IF-IWF.route. Close with a test parametrized over every (interface, method) in the §8.1 sequence (plus
+    IF-IWF.route via an external target), each asserting refusal.reason_code == ''hook-error'', session
+    is None, no INVITE, manager.active == (), no SESSION_ESTABLISHED record, and SESSION_FAILED.detail.interface
+    equal to the injected interface.'
+  note: 'For IF-PRI alone, the clauses are asserted: hook-error, no session, no INVITE, and the failed
+    interface is recorded.'
+VP1-HOOK-002:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_hook_002_contract_violation_is_distinguished
+  note: A resolver returns USER with two members (POST-1). The core refuses with hook-contract-violation
+    and no session; HOOK-001 shows that a raise gives hook-error. The '!= hook-error' assert itself is
+    tautological.
+VP1-HOOK-003:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_hook_003_every_invocation_audited
+  gap: '''One record per invocation'' is only a count (== 8). A trail that audited one hook twice and
+    skipped another still passes, because interface is only checked with startswith(''IF-''). Elapsed
+    time is only checked for key presence (''elapsed_ms'' in detail), not as a non-negative number. Close
+    by asserting that the [(interface, method)] list of HOOK_INVOCATION records equals the §8.1 sequence
+    (as test_invocation_order_matches_icd_section_8_1 does, but it is not listed as evidence) and that
+    elapsed_ms is a float >= 0. Add a failure-path case asserting outcome == ''error'' on the failing
+    invocation.'
+  note: Correlation ID and outcome=='ok' are asserted per record.
+VP1-HOOK-004:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_hook_004_decisions_recorded_in_full
+  gap: '''Each recorded with all fields'' is not asserted. The test checks only the priority label and
+    scope (on SESSION_ADMITTED) and qos_identifier (on SESSION_ESTABLISHED). The core (core/session.py:388-399)
+    records no level, preemption_capability/vulnerability or floor_priority. It records nothing of the
+    session decision except recording_required: no model, auto_answer, acknowledgement_required or max_participants.
+    It records nothing of the bearer decision except qos_identifier: no arp_level, ARP flags, paths or
+    redundancy. A test asserting every field of PriorityDecision, SessionDecision and BearerDecision in
+    the audit trail would fail today, so the implementation looks non-conformant to ICD-GEN-041.'
+VP1-HOOK-010:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_010_resolution_kinds
+  note: USER has len 1; GROUP has group_id and 2 members; unknown target raises ResolutionFailure('unknown-target').
+    All asserted.
+VP1-HOOK-011:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_011_members_deduplicated_and_ordered
+  note: A duplicated member is configured; the result is asserted equal to the deduplicated, ordered tuple
+    across 6 calls.
+VP1-HOOK-012:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_012_domain_restriction
+  gap: 'The test never resolves anything. It only shows that register_user refuses a foreign-domain URI.
+    The clause ''no member returned from an undeclared domain'' is unasserted for resolve(). It is actually
+    violated: with group_source returning [''sip:evil@other.example''] for ''grp:x'', mcx resolve(''grp:x'')
+    returns a GROUP containing that member. tables.py:394-405 applies no domain check to group_source
+    members, and core _check_resolution has no POST-3 check. Close with (a) resolve() of a foreign-domain
+    target -> refused, (b) register_group with a foreign member -> refused, (c) group_source returning
+    a foreign member -> resolve raises and returns no member.'
+  note: Ahead of phase (R2, PLT-IDM-008). The probe run by the reviewer confirms the leak.
+VP1-HOOK-013:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_013_resolved_from_recorded
+  gap: Only the Resolution.resolved_from field is asserted. The clause 'present in the audit record' is
+    not tested. Close with a SessionManager.establish to a functional identity (frmcs 'train-driver' bound)
+    that asserts sink SESSION_ADMITTED.detail['resolved_from'] == 'train-driver'.
+VP1-HOOK-014:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip_transport.py::test_vp1_hook_014_healthy_source_still_resolves_fully
+  - tests/test_sip_transport.py::test_vp1_hook_014_partial_backing_store_raises_and_returns_no_members
+  - tests/test_sip_transport.py::test_vp1_hook_014_reaches_the_wire_as_503_and_leaves_no_session
+  note: A partially readable source raises 'resolver-unavailable' (page 1 was read, nothing returned).
+    On the wire it yields 100/503, no session state anywhere, and nobody invited. A healthy source and
+    unknown-target are not conflated.
+VP1-HOOK-015:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_015_resolution_failure_codes_distinct
+  note: Declared but unheld track-controller gives 'no-binding'; an unknown URI gives 'unknown-target'.
+    Both asserted in the same test.
+VP1-HOOK-020:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_020_priority_decision_complete
+  gap: Neither pre-emption flag is asserted. Level is only checked >= 0, not within the profile's declared
+    range. Only mcx is iterated, while frmcs and utility also declare call types. Close by iterating all
+    three profiles' call types (and urgency variants that reach every priority rule), asserting isinstance(preemption_capability,
+    bool) and isinstance(preemption_vulnerability, bool), level/floor_priority within the declared ranges,
+    scope in the declared scopes, and a non-empty label.
+VP1-HOOK-021:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_021_priority_totality
+  gap: Iterates mcx and frmcs only. The shipped utility profile (crew-call, switching-order, telemetry-session)
+    is not evaluated. Close by iterating all profiles under profiles/ (mcx, frmcs, utility), ideally crossed
+    with each declared urgency/application.
+VP1-HOOK-022:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_022_cross_scope_comparison_is_zero
+  gap: Criterion is 'for every such pair'; the test checks one pair (mcx emergency-group vs frmcs rec-broadcast)
+    through mcx's compare only. Close with a generated test over all cross-scope pairs from the decision
+    spaces of mcx, frmcs and utility (each profile declares one scope, so pairs must cross profiles or
+    be synthesised). Include synthesised PriorityDecisions with extreme levels and all flag combinations,
+    and call compare(a,b) and compare(b,a) on every profile's policy, asserting 0.
+VP1-HOOK-023:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_023_comparison_properties
+  gap: Stated as property-based over the profile's decision space. The test enumerates only the decisions
+    reached by mcx call types at their default urgency, so rules reachable only through a request urgency
+    override (e.g. 'elevated') may be missed. frmcs and utility are untested. All mcx decisions share
+    one scope. Close with a property-based test (hypothesis, or exhaustive over all rule decisions plus
+    synthesised levels) for every profile, including mixed-scope triples.
+  note: Antisymmetry, reflexivity and transitivity assertions are correct for the set they cover.
+VP1-HOOK-024:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_024_determinism
+  note: 50 repeated evaluations of an identical input are asserted equal to the first. The coverage is
+    one input (mcx 'private'), which the criterion's wording does not require extending.
+VP1-HOOK-030:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_030_admission_refuses_by_return_value
+  gap: 'Step says ''drive refusal conditions''; only one is driven: authorise with an undeclared call
+    type. No admit refusal (participant limit, capacity, reserved capacity) and no authorise not-authorised
+    refusal is in the evidence. The admit cases exist in test_admission_enforces_* but are not listed
+    and do not assert ''no exception''. Close with a parametrized test over every refusal condition of
+    authorise and admit, asserting that no exception is raised and that permitted is False with a non-empty
+    reason_code.'
+VP1-HOOK-031:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_031_reason_codes_declared
+  gap: '''Every refusal path'' is not driven. Covered: call-type-not-permitted and capacity (global).
+    ''private'' has no initiator_roles, so it is permitted and contributes nothing. Missing: not-authorised
+    (initiator lacking roles), participant-limit refusal, reserved-for-urgency refusal, and the frmcs
+    and utility profiles. Close by enumerating each refusal branch of TableSessionPolicy.authorise/admit
+    for every profile and asserting reason_code in that profile''s reject_reason_codes.'
+VP1-HOOK-032:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_hook_032_refusal_is_audited
+  - tests/test_session.py::test_vp1_hook_032_refused_session_sends_no_invitation
+  gap: The refusal is produced only at IF-SES.authorise (undeclared call type). 'Refuse admission' (ICD
+    §5.1 INV-1, PLT-HOK-033) is the admit path, and no listed test refuses at admit. Close with a test
+    refusing at admit (e.g. private call to a 4-member group -> capacity-exhausted) asserting no INVITE,
+    manager.active == (), exactly one SESSION_REFUSED with the code, and no SESSION_ESTABLISHED. Optionally
+    check at the SIP layer that the store has no session.
+  note: For the authorise refusal, all three clauses are asserted.
+VP1-HOOK-033:
+  verdict: fail
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_033_session_decision_applied_verbatim
+  gap: 'The test never exercises the core. It compares the in-tree hook''s decide() output to the profile
+    YAML for one call type, so it cannot show ''observed behaviour matches the decision'' or ''core infers
+    nothing''. Close with a SessionManager test using a stub SessionPolicy.decide over the varied combinations:
+    auto_answer T/F and acknowledgement T/F, asserted on the INVITE signal detail; recording_required
+    T with recording unavailable -> refused; max_participants N with N+1 members. Include a decision contradicting
+    the urgency (e.g. emergency with auto_answer=False) to show the core does not infer.'
+VP1-HOOK-034:
+  verdict: fail
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_034_floor_policy_matches_profile
+  gap: The test injects neither inconsistency. It asserts that the valid emergency-group floor policy
+    is queueing=False and depth=0, with T2=2000. Neither 'queueing disabled with depth>0' nor 'enabled
+    with depth 0' is returned or rejected. The core has no runtime check of FloorPolicy POST-1/2 (session.py
+    passes it straight to floor.Policy.from_hook); only profile validation (validation.py:329-335) checks
+    it. Close with stub floor_policy hooks returning each inconsistent pair through SessionManager.establish,
+    asserting refusal 'hook-contract-violation' and no session. The runtime check would need implementing.
+VP1-HOOK-040:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_040_bearer_decision_well_formed
+  gap: 'Iterates the call types of mcx and frmcs only. The utility profile is omitted. Close by iterating
+    all profiles, and every media kind each call type declares, selected individually. The assertions
+    themselves are complete: one primary, unique path IDs, redundancy vs count.'
+VP1-HOOK-041:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_loader.py::test_vp1_hook_041_arp_consistency_violation
+  gap: The evidence shows only that the in-tree TableBearerSelector refuses to build such a decision.
+    Nothing tests a hook that returns a BearerDecision with arp_preemption_capability=True against a non-capable
+    priority. The core has no POST-5 check, so a substituted selector returning it would be accepted.
+    Close with a stub selector returning that decision through SessionManager.establish, asserting 'hook-contract-violation',
+    no INVITE and no session.
+VP1-FC-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_media.py::test_vp1_fc_001_grant_and_taken_reach_the_right_endpoints
+  - tests/test_media.py::test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire
+  gap: 'Environment: the suite step says ENV-E2E, but the evidence is an in-process MediaSession with
+    recording fakes. No client, no SIP-negotiated floor stream, and FC-OP-11 (floor m=application SDP
+    attributes and the ack-required indication not implemented) is open against VP1-FC-001. Revoke is
+    triggered by calling floor.handle(FLOOR_REVOKE) directly, not by any wire or operator path. ''Per
+    TS 24.380'' is only a round trip through the platform''s own codec (encoder and decoder are the same
+    module). To close: an ENV-E2E run with two real MC clients negotiating the floor stream over SIP,
+    where each of the 8 message types is exchanged and decoded by the client or the trace comparator,
+    not by core.rtcp.'
+  note: The unit test does assert that all 6 server-sent types were sent and all 3 client types were parsed;
+    test_floor_grant_and_taken_arrive_over_udp is real UDP but not listed and covers only Granted and
+    Taken.
+VP1-FC-010:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_010_all_reachable_states_are_reached
+  - tests/test_floor.py::test_vp1_fc_010_every_state_event_pair_is_total
+  gap: 'Every (state,event) key in _DISPATCH is entered (20/20; I checked this by instrumenting), but
+    always with participant ''z'' (never the holder) and timer T2 only. So defined transitions are never
+    reached: holder release TAKEN->IDLE or grant from queue, T1/T3 expiry ->IDLE, T8 re-revoke, T20 retry,
+    and release while revoking ->IDLE. The totality assertions are weak: ''fc.state in FloorState'' cannot
+    fail, and only the absence of an exception carries weight. VP-OP-04 (full product or reachable pairs
+    only) is still open against this case. To close: a table-driven test that lists each defined transition
+    (from, event, participant role, timer) -> expected to_state and actions, drives each from a genuinely
+    reached state, and asserts the table is covered. Add the full product over participant roles (holder,
+    queued, other, none) and every timer name.'
+VP1-FC-011:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_011_invariant_is_enforced_not_assumed
+  - tests/test_floor.py::test_vp1_fc_011_single_holder_under_concurrent_requests
+  gap: 'Requests are sequential, run once, and every request has the same priority. There is no concurrency
+    or repetition, and no override or pre-emption path, although that path is where two talkers could
+    arise (a pre-emptor granted during the revoked holder''s T3 grace). The assertions check fc.holder
+    (a scalar, so two holders cannot be represented) and ''no one held twice'', which is a different property.
+    The invariant test corrupts the machine into ''no holder'', not ''two holders''. Nothing checks the
+    observable side: at most one outstanding Granted/permission on the wire, or at most one endpoint whose
+    media is forwarded. To close: a randomised or repeated contention test with mixed priorities and override
+    enabled. It asserts, after every event, that at most one participant has been sent Granted without
+    a later Revoke/Idle/Taken naming someone else, and that during pending revoke no one else is granted
+    before T3 ends or the release.'
+VP1-FC-012:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_012_equal_priority_breaks_by_arrival
+  - tests/test_floor.py::test_vp1_fc_012_grant_follows_queue_order
+  - tests/test_floor.py::test_vp1_fc_012_queue_ordered_by_floor_priority_not_arrival
+  gap: 'The priority ordering and the grant-by-priority-not-arrival clauses are asserted, but priorities
+    are injected directly into Event.floor_priority. Nothing traces the result to an IF-PRI decision,
+    which is the second clause. FC-OP-12 says that with the in-tree tables every participant gets the
+    same floor priority, so priority arbitration is never produced by IF-PRI in practice. To close: a
+    test through MediaSession/SessionManager with a priority hook returning distinct per-participant priorities
+    (and the audit record of that IF-PRI decision). It asserts that the granted participant is the one
+    IF-PRI ranked highest and that the recorded decision is what the grant used. The in-tree profile question
+    in FC-OP-12 also needs resolving.'
+VP1-FC-013:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_013_duplicate_request_denied
+  - tests/test_floor.py::test_vp1_fc_013_queue_bounded_and_excess_denied_not_dropped
+  - tests/test_floor.py::test_vp1_fc_013_queue_positions_reported
+  gap: 'Bounded depth and ''excess denied (QUEUE_FULL to p4), not dropped'' are asserted for depth 3.
+    ''Grants follow declared order'' is not asserted by any of the three listed tests: none drains the
+    queue, and queue_positions_reported uses equal priorities. The depth comes from a hand-built Policy,
+    not from a profile''s max_queue_depth. To close: in the FC-013 evidence, load a profile''s floor policy,
+    fill the queue beyond max_queue_depth with mixed priorities, drain it by releases, and assert the
+    grant sequence equals the declared order (priority, then arrival). test_vp1_fc_012_grant_follows_queue_order
+    partly does this and could be cited.'
+VP1-FC-014:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_014_deny_not_queue_when_queueing_disabled
+  - tests/test_floor.py::test_vp1_fc_014_no_queue_entry_created_ever
+  gap: 'Deny (QUEUEING_DISABLED) with an empty queue is asserted only with override_allowed=False. With
+    queueing disabled and override allowed, a higher-priority request creates a queue entry (the front
+    pre-emptor) and gets no Deny. This is documented as the accepted FC-OP-07 behaviour and exercised
+    by test_pre_emption_without_queueing_still_hands_over, and it contradicts the criterion as written.
+    The test name ''no_queue_entry_created_ever'' overclaims. To close: scope the criterion to non-pre-empting
+    requests (or to override disabled) and add a test that pins the override-enabled case explicitly,
+    or change the machine.'
+  note: Judged at ENV-UNIT, which §6 allows for FC-010..014.
+VP1-FC-020:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_020_timer_values_follow_the_profile
+  - tests/test_floor.py::test_vp1_fc_020_transition_sequence_identical_across_timer_values
+  gap: 'Only T2''s start duration is checked (T20 and T8 values in the same policies are never observed),
+    and no timer is let expire, so ''observed timing'' is not observed. The transition-identity test uses
+    a scenario with no timer expiry at all, so its sequence cannot depend on timer values and the comparison
+    is vacuous for the property. Its policies also differ only in T2. Neither test loads profiles: both
+    use hand-built Policy objects, where the step says to load two profiles. To close: load two profiles
+    (or Policy.from_hook of two loaded profiles) differing only in timer values. Drive a scenario where
+    T1, T2, T3, T8 and T20 each start and expire, advancing the injected clock by each profile''s values.
+    Assert that expiry happens at each profile''s value (not before) and that the (from, event, to, actions-type)
+    sequences are equal.'
+VP1-FC-021:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_floor.py::test_vp1_fc_021_every_transition_recorded_with_trigger_and_result
+  - tests/test_floor.py::test_vp1_fc_021_sequence_reconstructible_from_history_alone
+  gap: 'The history is core.floor''s in-memory list. The service never writes it to the audit store: RecordType.FLOOR_TRANSITION
+    exists but nothing emits it, so there is no audit trail from which to reconstruct a call. The assertions
+    are also weak. ''event.type in EventType'' and ''to_state in FloorState'' cannot fail, the timestamp
+    is checked for 2 of 3 records, and reconstruction checks only the first from_state and the last to_state/holder/queue,
+    not the chain from_state[n]==to_state[n-1]. To close: complete a call with contention through the
+    runtime (ENV-INT), read the floor-transition records from the audit store, and rebuild the full state/holder/queue
+    sequence from them alone. Assert that it equals the machine''s actual sequence, with each record carrying
+    trigger, at_ms and to_state.'
+VP1-MED-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_media.py::test_vp1_med_001_only_the_negotiated_payload_type_is_forwarded
+  - tests/test_media_e2e.py::test_vp1_med_001_only_the_negotiated_codec_is_forwarded
+  gap: 'Both tests show only that an RTP payload type other than the negotiated one is dropped and the
+    negotiated one is forwarded. The VP-OP-03 criterion clauses are not in the evidence. (1) The call
+    uses the first of the profile''s codecs that the caller offers: the e2e caller offers only AMR-WB,
+    so a platform that accepted an undeclared codec would pass. (2) Every party uses that codec with the
+    same payload layout. Environment: SIP is in-process fakes, not ENV-E2E clients with packet capture.
+    To close: add test_med_op_01_the_profile_order_picks_the_codec_and_every_party_is_offered_it and test_rfc_4867_a_callee_answering_another_payload_layout_is_hung_up
+    (both exist) to the evidence, plus an e2e case where the caller offers undeclared and declared codecs
+    and the capture shows only the declared, profile-first codec.'
+VP1-MED-002:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_codec.py::test_vp1_med_002_nothing_declared_in_the_offer_is_no_codec
+  gap: 'The only evidence is a unit call showing core.codec.choose() returns None. It asserts neither
+    the rejection (no 488, no absence of session or legs) nor the second clause (an acceptable offer negotiated
+    correctly), and it is not ENV-E2E. To close: cite test_offer_with_no_profile_codec_is_refused_488_and_leaves_nothing
+    and test_med_op_01_the_profile_order_picks_the_codec_and_every_party_is_offered_it (in test_media_e2e.py),
+    ideally run in ENV-E2E with real clients.'
+VP1-MED-003:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_media.py::test_vp1_med_003_holder_media_reaches_every_other_endpoint_and_only_them
+  - tests/test_media_e2e.py::test_vp1_med_003_holder_voice_reaches_every_participant
+  note: Holder media reaches each non-holder endpoint and is captured there, in the unit test (4 parties)
+    and over real UDP to per-endpoint sockets (3 answered parties); it is not echoed. Accepted as E2E
+    for the media plane, although SIP is in-process fakes rather than ENV-E2E MC clients. Only the initial
+    holder is exercised, and hand-over is covered by MED-004 evidence.
+VP1-MED-004:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_media.py::test_vp1_med_004_media_follows_the_floor_not_the_client
+  - tests/test_media.py::test_vp1_med_004_nobody_may_talk_while_the_floor_is_idle
+  - tests/test_media.py::test_vp1_med_004_non_holder_media_reaches_nobody
+  - tests/test_media_e2e.py::test_vp1_med_004_non_holder_voice_reaches_no_one
+  note: 'A non-holder''s media reaches no one while the floor is taken, idle, or after hand-over (unit),
+    and over real UDP (e2e, same in-process-SIP caveat). The gate in service/media.py:on_rtp is holder-only.
+    Not covered: a queued pre-emptor during the revoked holder''s grace, where media is correctly still
+    the old holder''s.'
+VP1-DOC-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_service.py::test_vp1_doc_001_group_document_matches_configuration
+  - tests/test_service.py::test_vp1_doc_001_group_document_over_real_process
+  gap: '(1) ''Schema-valid'' is not in the evidence: check_rendered is structural only. test_group_schema.py::test_the_group_document_is_schema_valid
+    does XSD validation but is not listed and validates a synthetic group, not the served document. (2)
+    ''Over HTTP per TS 24.481'': it is served at a custom path /docs/groups/<id>, not an XCAP URI (org.openmobilealliance.groups
+    AUID, RFC 4825), and nothing asserts XCAP addressing. (3) Content matching covers the id and member
+    URIs of one group; display-name (''Alpha team'') is not compared with the network profile. To close:
+    fetch every group of a multi-group network profile from the running process, XSD-validate each served
+    body, compare id, display-name and members with the network profile, and either use TS 24.481 XCAP
+    URIs or record the path as a deviation.'
+VP1-OAM-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_oam_001_profile_identity_on_every_record
+  gap: 'The evidence is ENV-UNIT with a MemorySink, and it is circular: the fixture builds Auditor with
+    mcx.profile.identifier() and then asserts that records carry it. Not asserted: the release and the
+    network profile''s name/version/hash on each record; the triple logged at start; and the values matching
+    the health endpoint. The identifier also carries only a 16-char hash prefix. To close: in ENV-INT,
+    start the process, read the startup log line, /healthz (profile and network) and every audit record
+    in the store after a call, and assert that all three name the same profile name, version and hash,
+    the release, and the network name, version and hash. test_vp1_oam_003 already checks release and network
+    on store records and could be extended.'
+VP1-OAM-002:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_service.py::test_vp1_oam_002_health_reports_identity_and_process_starts
+  - tests/test_service.py::test_vp1_oam_002_health_with_no_profile_is_never_ready
+  - tests/test_service.py::test_vp1_oam_002_not_ready_until_profile_loaded_and_marked_ready
+  - tests/test_service.py::test_vp1_oam_002_startup_logs_triple_as_json
+  note: The real process exposes name, version and a 64-hex hash on /healthz. /readyz is 503 after load
+    until set_ready, Health without a profile is never ready, and __main__ binds no socket before the
+    profile is validated and loaded. The hash is not compared with an independently computed profile hash.
+VP1-OAM-003:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_service.py::test_vp1_oam_003_admission_refusal_establishment_release_audited
+  gap: 'The ''refusal'' exercised is an unknown target. It produces a session-failed record (reason_code
+    unknown-target), not a session-refused record; I checked this by running it. The test accepts either
+    type, so it would still pass if session-refused records were never written. Admission, establishment
+    and release are asserted. To close: in the same test, provoke an admission refusal (e.g. recording-unavailable
+    via the default fail-closed platform, or a capacity refusal) and assert a ''session-refused'' record
+    whose detail.reason_code equals the refusal''s reason code.'
+VP1-OAM-004:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_oam_004_correlation_id_stable_across_records
+  gap: 'The evidence covers audit records in a unit MemorySink for one session, where the caller supplies
+    the id. It covers no logs, no second session (distinct ids), and no component other than SessionManager.
+    The implementation''s JSON log formatter (service/logs.py) has no correlation-id field, and media/SIP
+    log lines do not carry one. So the logs clause is unmet, not just untested. To close: run two concurrent
+    calls through the process (ENV-INT), parse every stderr log line as JSON, and assert that each line
+    about a session carries that session''s correlation id. Assert the same for every record from SIP,
+    media, floor and audit, with distinct ids for the two calls.'
+VP1-OAM-005:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_service.py::test_vp1_oam_005_committed_records_survive_kill_and_service_returns
+  note: 'Process killed (SIGKILL) after 3 establishes and 1 release. On restart all three session rows
+    are present with the correct states and members, c2''s audit ends in session-released, and the real
+    process returns to /readyz 200. Weak spots: audit record counts for c0/c1 are not compared with pre-kill,
+    ''returns to service'' is readiness only (no new call is placed), and SVC-OP-02 leaves recovered established
+    sessions unresolved.'
+VP1-SIG-002:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip.py::test_vp1_sig_002_registration_expires
+  - tests/test_sip.py::test_vp1_sig_002_registration_state_per_service_id
+  - tests/test_sip.py::test_vp1_sig_002_reregistration_refreshes
+  gap: 'Suite is ENV-INT, but all three tests are ENV-UNIT calls on RegistrationStore; no REGISTER goes
+    through SipCore/TLS, so third-party registration is never exercised. Missing clauses: (a) per-ID independence:
+    nothing shows that expiry or re-registration of u0 leaves u1 unchanged; (b) ''correct after re-registration'':
+    only is_registered is checked, never that a re-REGISTER with a new Contact replaces the binding (get()
+    contact) or that a shorter Expires shortens it; (c) after expiry only get()/is_registered are checked,
+    not registered_ids(). To close: a SipCore test that REGISTERs u0 and u1 over the fixture flows, re-REGISTERs
+    u0 with a new Contact and Expires, advances the clock past u0''s expiry, and asserts core.registrations
+    bindings (contact, expiry, registered_ids) for both IDs at each step.'
+  note: 'The store logic is correct as far as tested: refresh would fail at t=1400 without re-registration,
+    and a single-slot store would fail the per-ID test.'
+VP1-SIG-003:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip.py::test_vp1_sig_003_feature_tag_follows_media
+  - tests/test_sip.py::test_vp1_sig_003_invite_carries_feature_tags
+  gap: '''Every request and response'' is not covered. Only a rendered INVITE is checked: no 200/180/4xx
+    responses, no BYE, UPDATE, re-INVITE, ACK, CANCEL or outbound-leg message. The media feature parameters
+    beyond the one tag are not checked (e.g. Accept-Contact for video/data is never checked). ''Verified
+    by trace comparator'' is not met: tools/trace_compare.py is not used. To close: drive a full private
+    and group call through SipCore, collect every message sent on every flow, and run tools/trace_compare.py
+    (or an assertion per message) requiring the TS 24.379 feature tags in Contact/Accept-Contact on each
+    request and response.'
+  note: The Accept-Contact require/explicit check covers the INVITE only.
+VP1-SIG-004:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip.py::test_vp1_sig_004_body_without_content_type_is_400
+  - tests/test_sip.py::test_vp1_sig_004_malformed_cseq_is_400
+  - tests/test_sip.py::test_vp1_sig_004_missing_mandatory_header_is_400
+  - tests/test_sip.py::test_vp1_sig_004_replay_is_rejected
+  - tests/test_sip.py::test_vp1_sig_004_unknown_session_is_481
+  gap: '(1) The status codes are asserted, but no test ties them to TS 24.379 (482 for a ''replay'' is
+    RFC 3261 8.2.2.2''s merged-request code; no TS 24.379 clause is cited, and 400 for missing Content-Type
+    is not traced either). (2) The tests are ENV-UNIT on InboundGuard alone, while the suite is ENV-INT.
+    In the integrated path (service/sip_core.py) the transaction layer absorbs a same-branch retransmission
+    before the guard, so the replay test''s scenario (identical branch) never reaches the guard in production.
+    No test sends a replay with a new branch through SipCore. (3) Only an unknown-session BYE is tested;
+    ACK, INFO and UPDATE are also guarded and are not. To close: SipCore/TLS tests that send each malformed
+    variant, a replay with the same Call-ID and CSeq but a new branch, and unknown-session BYE, UPDATE
+    and ACK, asserting the wire status equals a value cited from a TS 24.379 clause.'
+  note: Malformed cases are well parametrised (five mandatory headers, each with its Warning).
+VP1-SIG-005:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip_transport.py::test_vp1_sig_005_callee_declines_leaves_no_session_state
+  - tests/test_sip_transport.py::test_vp1_sig_005_callee_timeout_leaves_no_session_state
+  - tests/test_sip_transport.py::test_vp1_sig_005_refusal_leaves_no_session_state
+  - tests/test_sip_transport.py::test_vp1_sig_005_unregistered_callee_leaves_no_session_state
+  gap: '''Each final failure response'' is covered for 486 (relayed decline), 503 (refusal), 480 (unregistered)
+    and 480 (Timer B timeout) only. Not covered: 487 after CANCEL, 488 (no common codec), 422 (Session-Expires
+    too small), 404/403 hook refusals with Warning, 400 from InboundGuard or SipError, 500 fault path,
+    and a group call whose every leg fails. To close: parametrise the assert_no_session_state inspection
+    over every final failure status service/sip_core.py can emit (including CANCEL→487 and 488), plus
+    a group call where every leg declines.'
+  note: 'Direct inspection is real: store, sessions(), manager, core.calls and _dialogs are all checked.'
+VP1-SIG-006:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip_transport.py::test_vp1_sig_006_client_with_untrusted_certificate_is_refused
+  - tests/test_sip_transport.py::test_vp1_sig_006_client_without_certificate_is_refused_when_required
+  - tests/test_sip_transport.py::test_vp1_sig_006_mutual_authentication_is_performed
+  - tests/test_sip_transport.py::test_vp1_sig_006_plaintext_is_refused_and_counted
+  gap: '''Every external interface'' is not shown. Only the SIP TlsListener is tested. The HTTP surface
+    (service/http.py: /healthz, /readyz and the TS 24.481 /docs/groups document server) is a plain ThreadingHTTPServer
+    with no TLS, and tests/test_service.py fetches from it over http://. The code therefore looks like
+    it breaks the criterion on that interface, not just leaves it unevidenced. The media/floor UDP sockets
+    are not addressed either. To close: plaintext and mutual-TLS refusal tests for every listening socket
+    the process opens (enumerate them from the spawned process), which would fail today for HTTP.'
+  note: 'The SIP listener evidence is solid: plaintext gets no bytes back and is counted, missing and
+    untrusted client certificates are refused, and mutual auth is counted.'
+VP1-SIG-007:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_service.py::test_vp1_sig_007_process_exits_nonzero
+  - tests/test_service.py::test_vp1_sig_007_stub_idms_refused_under_production_indicator
+  gap: 'VP-OP-05 (§11) is open and lists VP1-SIG-007 as blocked: the production indicator is undefined,
+    and today it is opt-in (MCX_ENV=production|prod or MCX_PRODUCTION=1|true|yes). A deployment with no
+    indicator runs the stub. The tests show refusal only for the proposed values. The process test covers
+    MCX_ENV=production only, not MCX_PRODUCTION or the ''prod''/''true''/''yes'' spellings. To close:
+    once VP-OP-05 is decided, a process-level test parametrised over every value the decided indicator
+    accepts (and, under option A, over an absent MCX_ENV) asserting exit 2 and the PLT-IDM-007 diagnostic.'
+  note: 'What is tested is tested properly: exit 2, a named diagnostic, no data dir created, and a positive
+    control without the indicator.'
+VP1-CC-001:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip_transport.py::test_vp1_cc_001_audit_names_the_controlling_function
+  - tests/test_sip_transport.py::test_vp1_cc_001_roles_are_declared_and_separately_named
+  gap: 'SIP-OP-03 (§11): the participating role alone is refused, so the roles are not ''deployable as
+    distinct roles''. The roles test uses the controlling-only set. The audit test is vacuous-prone: it
+    loops over records and asserts only when the type is session-admitted or session-established, with
+    no assertion that such records exist. Probed today, they do exist, but deleting them would still pass.
+    Only one session, and only those two record types, are checked. To close: assert that session-admitted
+    and session-established records exist and that every record of the session names controlling_function.
+    Once SIP-OP-03 is resolved, deploy participating-only and controlling-only instances separately and
+    show a call crossing them.'
+  note: ENV-E2E is required, but both tests are in-process.
+VP1-CC-002:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_cc_002_one_controlling_function_per_session
+  gap: 'No concurrency and no simultaneous origination: two sessions are created sequentially by one caller.
+    ''Exactly one controlling function per session at all times'' is asserted only as a.controlling being
+    truthy at one instant. The correlation-id uniqueness check does not count controlling functions. Nothing
+    is in ENV-E2E. To close: an E2E or at least threaded SipCore test with N concurrent group calls, including
+    two members INVITEing the same group at the same instant, sampling throughout each call''s life (admission,
+    floor exchange, release) that each session has exactly one controlling-function identity and that
+    the simultaneous originations on one group produce one session, or two sessions each with a single
+    controller, per the design.'
+VP1-CC-003:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_cc_003_private_call_establishes
+  gap: 'Neither clause is asserted. ''Established after callee acceptance'': the test calls SessionManager.establish
+    directly, with no callee answer modelled and no check that establishment waits for one. ''Trace matches
+    the expected flow'': no trace and no comparator (PLT-VER-005 lists CC-003 for trace comparison). It
+    asserts only no refusal, a USER resolution and one INVITE target. To close: an ENV-E2E (or SipCore)
+    private call with manual commencement, asserting the session is not established before the callee''s
+    200 and is afterwards, with the captured message sequence checked by tools/trace_compare.py against
+    the TS 24.379 private call flow.'
+VP1-CC-004:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_sip_transport.py::test_vp1_cc_004_auto_answer_establishes_without_callee_action
+  gap: 'The case is a private call with automatic commencement, but the test uses an ''emergency-group''
+    call. No private call with auto_answer is exercised. The ''where the session decision sets auto-answer''
+    condition is shown one way only: no test shows that a call type without auto_answer does not get Priv-Answer-Mode.
+    ''Without callee action'' is simulated by the test injecting a 200; no ENV-E2E client shows it. To
+    close: a private call type whose decision sets auto_answer, run through SipCore (and ENV-E2E), asserting
+    Priv-Answer-Mode: Auto and establishment on the client''s automatic 200; plus the negative case, a
+    manual call type carrying no answer-mode header.'
+  note: 'SIP-OP-07: the unforced automatic branch is not expressible; the forced branch is what is tested.'
+VP1-CC-005:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_cc_005_group_call_invites_exactly_the_member_set
+  gap: '''No more'' is weakened: invitations are collected into a set, so a duplicate INVITE to a member
+    would pass, and len(set)==3 is redundant. ''Late joiners handled per the session decision'' is not
+    tested at all. It is ENV-UNIT against the manager, not ENV-E2E. To close: assert the list of INVITE
+    targets (not a set) equals the resolved members exactly once each, and add a late-join test (a member
+    registering or rejoining after setup) asserting the behaviour the session decision prescribes.'
+VP1-CC-006:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_cc_006_session_decision_applied_verbatim
+  gap: '''Every field'' is not covered. SessionDecision has model, auto_answer, acknowledgement_required,
+    recording_required and max_participants; only auto_answer and acknowledgement_required are checked,
+    for one call type (emergency-group). ''No field inferred by the core'' is not tested: nothing substitutes
+    a decision hook returning values that differ from the profile to show the core applies the hook''s
+    decision rather than re-deriving it. To close: a test with a stub decide() hook returning non-default
+    values for all five fields across call types, asserting each shows up in the signals, recording and
+    QoS, and max-participant enforcement, and that changing the profile without changing the hook changes
+    nothing.'
+VP1-CC-007:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_session.py::test_vp1_cc_007_one_priority_decision_per_session
+  gap: 'Only ''unchanged'' is touched, and weakly: `session.priority is first` passes if priority is None
+    (no decision taken). The test does not assert that exactly one IF-PRI evaluate happens per session,
+    that it happens at admission, or that the decision survives the session''s lifetime events (floor,
+    re-INVITE, pre-emption, member join or leave); the only intervening event is establishing another
+    session. To close: assert that priority is a PriorityDecision after admission, count IF-PRI evaluate
+    hook-invocation audit records per session == 1 before session-admitted, then drive floor exchange,
+    a re-INVITE and a pre-emption attempt and re-assert identity and a count of 1.'
+VP1-REL-001:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_release.py::test_an_unsupported_release_is_refused_not_guessed
+  - tests/test_release.py::test_config_refuses_a_deployment_that_did_not_state_a_release
+  - tests/test_release.py::test_release_is_parsed_from_the_forms_an_operator_would_write
+  - tests/test_service.py::test_process_refuses_and_exits_nonzero
+  note: 'Process-level exit 2 with ''startup refused'' for empty, ''21'' and ''seventeen'', with a positive
+    control using the same env. Absent-key refusal is shown at Config.from_env and parse rejects 12, 17.1,
+    R17x and blanks. Minor: absent (not empty) MCX_RELEASE is not run at process level, and the process
+    test does not assert that the diagnostic names MCX_RELEASE.'
+VP1-REL-002:
+  verdict: fail
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_release.py::test_every_supported_release_round_trips_a_basic_call
+  - tests/test_release.py::test_the_release_is_independent_of_the_profile
+  gap: 'Neither listed test runs the conformance suite. One round-trips six Rel-13 floor messages per
+    release with no profile; the other only checks that Config accepts 3 profiles × releases 17 and 19.
+    The CI clause is contradicted by .github/workflows/ci.yml: the conformance matrix runs releases [17,
+    19] only, not the eight in core.release.SUPPORTED, and tests/test_conformance.py never reads MCX_RELEASE,
+    so the release axis of the matrix is inert. To close: have test_conformance.py load the profile at
+    the MCX_RELEASE it is given (failing if unset), extend the CI matrix to release 13..20 × {mcx, frmcs,
+    utility}, and add a gate asserting the matrix equals SUPPORTED × profiles.'
+  note: 'Fail rather than partial: the evidence cannot demonstrate the main clause, and the CI configuration
+    shows the opposite of ''every supported release''.'
+VP1-REL-003:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_release.py::test_a_release_encodes_exactly_what_it_defines
+  - tests/test_release.py::test_a_release_refuses_a_field_it_does_not_define
+  - tests/test_release.py::test_floor_revoke_cause_7_is_refused_before_rel_19
+  gap: 'Defined subtypes are covered for all eight releases. ''Everything it does not is refused'' is
+    not: unassigned subtypes (12, 13, 16–31) are never tried. Field ids: only 4 of the 26 defined (14,
+    20, 24, 25) are tested, and no undefined id (26+) is. Revoke causes: only cause 7. Defined causes
+    1, 2, 3, 4, 6 and 255 are not checked, and neither are undefined ones (5, 8–254). To close: parametrise
+    over release 13..20 × subtype 0..31, field id 0..255 and revoke cause 0..255, with literal expected
+    first-release tables, asserting encode succeeds exactly for the defined ones and raises ReleaseRefused
+    otherwise.'
+VP1-REL-004:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_release.py::test_subtype_14_means_different_messages_either_side_of_rel_18
+  gap: '''From identical bytes'' is not exercised: the codec check builds a FloorMessage object and calls
+    name_of, with no decode of one wire buffer. It asserts only that Rel-17 != Rel-18, so swapped names
+    would pass. Rel-20 is not checked. The exact names are asserted only on the subtype_name table, not
+    on what the codec reports. To close: encode one subtype-14 packet, decode the same bytes with Codec(Rel-17..20),
+    and assert the reported name equals ''Floor Queued Cancel'' at 17 and ''Queued Floor Requests'' at
+    18, 19 and 20.'
+VP1-REL-005:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_release.py::test_a_rel_17_deployment_refuses_a_rel_19_message_on_the_wire
+  - tests/test_release.py::test_wrong_release_is_distinguishable_from_malformed
+  gap: 'The ReleaseRefused clause is met. The two counter clauses are asserted nowhere: floor_wrong_release
+    (service/media.py:250) and floor_malformed (service/media.py:255) exist, but no test checks that a
+    Rel-19 message received by a Rel-17 media session increments the first and not the second. A class-hierarchy
+    check is not a counter check. To close: send a Rel-19 Floor Revoke Request to a Rel-17 service/media
+    floor socket and assert counters floor_wrong_release == 1 and floor_malformed == 0.'
+VP1-REL-006:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_network.py::test_every_audit_record_names_the_network
+  gap: '''Every audit record'' is covered by one record, hand-emitted via rt.auditor.emit(SESSION_REFUSED).
+    No record produced by real session flow (hook-invocation, session-admitted, session-established, session-failed,
+    released) or read back from the durable store is checked. The expected value is built from profile.identifier()
+    itself, so the test would still pass if identifier() dropped the hash. To close: run a call through
+    SipCore, then for every record in rt.store.audit_records(cid), assert the identity matches a literal
+    pattern name/version/<16-hex hash>+Rel-NN+net-name/version/hash with the configured release.'
+VP1-REL-007:
+  verdict: partial
+  by: independent review (agent)
+  date: '2026-09-28'
+  evidence:
+  - tests/test_release.py::test_a_release_bound_code_is_gated_but_a_rel_13_code_is_not
+  - tests/test_release.py::test_a_release_without_the_code_still_explains_the_refusal
+  - tests/test_release.py::test_warning_code_179_does_not_exist_before_rel_17
+  gap: 'Only code 179 is shown degrading, and only at Rel-16. Rel-13–15 are not tested for 179. The other
+    release-bound codes the platform emits are not tested for degradation at all: 185, 186 and 187 (Rel-18,
+    ADHOC_WARNING_TEXTS) at Rel ≤17, where frmcs ad hoc is configurable per test_adhoc.py. ''Does not
+    raise'' is shown only for that one path. To close: parametrise over every (reason_code, emitted code)
+    in WARNING_TEXTS and ADHOC_WARNING_TEXTS × release 13..20, asserting that where the code post-dates
+    the release the Warning carries the phrase without the number, the status equals the in-release status
+    and is 4xx/5xx, and no exception is raised.'
