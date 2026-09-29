@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 from types import MappingProxyType
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import identity
 from . import qos as qos_spec
@@ -64,6 +65,8 @@ from .hooks import (
 from .invoke import HookFailure, Invoker
 from .loader import LoadedProfile
 from .validation import FLOOR_TIMERS, REDUNDANCY, TRANSPORTS
+
+log = logging.getLogger("mcx.session")
 
 
 class SessionState(Enum):
@@ -376,13 +379,13 @@ class SessionManager:
         )
 
         if floor_policy is not None:
+            # Every floor transition goes to the audit trail under the
+            # session's correlation id, whoever drives the machine (PLT-FC-011,
+            # RES-OP-03).
             session.floor = floor_mod.FloorControl(
-                floor_mod.Policy.from_hook(floor_policy), clock=self._clock)
-            if not self._defer_floor:
-                session.floor.handle(floor_mod.Event(
-                    floor_mod.EventType.SESSION_ESTABLISHED,
-                    participant=request.initiator,
-                    floor_priority=priority.floor_priority))
+                floor_mod.Policy.from_hook(floor_policy), clock=self._clock,
+                observer=lambda t: self._auditor.emit(
+                    RecordType.FLOOR_TRANSITION, cid, **t.as_record()))
 
         if decision.recording_required:
             signals.append(Signal(SignalType.START_RECORDING))
@@ -443,6 +446,13 @@ class SessionManager:
                            qos_identifier=bearer.qos_identifier,
                            recording=decision.recording_required,
                            **self._functions)
+        # The floor starts after the session's own records, so the trail
+        # reads admitted, established, then the floor.
+        if session.floor is not None and not self._defer_floor:
+            session.floor.handle(floor_mod.Event(
+                floor_mod.EventType.SESSION_ESTABLISHED,
+                participant=request.initiator,
+                floor_priority=priority.floor_priority))
         return session, tuple(signals), None
 
     # -- inbound from a non-MC system -------------------------------------
@@ -485,18 +495,40 @@ class SessionManager:
         session = self._sessions.get(correlation_id)
         if session is None or session.state is not SessionState.ESTABLISHED:
             return ()
-        if session.floor is not None:
-            session.floor.handle(floor_mod.Event(
-                floor_mod.EventType.SESSION_RELEASED))
+        # A release is never undone nor held up by the audit trail: a session
+        # kept up because its record could not be written is the unsafe way
+        # to fail. A record that cannot be written is logged as lost, and the
+        # release completes (RES-OP-03 review).
+        self._final_floor(session)
         session.state = SessionState.RELEASED
         if session.gateway is not None:
             signals = [Signal(SignalType.BYE, target=session.gateway)]
         else:
             signals = [Signal(SignalType.BYE, target=m) for m in session.members]
         signals.append(Signal(SignalType.RELEASE_QOS))
-        self._auditor.emit(RecordType.SESSION_RELEASED, correlation_id,
-                           cause=cause)
+        self._emit_unless_lost(RecordType.SESSION_RELEASED, correlation_id,
+                               cause=cause)
         return tuple(signals)
+
+    def _final_floor(self, session: Session) -> None:
+        """End the session's floor; its last transition stands even if its
+        record cannot be written (FloorControl.handle `final`)."""
+        if session.floor is None:
+            return
+        try:
+            session.floor.handle(floor_mod.Event(floor_mod.EventType.SESSION_RELEASED),
+                                 final=True)
+        except Exception:                                   # noqa: BLE001
+            log.exception("session %s: floor release not recorded; released anyway",
+                          session.correlation_id)
+
+    def _emit_unless_lost(self, record_type: RecordType, correlation_id: str,
+                          **detail: Any) -> None:
+        try:
+            self._auditor.emit(record_type, correlation_id, **detail)
+        except Exception:                                   # noqa: BLE001
+            log.exception("session %s: %s record lost; the session ended anyway",
+                          correlation_id, record_type.value)
 
     def start_floor(self, correlation_id: str) -> Tuple[floor_mod.Action, ...]:
         """Start a deferred floor machine; returns its opening actions.
@@ -520,13 +552,11 @@ class SessionManager:
         session = self._sessions.pop(correlation_id, None)
         if session is None:
             return ()
-        if session.floor is not None:
-            session.floor.handle(floor_mod.Event(
-                floor_mod.EventType.SESSION_RELEASED))
-        self._auditor.emit(RecordType.SESSION_FAILED, correlation_id,
-                           call_type=session.request.call_type,
-                           initiator=session.request.initiator,
-                           reason_code="", detail=reason, abandoned=True)
+        self._final_floor(session)
+        self._emit_unless_lost(RecordType.SESSION_FAILED, correlation_id,
+                               call_type=session.request.call_type,
+                               initiator=session.request.initiator,
+                               reason_code="", detail=reason, abandoned=True)
         return (Signal(SignalType.RELEASE_QOS),)
 
     # -- pre-emption -----------------------------------------------------

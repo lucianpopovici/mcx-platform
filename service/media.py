@@ -218,9 +218,11 @@ class MediaSession:
         now = self._now()
         if uri != self._media_seen_holder or \
                 now - self._media_seen_at >= self._notify_ms:
-            self._media_seen_holder, self._media_seen_at = uri, now
             self.apply(self.floor.handle(fl.Event(
                 fl.EventType.MEDIA_RECEIVED, participant=uri)))
+            # Only once the floor has taken it: a report whose audit record
+            # failed was undone, and the next packet reports again (RES-OP-03).
+            self._media_seen_holder, self._media_seen_at = uri, now
         for other in self.endpoints.values():
             if other.uri != uri and other.remote_rtp is not None:
                 # The same codec under the number the receiver's SDP gave:
@@ -549,4 +551,11 @@ class UdpMediaPlane:
 
     def tick(self) -> None:
         for session in list(self._sessions.values()):
-            session.tick()
+            try:
+                session.tick()
+            except Exception:                              # noqa: BLE001
+                # One session's floor timer that could not be handled (its
+                # audit record failed, and the transition was undone) must not
+                # stop the others' timers, nor the SIP timers that run after
+                # this. The timer is still due, and fires at the next tick.
+                log.exception("media %s: floor timer not handled", session.cid)

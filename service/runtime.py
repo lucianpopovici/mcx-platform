@@ -145,8 +145,15 @@ class Runtime:
         session = self.manager.session(correlation_id)
         signals = self.manager.release(correlation_id, cause)
         if session is not None and signals:
-            self.store.mark_released(correlation_id, self.clock())
+            # The BYEs go first: a store that cannot record the release must
+            # not keep the other parties' legs up (RES-OP-03 review). A row
+            # left 'established' is logged, and is RES-OP-14's to settle.
             self.on_signals(session, signals)
+            try:
+                self.store.mark_released(correlation_id, self.clock())
+            except Exception:                              # noqa: BLE001
+                log.exception("session %s: released, but its store row was not "
+                              "marked released", correlation_id)
         return signals
 
     def abandon(self, correlation_id: str, reason: str) -> None:

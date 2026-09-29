@@ -1967,3 +1967,23 @@ def test_a_cancel_from_another_connection_is_refused(core, rt, world):
     core.on_bytes(_cancel_from_initiator("dc1"), other)
     assert other.codes() == [481]
     assert 487 not in world[U[0]].codes()
+
+
+def test_a_release_sends_its_byes_when_the_store_cannot_mark_it(core, rt, world, caplog):
+    """RES-OP-03 review: the store row was marked before the signals were
+    sent, so a store that failed kept the other parties' legs up."""
+    core.on_bytes(invite("rel1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[0], 200, SDP), world[U[1]])
+    sent = []
+    handler = rt.on_signals
+    rt.on_signals = lambda session, signals: sent.extend(signals) or handler(session, signals)
+
+    def down(*_):
+        raise OSError("audit store unavailable")
+
+    rt.store.mark_released = down
+    signals = rt.release("rel1")
+    assert signals and list(signals) == sent
+    assert {s.target for s in sent if s.type.value == "bye"} == set(U)   # every member
+    assert any("rel1: released, but its store row was not marked released"
+               in r.getMessage() for r in caplog.records)

@@ -432,3 +432,144 @@ def test_a_callee_answering_a_number_rtp_cannot_carry_is_hung_up(call):
         core.on_bytes(answer(req, 200, ues[U[1]].sdp([(300, "AMR-WB/16000")])), flows[U[1]])
     assert [r.method for r in flows[U[1]].requests()][-2:] == ["ACK", "BYE"]
     assert core.media._sessions["pt300b"].endpoints[U[1]].tx_pt is None
+
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_vp1_fc_021_a_contended_call_is_rebuilt_from_the_audit_store_alone(call):
+    """ENV-INT (RES-OP-03): a group call with contention, completed through
+    the runtime; its floor is rebuilt from the floor-transition records in
+    the audit store, and matches the machine's own sequence record for
+    record. Before, the history lived only in the floor machine's memory."""
+    rt, core, flows, ues, _ = call
+    setup_call(call)
+    for u in U[:3]:
+        while ues[u].floor_msg(0.2):
+            pass
+    ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+    ues[U[1]].floor_msg()
+    ues[U[2]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+    ues[U[2]].floor_msg()
+    ues[U[0]].send_floor(MsgType.RELEASE)
+    for u in U[:3]:
+        while ues[u].floor_msg(0.3):
+            pass
+    floor = rt.manager.session("e2e").floor
+    with core.lock:
+        core.on_bytes(msg("BYE", LOCAL, "e2e", 2, U[0], "grp:alpha"), flows[U[0]])
+
+    trail = rt.store.audit_records("e2e")
+    records = [r["detail"] for r in trail if r["type"] == "floor-transition"]
+    u0, u1, u2 = U[:3]
+    # The call as the trail tells it: trigger, who, state before and after,
+    # holder and queue after.
+    assert [(d["trigger"]["type"], d["trigger"]["participant"], d["from_state"],
+             d["to_state"], d["holder"], d["queue"]) for d in records] == [
+        ("session-established", u0, "start-stop", "floor-taken", u0, []),
+        ("floor-request", u1, "floor-taken", "floor-taken", u0, [u1]),
+        ("floor-request", u2, "floor-taken", "floor-taken", u0, [u1, u2]),
+        ("floor-release", u0, "floor-taken", "floor-taken", u1, [u2]),
+        ("session-released", None, "floor-taken", "released", None, []),
+    ]
+    # A chain: numbered without a gap, each starting where the last ended.
+    assert [d["sequence"] for d in records] == list(range(1, len(records) + 1))
+    assert all(b["from_state"] == a["to_state"] for a, b in zip(records, records[1:]))
+    # And the machine's own history, field by field.
+    assert records == [t.as_record() for t in floor.history]
+    assert all(r["at_ms"] == r["detail"]["floor_at_ms"]
+               for r in trail if r["type"] == "floor-transition")
+    # The session's own records come first, the release's after the floor's.
+    types_ = [r["type"] for r in trail if r["type"] != "hook-invocation"]
+    assert types_[:3] == ["session-admitted", "session-established", "floor-transition"]
+    assert types_.index("session-released") > max(
+        i for i, t in enumerate(types_) if t == "floor-transition")
+
+
+def _floor_records(rt, cid="e2e"):
+    return [r["detail"] for r in rt.store.audit_records(cid)
+            if r["type"] == "floor-transition"]
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_the_holder_s_first_media_is_in_the_audit_store(call):
+    """The first RTP after a grant starts T2 (TS 24.380 6.3.4.4.5): a
+    transition, recorded. The packets after it only keep T1 alive, and are
+    not (RES-OP-03 review: no e2e test sent media)."""
+    rt, core, flows, ues, _ = call
+    setup_call(call)
+    before = len(_floor_records(rt))
+    for seq in range(1, 4):
+        ues[U[0]].send_voice(seq=seq)
+        assert ues[U[1]].voice() is not None
+    added = _floor_records(rt)[before:]
+    assert [(d["trigger"]["type"], d["trigger"]["participant"]) for d in added] == [
+        ("media-received", U[0])]
+    assert {"type": "start-timer", "timer": "T2"}.items() <= next(
+        a for a in added[0]["actions"] if a["timer"] == "T2").items()
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_a_floor_request_whose_record_fails_is_not_taken_until_retransmitted(call):
+    """RES-OP-03 review: with the audit store failing, a request used to
+    queue its sender with no Queue Position Info sent. Now nothing changes
+    and nothing is sent; the client's retransmission is taken once the store
+    works again."""
+    rt, core, flows, ues, _ = call
+    setup_call(call)
+    for u in U[:3]:
+        while ues[u].floor_msg(0.2):
+            pass
+    floor = rt.manager.session("e2e").floor
+    emit = rt.store.emit
+    failing = {"on": True}
+
+    def flaky(record):
+        if failing["on"] and record.type.value == "floor-transition":
+            raise OSError("audit store unavailable")
+        emit(record)
+
+    rt.store.emit = flaky
+    try:
+        ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+        assert ues[U[1]].floor_msg(0.4) is None
+        assert floor.queue == () and floor.holder == U[0]
+        failing["on"] = False
+        ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+        q = ues[U[1]].floor_msg()
+        assert q.type is MsgType.QUEUE_POSITION_INFO and q.queue_info[0] == 1
+        assert floor.queue == (U[1],)
+    finally:
+        rt.store.emit = emit
+    records = _floor_records(rt)
+    assert [d["sequence"] for d in records] == list(range(1, len(records) + 1))
+    assert records[-1]["trigger"]["type"] == "floor-request"
+    assert records == [t.as_record() for t in floor.history]
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_a_media_report_whose_record_failed_is_made_by_the_next_packet(call):
+    """The relay reports the holder's media at most every notify interval.
+    A report whose record failed was undone, so the next packet reports it
+    again at once rather than an interval later (RES-OP-03)."""
+    rt, core, flows, ues, _ = call
+    setup_call(call)
+    emit = rt.store.emit
+    failing = {"on": True}
+
+    def flaky(record):
+        if failing["on"] and record.type.value == "floor-transition":
+            raise OSError("audit store unavailable")
+        emit(record)
+
+    rt.store.emit = flaky
+    try:
+        before = len(_floor_records(rt))
+        ues[U[0]].send_voice(seq=1)
+        ues[U[1]].voice(0.3)
+        assert len(_floor_records(rt)) == before
+        failing["on"] = False
+        ues[U[0]].send_voice(seq=2)                # the clock has not moved
+        assert ues[U[1]].voice() is not None
+    finally:
+        rt.store.emit = emit
+    assert [d["trigger"]["type"] for d in _floor_records(rt)[before:]] == ["media-received"]

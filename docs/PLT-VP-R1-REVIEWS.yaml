@@ -954,20 +954,29 @@ VP1-FC-020:
     Assert that expiry happens at each profile''s value (not before) and that the (from, event, to, actions-type)
     sequences are equal.'
 VP1-FC-021:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
+  - tests/test_floor.py::test_a_failed_then_retried_step_leaves_no_trace_in_what_follows
+  - tests/test_floor.py::test_a_final_transition_stands_when_its_record_fails
+  - tests/test_floor.py::test_a_transition_as_audit_data_is_literal_and_complete
+  - tests/test_floor.py::test_a_transition_whose_record_fails_is_undone
+  - tests/test_floor.py::test_the_audit_feed_is_the_history_through_timers_denials_and_pre_emption
+  - tests/test_floor.py::test_the_observer_is_told_each_recorded_transition_and_only_those
   - tests/test_floor.py::test_vp1_fc_021_every_transition_recorded_with_trigger_and_result
   - tests/test_floor.py::test_vp1_fc_021_sequence_reconstructible_from_history_alone
-  gap: 'The history is core.floor''s in-memory list. The service never writes it to the audit store: RecordType.FLOOR_TRANSITION
-    exists but nothing emits it, so there is no audit trail from which to reconstruct a call. The assertions
-    are also weak. ''event.type in EventType'' and ''to_state in FloorState'' cannot fail, the timestamp
-    is checked for 2 of 3 records, and reconstruction checks only the first from_state and the last to_state/holder/queue,
-    not the chain from_state[n]==to_state[n-1]. To close: complete a call with contention through the
-    runtime (ENV-INT), read the floor-transition records from the audit store, and rebuild the full state/holder/queue
-    sequence from them alone. Assert that it equals the machine''s actual sequence, with each record carrying
-    trigger, at_ms and to_state.'
+  - tests/test_media_e2e.py::test_a_floor_request_whose_record_fails_is_not_taken_until_retransmitted
+  - tests/test_media_e2e.py::test_a_media_report_whose_record_failed_is_made_by_the_next_packet
+  - tests/test_media_e2e.py::test_the_holder_s_first_media_is_in_the_audit_store
+  - tests/test_media_e2e.py::test_vp1_fc_021_a_contended_call_is_rebuilt_from_the_audit_store_alone
+  - tests/test_session.py::test_a_release_completes_when_its_records_cannot_be_written
+  - tests/test_session.py::test_an_abandon_completes_when_its_records_cannot_be_written
+  - tests/test_session.py::test_floor_transitions_are_audited_under_the_session_and_after_it
+  note: 'Re-reviewed after RES-OP-03: a contended group call completed through the runtime (ENV-INT,
+    UDP floor control, SQLite store) has every floor transition in the audit store with trigger, timestamp
+    and resulting state; the chain is unbroken and equals the machine''s history field by field, deferred
+    start, first media and release included. The store failing is RES-OP-14, outside this case.'
 VP1-MED-001:
   verdict: partial
   by: independent review (agent)

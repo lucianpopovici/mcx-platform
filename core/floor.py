@@ -24,9 +24,10 @@ machine's structure never depended on the mapping; only the names did.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # --------------------------------------------------------------------------
 # Vocabulary
@@ -158,6 +159,27 @@ class Transition:
     holder: Optional[str]
     queue: Tuple[str, ...]
 
+    def as_record(self) -> Dict[str, Any]:
+        """This transition as plain data for the audit trail (PLT-FC-011,
+        PLT-VP-R1 RES-OP-03): the trigger, when, the state before and after,
+        what was done, and the holder and queue it left. Enough, record by
+        record, to rebuild a call's floor from the trail alone."""
+        def value(v: Any) -> Any:
+            return v.value if isinstance(v, Enum) else v
+
+        return {
+            "sequence": self.sequence,
+            "floor_at_ms": self.at_ms,
+            "from_state": self.from_state.value,
+            "to_state": self.to_state.value,
+            "trigger": {f.name: value(getattr(self.event, f.name))
+                        for f in dataclasses.fields(self.event)},
+            "actions": [{f.name: value(getattr(a, f.name))
+                         for f in dataclasses.fields(a)} for a in self.actions],
+            "holder": self.holder,
+            "queue": list(self.queue),
+        }
+
 
 @dataclass(frozen=True)
 class QueueEntry:
@@ -214,9 +236,14 @@ class FloorControl:
     to perform, and never blocks or performs I/O.
     """
 
-    def __init__(self, policy: Policy, clock: Optional[Callable[[], int]] = None):
+    def __init__(self, policy: Policy, clock: Optional[Callable[[], int]] = None,
+                 observer: Optional[Callable[[Transition], None]] = None):
         self._policy = policy
         self._now = clock or (lambda: 0)
+        # Told of each transition as it is recorded, so the host can write it
+        # to the audit trail (PLT-FC-011; RES-OP-03). The history below is
+        # the machine's own copy.
+        self._observer = observer
         self._state = FloorState.START_STOP
         self._holder: Optional[str] = None
         self._holder_priority: int = 0
@@ -256,8 +283,13 @@ class FloorControl:
 
     # -- entry point ----------------------------------------------------
 
-    def handle(self, event: Event) -> Tuple[Action, ...]:
+    def handle(self, event: Event, *, final: bool = False) -> Tuple[Action, ...]:
+        """Apply `event`. If the observer cannot take the transition, it is
+        undone and the error raised -- unless `final`: the session is ending,
+        which the audit trail cannot stop, so the transition stands and the
+        error is still raised for the caller to log (RES-OP-03)."""
         before = self._state
+        saved = self._snapshot()
         handler = self._DISPATCH.get((self._state, event.type))
         if handler is None:
             # An event with no transition in this state is ignored, not an
@@ -277,8 +309,35 @@ class FloorControl:
                         and all(a.type is ActionType.START_TIMER
                                 and a.timer == T_END_OF_MEDIA for a in actions))
         if not refresh_only:
-            self._record(before, event, actions)
+            transition = self._record(before, event, actions)
+            if self._observer is not None:
+                try:
+                    self._observer(transition)
+                except BaseException:
+                    if final:
+                        raise
+                    # The transition could not be written to the audit trail.
+                    # Undo it: its actions are never sent, so the floor must
+                    # stay as the participants last saw it rather than move on
+                    # unannounced (fail before reporting, as the store does).
+                    # A client retransmits its request or release; a timer
+                    # that expired is still due at the next tick (RES-OP-03).
+                    self._restore(saved)
+                    raise
         return actions
+
+    def _snapshot(self) -> Tuple[Any, ...]:
+        return (self._state, self._holder, self._holder_priority, list(self._queue),
+                set(self._participants), dict(self._running_timers),
+                len(self._history), self._sequence, self._arrivals, self._c20,
+                self._revoke_reason)
+
+    def _restore(self, saved: Tuple[Any, ...]) -> None:
+        (self._state, self._holder, self._holder_priority, queue, participants,
+         timers, history, self._sequence, self._arrivals, self._c20,
+         self._revoke_reason) = saved
+        self._queue, self._participants, self._running_timers = queue, participants, timers
+        del self._history[history:]
 
     # -- invariants -----------------------------------------------------
 
@@ -315,9 +374,9 @@ class FloorControl:
                 f"floor holder {self._holder!r} is also queued")
 
     def _record(self, before: FloorState, event: Event,
-                actions: Tuple[Action, ...]) -> None:
+                actions: Tuple[Action, ...]) -> Transition:
         self._sequence += 1
-        self._history.append(Transition(
+        transition = Transition(
             sequence=self._sequence,
             at_ms=self._now(),
             from_state=before,
@@ -326,7 +385,9 @@ class FloorControl:
             actions=actions,
             holder=self._holder,
             queue=self.queue,
-        ))
+        )
+        self._history.append(transition)
+        return transition
 
     def _apply_timer_actions(self, actions: Sequence[Action]) -> None:
         for a in actions:

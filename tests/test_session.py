@@ -26,10 +26,12 @@ from core.hooks import (  # noqa: E402
     SessionRequest,
 )
 from core.invoke import DeadlineMode, HookFailure, Invoker  # noqa: E402
+from core.floor import FloorState  # noqa: E402
 from core.session import (  # noqa: E402
     Platform,
     SessionManager,
     SessionState,
+    Signal,
     SignalType,
 )
 
@@ -1613,3 +1615,73 @@ def test_admit_sees_the_same_roles_and_the_capacity(mcx, sink):
     mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
                       attributes={"initiator.roles": "forged"}))
     assert seen["initiator.roles"] == "" and seen["core.active_sessions"] == "0"
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_floor_transitions_are_audited_under_the_session_and_after_it(manager, sink):
+    """RES-OP-03: the floor machine's transitions reach the audit trail,
+    under the session's correlation id, after its admitted and established
+    records; the release's own record follows the floor's last."""
+    manager.establish(req(rid="v1"))
+    manager.release("v1")
+    trail = [r for r in sink.for_session("v1") if r.type is not RecordType.HOOK_INVOCATION]
+    assert [r.type for r in trail] == [
+        RecordType.SESSION_ADMITTED, RecordType.SESSION_ESTABLISHED,
+        RecordType.FLOOR_TRANSITION, RecordType.FLOOR_TRANSITION,
+        RecordType.SESSION_RELEASED]
+    floors = [r.detail for r in trail if r.type is RecordType.FLOOR_TRANSITION]
+    assert [(d["trigger"]["type"], d["to_state"], d["holder"]) for d in floors] == [
+        ("session-established", "floor-taken", "sip:u0@mcptt.example"),
+        ("session-released", "released", None)]
+
+
+def test_a_data_session_has_no_floor_and_no_floor_records(manager, sink):
+    manager.establish(req(rid="d1", call_type="sds", media=(MediaKind.DATA,)))
+    assert not sink.of_type(RecordType.FLOOR_TRANSITION)
+
+
+class _SinkDown(MemorySink):
+    """A sink whose writes fail from `down` on."""
+
+    def __init__(self):
+        super().__init__()
+        self.down = False
+
+    def emit(self, record):
+        if self.down:
+            raise OSError("audit store unavailable")
+        super().emit(record)
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_a_release_completes_when_its_records_cannot_be_written(mcx, caplog):
+    """RES-OP-03 review: a failed floor record on release rolled the floor
+    back and left the session ESTABLISHED for good -- counted as active, a
+    pre-emption victim, its other legs never sent BYE. A release is never
+    undone by the audit trail; what could not be written is logged as lost."""
+    sink = _SinkDown()
+    mgr = _altered(mcx, sink)
+    session, _, _ = mgr.establish(req(rid="r1"))
+    sink.down = True
+    signals = mgr.release("r1")
+    assert session.state is SessionState.RELEASED
+    assert session.floor.state is FloorState.RELEASED
+    assert [s.target for s in signals if s.type is SignalType.BYE] == list(session.members)
+    assert SignalType.RELEASE_QOS in types(signals)
+    assert mgr.active == ()
+    lost = [r.getMessage() for r in caplog.records if r.name == "mcx.session"]
+    assert lost == ["session r1: floor release not recorded; released anyway",
+                    "session r1: session-released record lost; the session ended anyway"]
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_an_abandon_completes_when_its_records_cannot_be_written(mcx, caplog):
+    sink = _SinkDown()
+    mgr = _altered(mcx, sink)
+    session, _, _ = mgr.establish(req(rid="r2"))
+    sink.down = True
+    assert mgr.abandon("r2", "no party answered") == (Signal(SignalType.RELEASE_QOS),)
+    assert mgr.session("r2") is None and session.floor.state is FloorState.RELEASED
+    assert [r.getMessage() for r in caplog.records if r.name == "mcx.session"] == [
+        "session r2: floor release not recorded; released anyway",
+        "session r2: session-failed record lost; the session ended anyway"]
