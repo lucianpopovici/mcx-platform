@@ -797,6 +797,7 @@ VP1-HOOK-034:
   date: '2026-09-29'
   evidence:
   - tests/test_loader.py::test_every_in_tree_floor_policy_passes_the_core_check
+  - tests/test_loader.py::test_vp1_hook_034_floor_policy_matches_profile
   - tests/test_session.py::test_a_consistent_floor_policy_is_accepted
   - tests/test_session.py::test_an_inconsistent_floor_policy_from_a_hook_is_a_contract_violation
   note: 'Re-reviewed after RES-OP-07: a substituted floor_policy hook returning queueing disabled with
