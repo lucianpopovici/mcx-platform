@@ -153,7 +153,8 @@ class Runtime:
                 self.store.mark_released(correlation_id, self.clock())
             except Exception:                              # noqa: BLE001
                 log.exception("session %s: released, but its store row was not "
-                              "marked released", correlation_id)
+                              "marked released", correlation_id,
+                              extra={"correlation_id": correlation_id})
         return signals
 
     def abandon(self, correlation_id: str, reason: str) -> None:
@@ -162,7 +163,8 @@ class Runtime:
         signals = self.manager.abandon(correlation_id, reason)
         self.store.discard_session(correlation_id)
         if signals:
-            log.info("abandoned session %s: %s", correlation_id, reason)
+            log.info("abandoned session %s: %s", correlation_id, reason,
+                     extra={"correlation_id": correlation_id})
 
     def _persist(self, s: Session) -> None:
         self.store.save_session(

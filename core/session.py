@@ -520,7 +520,8 @@ class SessionManager:
                                  final=True)
         except Exception:                                   # noqa: BLE001
             log.exception("session %s: floor release not recorded; released anyway",
-                          session.correlation_id)
+                          session.correlation_id,
+                          extra={"correlation_id": session.correlation_id})
 
     def _emit_unless_lost(self, record_type: RecordType, correlation_id: str,
                           **detail: Any) -> None:
@@ -528,7 +529,8 @@ class SessionManager:
             self._auditor.emit(record_type, correlation_id, **detail)
         except Exception:                                   # noqa: BLE001
             log.exception("session %s: %s record lost; the session ended anyway",
-                          correlation_id, record_type.value)
+                          correlation_id, record_type.value,
+                          extra={"correlation_id": correlation_id})
 
     def start_floor(self, correlation_id: str) -> Tuple[floor_mod.Action, ...]:
         """Start a deferred floor machine; returns its opening actions.

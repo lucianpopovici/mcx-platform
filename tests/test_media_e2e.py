@@ -573,3 +573,84 @@ def test_a_media_report_whose_record_failed_is_made_by_the_next_packet(call):
     finally:
         rt.store.emit = emit
     assert [d["trigger"]["type"] for d in _floor_records(rt)[before:]] == ["media-received"]
+
+
+@pytest.fixture
+def json_logs():
+    """Every line the service logs, through its own filter and formatter."""
+    import io
+    import json
+    import logging
+    from service import logs
+    out = io.StringIO()
+    handler = logging.StreamHandler(out)
+    handler.addFilter(logs.CorrelationFilter())
+    handler.setFormatter(logs.JsonFormatter())
+    handler.setLevel(logging.INFO)
+    root = logging.getLogger()
+    saved = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    yield lambda: [json.loads(l) for l in out.getvalue().splitlines()]
+    root.removeHandler(handler)
+    root.setLevel(saved)
+
+
+@pytest.mark.vp("VP1-OAM-004")
+def test_vp1_oam_004_two_calls_log_under_their_own_correlation_ids(call, json_logs):
+    """ENV-INT (RES-OP-04): two concurrent calls through the process. Every
+    log line about one of them -- from the media receive threads, the SIP
+    timers, the session layer -- is JSON and carries that call's id, the id
+    its audit records carry; a line about neither carries none."""
+    rt, core, flows, ues, clock = call
+    second = {u: UE(u) for u in U}
+    try:
+        for cid, side in (("call-a", ues), ("call-b", second)):
+            with core.lock:
+                core.on_bytes(group_invite(side[U[0]], cid=cid), flows[U[0]])
+                for u in (U[1], U[2]):
+                    leg = flows[u].requests("INVITE")[-1]      # this call's leg
+                    side[u].learn_relay(mcf.sdp_of(leg))
+                    core.on_bytes(answer(leg, 200, side[u].sdp()), flows[u])
+            ok = [m for m in flows[U[0]].messages() if getattr(m, "code", None) == 200
+                  and m.headers.get("Call-ID") == cid][0]
+            side[U[0]].learn_relay(ok.body)
+        with core.lock:
+            core.on_bytes(b"not sip at all\r\n\r\n", flows[U[3]])
+        # A malformed floor packet into each call: logged by that call's
+        # media receive thread.
+        for side in (ues, second):
+            side[U[0]].floor.sendto(b"\x80\xcc\x00\x01junk", side[U[0]].relay_floor)
+        deadline = __import__("time").time() + 2
+        while __import__("time").time() < deadline and sum(
+                "malformed floor" in l["message"] for l in json_logs()) < 2:
+            __import__("time").sleep(0.05)
+        # The caller never ACKs its 200 OK: after 64*T1 the SIP timers end
+        # each call, logging as they do.
+        clock.now += 40_000
+        with core.lock:
+            core.tick()
+    finally:
+        for ue in second.values():
+            ue.close()
+
+    got = json_logs()
+    about = {c: [l for l in got if l.get("correlation_id") == c] for c in ("call-a", "call-b")}
+    for cid in ("call-a", "call-b"):
+        messages = [l["message"] for l in about[cid]]
+        assert any(m.startswith("malformed floor message from ") for m in messages), messages
+        assert f"no ACK for 2xx call-id={cid}: ending session" in messages
+        # Every line naming the call carries its id, and only its id.
+        assert all(l.get("correlation_id") == cid for l in got if cid in l["message"])
+    assert not any(l.get("correlation_id") for l in got
+                   if l["message"].startswith("dropped unparseable message"))
+    # Every line from the call path is some call's, but the one about bytes
+    # that could not be parsed at all, which name no call.
+    session_lines = [l for l in got if l["logger"] in ("mcx.sip", "mcx.media", "mcx.session")
+                     and not l["message"].startswith("dropped unparseable message")]
+    assert session_lines
+    assert {l.get("correlation_id") for l in session_lines} == {"call-a", "call-b"}
+    # And the audit trail joins on the same ids.
+    for cid in ("call-a", "call-b"):
+        assert {r["correlation_id"] for r in rt.store.audit_records(cid)} == {cid}
+        assert rt.store.audit_records(cid)

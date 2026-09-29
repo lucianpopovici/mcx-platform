@@ -46,6 +46,7 @@ from core import identity
 from core import mcinfo
 from core.mcinfo import sdp_of
 
+from .logs import session_context
 from .media import MediaSession, UdpMediaPlane
 from .runtime import Runtime
 from .session_timer import DialogTimer
@@ -327,16 +328,44 @@ class SipCore:
             log.warning("dropped unparseable message: %s", exc)
             return
         if isinstance(message, ReceivedResponse):
+            # Scoped once matched to the platform's request (_on_response).
             try:
                 self._on_response(message, flow)
             except Exception:  # noqa: BLE001 - one bad response, not the flow
-                # Requests are guarded in _on_request; a fault here would
-                # otherwise end the reader of this connection, and with a
-                # trusted core that is every user behind it (review of
-                # SIP-OP-17).
+                # A fault here would otherwise end the reader of this
+                # connection, and with a trusted core that is every user
+                # behind it (review of SIP-OP-17).
                 log.exception("fault handling a %s response", message.code)
-        else:
-            self._on_request(message, flow)
+            return
+        # Every line logged while a request is handled carries the session
+        # its Call-ID names (VP1-OAM-004, RES-OP-04). The dialog checks come
+        # later, so a line about a request that only claims a call's Call-ID
+        # carries that id too: it is about that call, if not from its party.
+        with session_context(self._cid_of_message(message)):
+            try:
+                self._on_request(message, flow)
+            except Exception:  # noqa: BLE001 - one bad request, not the flow
+                # _on_request guards most of its work; what escapes it would
+                # end this connection's reader with a traceback that is not
+                # JSON and names no session (RES-OP-04 review).
+                log.exception("fault handling a %s request", message.method)
+
+    def _cid_of(self, call_id: Optional[str]) -> Optional[str]:
+        """The correlation id of the session a Call-ID belongs to: the
+        caller's dialog or any leg's."""
+        call = self._dialogs.get(call_id or "") or self.calls.get(call_id or "")
+        return call.cid if call is not None else None
+
+    def _cid_of_message(self, message: Any) -> Optional[str]:
+        """A known call's; for a new INVITE, the Call-ID, which becomes the
+        session's correlation id and is the one its refusal is audited
+        under. Nothing for anything else: a stray message is no session's."""
+        call_id = message.headers.get("Call-ID")
+        cid = self._cid_of(call_id)
+        if cid is None and isinstance(message, Request) and \
+                message.method == "INVITE" and not _tag_of(message.headers.get("To")):
+            cid = call_id or None
+        return cid
 
     def on_flow_closed(self, flow: Any) -> None:
         for uri in [u for u, f in self.flows_by_user.items() if f is flow]:
@@ -725,6 +754,16 @@ class SipCore:
             log.warning("response from another flow or Call-ID dropped code=%s",
                         resp.code)
             return
+        # Only now is the response known to answer the platform's own
+        # request: a line logged before this, about a response any peer could
+        # send with a live call's Call-ID, is no session's (RES-OP-04 review).
+        with session_context(self._cid_of(txn.request.headers.get("Call-ID"))):
+            return self._on_matched_response(txn, resp, flow)
+
+    def _on_matched_response(self, txn: ClientTxn, resp: ReceivedResponse,
+                             flow: Any) -> None:
+        """A response on the connection and Call-ID of the platform's own
+        request (`_on_response` has checked)."""
         if isinstance(txn.user, Refresh):
             return self._refresh_response(txn, resp)
         if txn.user is None:
@@ -1624,32 +1663,33 @@ class SipCore:
         """What each dialog's RFC 4028 timer says is due now."""
         now = self.clock()
         for call in list(self.calls.values()):
-            dialogs = [(call, None)] + [(l, l) for l in list(call.legs.values())
-                                        if l.state == "confirmed"]
-            for state, leg in dialogs:
-                if call.ended:
-                    break
-                timer = state.timer
-                if timer is None:
-                    continue
-                try:
-                    if timer.expired(now):
-                        # RFC 4028 section 10: BYE when the session expires.
-                        self._dialog_gone(call, leg, "session-expired")
-                    elif timer.refresh_due(now):
-                        self._send_refresh(call, leg)
-                except Exception:  # noqa: BLE001
-                    # Contained: the transaction timers in the same tick, and
-                    # every other dialog, still run. Nothing is retried in a
-                    # loop: a refresh is pushed back, and an expiry that could
-                    # not be carried out removes the call's state (review and
-                    # re-review of SIP-OP-17).
-                    log.exception("session timer fault on call %s", call.cid)
-                    timer.pending = False
-                    timer.refresh_at = None
-                    if timer.expired(now):
-                        self._force_remove(call)
+            with session_context(call.cid):
+                dialogs = [(call, None)] + [(l, l) for l in list(call.legs.values())
+                                            if l.state == "confirmed"]
+                for state, leg in dialogs:
+                    if call.ended:
                         break
+                    timer = state.timer
+                    if timer is None:
+                        continue
+                    try:
+                        if timer.expired(now):
+                            # RFC 4028 section 10: BYE when the session expires.
+                            self._dialog_gone(call, leg, "session-expired")
+                        elif timer.refresh_due(now):
+                            self._send_refresh(call, leg)
+                    except Exception:  # noqa: BLE001
+                        # Contained: the transaction timers in the same tick, and
+                        # every other dialog, still run. Nothing is retried in a
+                        # loop: a refresh is pushed back, and an expiry that could
+                        # not be carried out removes the call's state (review and
+                        # re-review of SIP-OP-17).
+                        log.exception("session timer fault on call %s", call.cid)
+                        timer.pending = False
+                        timer.refresh_at = None
+                        if timer.expired(now):
+                            self._force_remove(call)
+                            break
 
     # -- timers ---------------------------------------------------------------------
 
@@ -1673,32 +1713,48 @@ class SipCore:
                 continue
             call = self.calls.get(txn.call_id)
             if call is not None and not call.ended:
-                log.warning("no ACK for 2xx call-id=%s: ending session",
-                            call.cid)
-                self._end(call, cause="ack-timeout")
+                with session_context(call.cid):
+                    try:
+                        log.warning("no ACK for 2xx call-id=%s: ending session",
+                                    call.cid)
+                        self._end(call, cause="ack-timeout")
+                    except Exception:  # noqa: BLE001
+                        # In this call's scope, and not the rest of the tick's
+                        # business: every other call's timers still run
+                        # (RES-OP-04 review).
+                        log.exception("ending call %s after no ACK failed", call.cid)
         for ctxn in self.client.tick():
-            if ctxn.accepted:
-                continue          # Timer M: the 2xx window closed, not a failure
-            if isinstance(ctxn.user, Refresh):
-                r = ctxn.user
-                state = r.leg if r.leg is not None else r.call
-                if state.refresh is r and not r.call.ended:
-                    state.refresh = None
-                    self._refresh_failed(r.call, r.leg, 408)
-                continue
-            leg = ctxn.user
-            if leg is not None and ctxn.cancelled and not ctxn.done \
-                    and not leg.cancel:
-                # Rang past the no-answer limit (SIP-OP-15): the callee is
-                # still alerting, so it is CANCELled, not forgotten.
-                self._send_cancel(leg)
-            call = self._dialogs.get(leg.call_id) if leg else None
-            if call is None or call.ended:
-                continue
-            leg.state = "failed"
-            if ctxn.method == "INVITE":
-                self._maybe_fail(call, 408)
+            with session_context(self._cid_of(ctxn.request.headers.get("Call-ID"))):
+                try:
+                    self._client_timeout(ctxn)
+                except Exception:  # noqa: BLE001
+                    # In the call's scope, and contained: the other calls'
+                    # transactions still run (RES-OP-04 review).
+                    log.exception("client transaction timeout handling failed")
 
+    def _client_timeout(self, ctxn: ClientTxn) -> None:
+        """A client transaction the timers ended (RFC 3261 17.1)."""
+        if ctxn.accepted:
+            return            # Timer M: the 2xx window closed, not a failure
+        if isinstance(ctxn.user, Refresh):
+            r = ctxn.user
+            state = r.leg if r.leg is not None else r.call
+            if state.refresh is r and not r.call.ended:
+                state.refresh = None
+                self._refresh_failed(r.call, r.leg, 408)
+            return
+        leg = ctxn.user
+        if leg is not None and ctxn.cancelled and not ctxn.done \
+                and not leg.cancel:
+            # Rang past the no-answer limit (SIP-OP-15): the callee is
+            # still alerting, so it is CANCELled, not forgotten.
+            self._send_cancel(leg)
+        call = self._dialogs.get(leg.call_id) if leg else None
+        if call is None or call.ended:
+            return
+        leg.state = "failed"
+        if ctxn.method == "INVITE":
+            self._maybe_fail(call, 408)
 
 def _quoted(text: object) -> str:
     """The body of an RFC 3261 quoted-string (25.1: quoted-pair escapes " and

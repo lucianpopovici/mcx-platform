@@ -33,6 +33,8 @@ from core.release import Release
 from core import rtcp
 from core.rtcp import MsgType
 
+from .logs import session_context
+
 log = logging.getLogger("mcx.media")
 
 Addr = Tuple[str, int]
@@ -456,13 +458,15 @@ class UdpEndpointIO:
                 continue
             except OSError:
                 return
-            try:
-                self._plane.deliver(self._session_id, self._uri, kind, src, data)
-            except Exception:                              # noqa: BLE001
-                # One packet the relay cannot handle must not end this
-                # party's media for the rest of the call (review of MED-OP-01).
-                log.exception("media %s: %s packet from %s not handled",
-                              self._session_id, kind, src)
+            with session_context(self._session_id):      # RES-OP-04
+                try:
+                    self._plane.deliver(self._session_id, self._uri, kind, src, data)
+                except Exception:                          # noqa: BLE001
+                    # One packet the relay cannot handle must not end this
+                    # party's media for the rest of the call (review of
+                    # MED-OP-01).
+                    log.exception("media %s: %s packet from %s not handled",
+                                  self._session_id, kind, src)
 
     def send_rtp(self, addr: Addr, data: bytes) -> None:
         self._sendto(self._rtp, addr, data)
@@ -551,11 +555,12 @@ class UdpMediaPlane:
 
     def tick(self) -> None:
         for session in list(self._sessions.values()):
-            try:
-                session.tick()
-            except Exception:                              # noqa: BLE001
-                # One session's floor timer that could not be handled (its
-                # audit record failed, and the transition was undone) must not
-                # stop the others' timers, nor the SIP timers that run after
-                # this. The timer is still due, and fires at the next tick.
-                log.exception("media %s: floor timer not handled", session.cid)
+            with session_context(session.cid):             # RES-OP-04
+                try:
+                    session.tick()
+                except Exception:                              # noqa: BLE001
+                    # One session's floor timer that could not be handled (its
+                    # audit record failed, and the transition was undone) must not
+                    # stop the others' timers, nor the SIP timers that run after
+                    # this. The timer is still due, and fires at the next tick.
+                    log.exception("media %s: floor timer not handled", session.cid)

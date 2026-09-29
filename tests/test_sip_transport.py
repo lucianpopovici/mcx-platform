@@ -1985,5 +1985,145 @@ def test_a_release_sends_its_byes_when_the_store_cannot_mark_it(core, rt, world,
     signals = rt.release("rel1")
     assert signals and list(signals) == sent
     assert {s.target for s in sent if s.type.value == "bye"} == set(U)   # every member
-    assert any("rel1: released, but its store row was not marked released"
-               in r.getMessage() for r in caplog.records)
+    [lost] = [r for r in caplog.records
+              if "rel1: released, but its store row was not marked released"
+              in r.getMessage()]
+    assert lost.correlation_id == "rel1"          # RES-OP-04
+
+    # RES-OP-04: the SIP timers run each call in its scope.
+    from service import logs
+    seen = []
+    real = core._dialog_gone
+    core._dialog_gone = lambda call, leg, cause: (seen.append((call.cid, logs.current())),
+                                                  real(call, leg, cause))
+    core.on_bytes(invite("tmr1", U[0], U[1], "private"), world[U[0]])
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[-1], 200, SDP), world[U[1]])
+    core.clock.now += 2_000_000                   # past MCX_SESSION_EXPIRES
+    core.tick()
+    assert "tmr1" in {c for c, _ in seen}
+    assert all(cid == scope for cid, scope in seen)
+
+
+@pytest.mark.vp("VP1-OAM-004")
+def test_a_message_is_handled_in_the_scope_of_its_session(core, world, caplog):
+    """RES-OP-04: everything logged while a message is handled carries the
+    session it belongs to. A request: the call its Call-ID names (a new
+    INVITE's Call-ID is the session's id); a stray one, none. A response:
+    its call once matched to the platform's own request; a response any peer
+    could send with a live call's Call-ID, before that, none."""
+    import logging
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())   # as the service's handler
+    core.on_bytes(invite("scope1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    leg = world[U[1]].requests("INVITE")[0]
+    seen = []
+    real_request, real_matched = core._on_request, core._on_matched_response
+    core._on_request = lambda m, f: (seen.append(logs.current()), real_request(m, f))
+    core._on_matched_response = lambda t, r, f: (seen.append(logs.current()),
+                                                 real_matched(t, r, f))
+    try:
+        core.on_bytes(answer(leg, 180), world[U[1]])                        # a leg's
+        core.on_bytes(msg("BYE", LOCAL, "scope1", 2, U[0], LOCAL,
+                          to_tag="nomatch"), world[U[0]])                   # the caller's
+        core.on_bytes(invite("scope2", U[1], "grp:alpha", "emergency-group"),
+                      world[U[1]])                                          # a new one
+        core.on_bytes(msg("BYE", LOCAL, "nobody", 2, U[0], LOCAL,
+                          to_tag="x"), world[U[0]])                         # stray
+        core.on_bytes(msg("INVITE", LOCAL, "nobody2", 3, U[0], LOCAL,
+                          to_tag="x"), world[U[0]])          # a stray re-INVITE
+        # U[2]'s leg of the live call scope2, answered from U[3]'s connection:
+        # not the platform's request's, so dropped -- and logged as no
+        # session's, though its Call-ID is a live call's.
+        live = world[U[2]].requests("INVITE")[-1]
+        assert core._cid_of(live.headers.get("Call-ID")) == "scope2"
+        with caplog.at_level(logging.INFO, logger="mcx.sip"):
+            core.on_bytes(answer(live, 180), world[U[3]])
+    finally:
+        core._on_request, core._on_matched_response = real_request, real_matched
+    assert seen == ["scope1", "scope1", "scope2", None, None]
+    assert logs.current() is None
+    assert leg.headers.get("Call-ID") != "scope1"      # the leg has its own
+    [dropped] = [r for r in caplog.records if "dropped" in r.getMessage()]
+    assert dropped.correlation_id is None             # stamped, and no session's
+
+
+@pytest.mark.vp("VP1-OAM-004")
+def test_a_leg_s_transaction_timeout_is_handled_in_its_call_s_scope(core, world):
+    """RES-OP-04 review: the client transaction timers' scope was untested.
+    An unanswered leg's INVITE times out (Timer B) inside its call's scope."""
+    from service import logs
+    core.on_bytes(invite("tb1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    seen = []
+    real = core._client_timeout
+    core._client_timeout = lambda ctxn: (seen.append(logs.current()), real(ctxn))
+    core.clock.now += 40_000                      # past 64*T1
+    core.tick()
+    assert seen and set(seen) == {"tb1"}
+
+
+def test_a_fault_in_one_call_s_timers_is_logged_in_its_scope_and_contained(
+        core, world, caplog):
+    """RES-OP-04 review: a fault ending one call escaped its scope, was logged
+    as a bare "tick fault" and skipped every other call's timers."""
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())   # as the service's handler
+    for cid in ("f1", "f2"):
+        core.on_bytes(invite(cid, U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    for req in world[U[1]].requests("INVITE"):
+        core.on_bytes(answer(req, 200, SDP), world[U[1]])
+    ended = []
+    real = core._end
+
+    def end(call, **kw):
+        ended.append(call.cid)
+        if call.cid == "f1":
+            raise RuntimeError("store down")
+        return real(call, **kw)
+
+    core._end = end
+    core.clock.now += 40_000                      # no ACK from the caller
+    core.tick()
+    assert sorted(ended) == ["f1", "f2"]
+    [fault] = [r for r in caplog.records if r.getMessage().startswith("ending call f1")]
+    assert fault.correlation_id == "f1" and fault.exc_info
+
+
+def test_a_fault_in_one_call_s_transaction_timeout_is_contained(core, world, caplog):
+    """RES-OP-04 review: logged in that call's scope; the other calls'
+    timed-out transactions are still handled."""
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())
+    for cid in ("g1", "g2"):
+        core.on_bytes(invite(cid, U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    handled = []
+    real = core._client_timeout
+
+    def timeout(ctxn):
+        handled.append(logs.current())
+        if logs.current() == "g1":
+            raise RuntimeError("store down")
+        return real(ctxn)
+
+    core._client_timeout = timeout
+    core.clock.now += 40_000
+    core.tick()
+    assert handled.count("g1") == 3 and handled.count("g2") == 3     # three legs each
+    faults = [r for r in caplog.records
+              if r.getMessage() == "client transaction timeout handling failed"]
+    assert len(faults) == 3 and {r.correlation_id for r in faults} == {"g1"}
+
+
+def test_a_fault_escaping_a_request_is_logged_in_its_scope_not_raised(core, world, caplog):
+    """RES-OP-04 review: it ended the connection's reader thread with a
+    traceback that was not JSON and named no call."""
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())
+    core.on_bytes(invite("h1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+
+    def broken(req, flow):
+        raise RuntimeError("unguarded")
+
+    core._on_request = broken
+    core.on_bytes(msg("BYE", LOCAL, "h1", 2, U[0], LOCAL, to_tag="t"), world[U[0]])
+    [fault] = [r for r in caplog.records if r.getMessage() == "fault handling a BYE request"]
+    assert fault.correlation_id == "h1" and fault.exc_info

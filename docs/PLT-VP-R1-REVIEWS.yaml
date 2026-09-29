@@ -1081,18 +1081,23 @@ VP1-OAM-003:
     via the default fail-closed platform, or a capacity refusal) and assert a ''session-refused'' record
     whose detail.reason_code equals the refusal''s reason code.'
 VP1-OAM-004:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
+  - tests/test_logs.py::test_a_line_logged_in_a_session_s_scope_carries_its_id
+  - tests/test_logs.py::test_an_id_the_record_names_wins_over_the_scope
+  - tests/test_logs.py::test_configure_installs_the_filter_and_the_json_formatter
+  - tests/test_media_e2e.py::test_vp1_oam_004_two_calls_log_under_their_own_correlation_ids
   - tests/test_session.py::test_vp1_oam_004_correlation_id_stable_across_records
-  gap: 'The evidence covers audit records in a unit MemorySink for one session, where the caller supplies
-    the id. It covers no logs, no second session (distinct ids), and no component other than SessionManager.
-    The implementation''s JSON log formatter (service/logs.py) has no correlation-id field, and media/SIP
-    log lines do not carry one. So the logs clause is unmet, not just untested. To close: run two concurrent
-    calls through the process (ENV-INT), parse every stderr log line as JSON, and assert that each line
-    about a session carries that session''s correlation id. Assert the same for every record from SIP,
-    media, floor and audit, with distinct ids for the two calls.'
+  - tests/test_sip_transport.py::test_a_leg_s_transaction_timeout_is_handled_in_its_call_s_scope
+  - tests/test_sip_transport.py::test_a_message_is_handled_in_the_scope_of_its_session
+  note: 'Re-reviewed after RES-OP-04: two concurrent calls driven in-process through the SIP core and the
+    UDP media plane (ENV-INT), with the service''s filter and formatter, log every
+    SIP, media and session line as JSON under that call''s correlation id, the id its audit records carry,
+    and distinct for the two; a line about no call carries none. The scope is set per request, per matched
+    response, per call timer and transaction timeout, per media packet and floor timer; a fault in one
+    call''s work is logged in its scope and contained.'
 VP1-OAM-005:
   verdict: pass
   by: independent review (agent)

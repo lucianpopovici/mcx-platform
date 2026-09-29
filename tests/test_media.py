@@ -1143,14 +1143,16 @@ def test_one_session_s_failing_floor_timer_does_not_stop_the_others():
     from core.release import Release
     from service.media import UdpMediaPlane
 
-    ticked = []
+    ticked, scopes = [], []
 
     class Session:
         def __init__(self, cid, fails):
             self.cid, self.fails = cid, fails
 
         def tick(self):
+            from service import logs
             ticked.append(self.cid)
+            scopes.append(logs.current())          # RES-OP-04: in its scope
             if self.fails:
                 raise OSError("audit store unavailable")
 
@@ -1158,3 +1160,4 @@ def test_one_session_s_failing_floor_timer_does_not_stop_the_others():
     plane._sessions.update({c: Session(c, c == "b") for c in ("a", "b", "c")})
     plane.tick()
     assert ticked == ["a", "b", "c"]
+    assert scopes == ["a", "b", "c"]

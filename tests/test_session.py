@@ -1669,9 +1669,11 @@ def test_a_release_completes_when_its_records_cannot_be_written(mcx, caplog):
     assert [s.target for s in signals if s.type is SignalType.BYE] == list(session.members)
     assert SignalType.RELEASE_QOS in types(signals)
     assert mgr.active == ()
-    lost = [r.getMessage() for r in caplog.records if r.name == "mcx.session"]
-    assert lost == ["session r1: floor release not recorded; released anyway",
-                    "session r1: session-released record lost; the session ended anyway"]
+    lost = [r for r in caplog.records if r.name == "mcx.session"]
+    assert [r.getMessage() for r in lost] == [
+        "session r1: floor release not recorded; released anyway",
+        "session r1: session-released record lost; the session ended anyway"]
+    assert {r.correlation_id for r in lost} == {"r1"}           # RES-OP-04
 
 
 @pytest.mark.vp("VP1-FC-021")
