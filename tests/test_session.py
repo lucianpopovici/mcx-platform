@@ -681,14 +681,310 @@ def test_vp1_hook_003_every_invocation_audited(manager, sink):
         assert r.correlation_id == "s1"
 
 
+def _returned_by(sink, interface, method):
+    [record] = [r for r in sink.of_type(RecordType.HOOK_INVOCATION)
+                if (r.detail["interface"], r.detail["method"]) == (interface, method)]
+    return record
+
+
 def test_vp1_hook_004_decisions_recorded_in_full(manager, sink):
+    """ICD-GEN-041: each decision is on its invocation's record, every field
+    of it, as the hook returned it (RES-OP-02)."""
     manager.establish(req())
-    admitted = sink.of_type(RecordType.SESSION_ADMITTED)[0]
-    assert admitted.detail["priority"]
-    assert admitted.detail["scope"]
-    assert admitted.detail["members"] == 4
-    established = sink.of_type(RecordType.SESSION_ESTABLISHED)[0]
-    assert established.detail["qos_identifier"] == 65
+    got = {(r.detail["interface"], r.detail["method"]): r.detail["returned"]
+           for r in sink.of_type(RecordType.HOOK_INVOCATION)}
+    assert got[("IF-PRI", "evaluate")] == {
+        "level": 20, "scope": "public-safety", "preemption_capability": False,
+        "preemption_vulnerability": True, "floor_priority": 80, "label": "normal"}
+    assert got[("IF-SES", "decide")] == {
+        "model": "on-demand", "auto_answer": False, "acknowledgement_required": False,
+        "recording_required": True, "max_participants": 200}
+    assert got[("IF-BER", "select")] == {
+        "qos_identifier": 65, "arp_level": 5, "arp_preemption_capability": False,
+        "arp_preemption_vulnerability": True, "redundancy": "single",
+        "paths": [{"path_id": "default", "transport": "udp", "primary": True,
+                   "weight": 1, "attributes": {}}]}
+    assert got[("IF-SES", "floor_policy")] == {
+        "initial_grant_to_initiator": True, "queueing_enabled": True,
+        "override_allowed": True, "max_queue_depth": 8,
+        "timers_ms": {"T2": 4000, "T20": 100, "T3": 3000, "T8": 1000}}
+    assert got[("IF-IDR", "resolve")] == {
+        "kind": "group", "group_id": "grp:alpha", "resolved_from": None,
+        "members": [f"sip:u{i}@mcptt.example" for i in range(4)]}
+    assert got[("IF-SES", "authorise")] == got[("IF-SES", "admit")] == {
+        "permitted": True, "reason_code": ""}
+    assert got[("IF-IDR", "identities_of")] == []
+    # The session records keep their summary of the same decisions.
+    admitted = sink.of_type(RecordType.SESSION_ADMITTED)[0].detail
+    assert (admitted["priority"], admitted["scope"], admitted["members"]) == (
+        "normal", "public-safety", 4)
+    established = sink.of_type(RecordType.SESSION_ESTABLISHED)[0].detail
+    assert (established["qos_identifier"], established["recording"]) == (65, True)
+    assert established["members"] == tuple(f"sip:u{i}@mcptt.example" for i in range(4))
+
+
+def test_vp1_hook_004_every_field_of_every_decision_type(manager, sink):
+    """Nothing is picked: the record has exactly the value type's fields, so a
+    field added to a decision is recorded without touching the core."""
+    import dataclasses as dc
+    from core.hooks import BearerDecision, FloorPolicy, PriorityDecision, SessionDecision
+    manager.establish(req())
+    for (iface, method), cls in {("IF-PRI", "evaluate"): PriorityDecision,
+                                 ("IF-SES", "decide"): SessionDecision,
+                                 ("IF-SES", "floor_policy"): FloorPolicy,
+                                 ("IF-BER", "select"): BearerDecision}.items():
+        returned = _returned_by(sink, iface, method).detail["returned"]
+        assert set(returned) == {f.name for f in dc.fields(cls)}
+
+
+def test_vp1_hook_004_the_record_serialises_as_it_was_returned(manager, sink):
+    import json
+    manager.establish(req())
+    record = _returned_by(sink, "IF-BER", "select")
+    assert json.loads(record.to_json())["detail"]["returned"] == record.detail["returned"]
+    assert json.loads(record.to_json())["detail"]["returned"]["paths"][0]["primary"] is True
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_a_refused_decision_is_recorded_as_returned(mcx, sink):
+    """A decision its POST refused is on the record too: the trail shows what
+    the profile returned, not only that it was refused."""
+    mgr = _altered(mcx, sink, floor=_floor(queueing_enabled=False, max_queue_depth=2))
+    mgr.establish(req())
+    record = _returned_by(sink, "IF-SES", "floor_policy")
+    assert record.detail["outcome"] == "contract-violation"
+    assert record.detail["returned"]["queueing_enabled"] is False
+    assert record.detail["returned"]["max_queue_depth"] == 2
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_a_look_alike_is_named_not_rendered(mcx, sink):
+    mgr = _altered(mcx, sink, bearer=lambda b: _Shaped(b))
+    mgr.establish(req())
+    assert _returned_by(sink, "IF-BER", "select").detail["returned"] == {
+        "unrepresentable": "_Shaped"}
+
+
+def test_nothing_is_recorded_as_returned_when_the_hook_returned_nothing(sink):
+    inv = Invoker(Auditor(sink, "p/1/h"), "c1")
+
+    def raises():
+        raise ValueError("boom")
+
+    def violates():
+        raise HookContractViolation("the hook's own verdict")
+
+    for fn in (raises, violates):
+        with pytest.raises(HookFailure):
+            inv.call("IF-SES", "decide", fn)
+    assert [r.detail["outcome"] for r in sink.records] == ["error", "contract-violation"]
+    assert all("returned" not in r.detail for r in sink.records)
+
+
+class _LyingDict(dict):
+    def __getitem__(self, k):
+        return "not what the core reads"
+
+
+class _EvilInt(int):
+    def __deepcopy__(self, memo):
+        raise RuntimeError("profile code ran inside the audit")
+
+
+def _liar():
+    """A PriorityDecision subclass that reads one way, then another: frozen,
+    and so passes freeze(), but not the core's own class."""
+    from core.hooks import PriorityDecision
+
+    class Liar(PriorityDecision):
+        reads = [0]
+
+        def __getattribute__(self, name):
+            if name == "preemption_capability":
+                Liar.reads[0] += 1
+                return Liar.reads[0] > 1
+            return super().__getattribute__(name)
+
+    return Liar
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+@pytest.mark.parametrize("change,named", [
+    (lambda p: _Shaped(p), "_Shaped"),
+    (lambda p: _liar()(**{f: getattr(p, f) for f in (
+        "level", "scope", "preemption_capability", "preemption_vulnerability",
+        "floor_priority", "label")}), "Liar"),
+    (lambda p: __import__("dataclasses").replace(p, level=float("nan")), "float nan"),
+    (lambda p: __import__("dataclasses").replace(p, floor_priority=float("inf")), "float inf"),
+    (lambda p: __import__("dataclasses").replace(p, level=_EvilInt(20)), "_EvilInt"),
+], ids=["look-alike", "lying-subclass", "nan", "inf", "int-subclass"])
+def test_a_priority_decision_the_audit_cannot_record_is_refused(mcx, sink, change, named):
+    """ICD-GEN-041: a decision absent from the trail cannot be relied on, so
+    one the audit cannot record exactly is not acted on (RES-OP-02 review)."""
+    _refused_as_violation(_altered(mcx, sink, priority=change), sink, "IF-PRI")
+    record = _returned_by(sink, "IF-PRI", "evaluate")
+    assert record.detail["outcome"] == "contract-violation"
+    assert named in sink.of_type(RecordType.SESSION_FAILED)[-1].detail["detail"]
+    record.to_json()
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_a_session_decision_the_audit_cannot_record_is_refused(mcx, sink):
+    import dataclasses as dc
+    sp = mcx.hooks.session_policy
+
+    class Session:
+        def __getattr__(self, n):
+            return getattr(sp, n)
+
+        def decide(self, request, resolution):
+            return _Shaped(sp.decide(request, resolution))
+
+    lp = loader.LoadedProfile(profile=mcx.profile, source=mcx.source,
+                              hooks=dc.replace(mcx.hooks, session_policy=Session()))
+    resolver = mcx.hooks.identity_resolver
+    for i in range(4):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    resolver.register_group("grp:alpha", [f"sip:u{i}@mcptt.example" for i in range(4)])
+    mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+    session, _, refusal = mgr.establish(req())
+    assert session is None and refusal.reason_code == "hook-contract-violation"
+    assert _returned_by(sink, "IF-SES", "decide").detail["returned"] == {
+        "unrepresentable": "_Shaped"}
+
+
+def test_a_value_the_audit_cannot_render_is_refused_without_running_it(sink):
+    from collections.abc import Mapping as AbcMapping
+
+    class Hostile(AbcMapping):
+        def __getitem__(self, k):
+            raise RuntimeError("profile code ran inside the audit")
+
+        def __iter__(self):
+            raise RuntimeError("profile code ran inside the audit")
+
+        def __len__(self):
+            return 1
+
+    with pytest.raises(HookFailure) as exc:
+        Invoker(Auditor(sink, "p/1/h"), "c1").call("IF-SES", "decide", Hostile)
+    assert exc.value.reason_code == "hook-contract-violation"
+    assert "Hostile" in exc.value.detail
+    [record] = sink.records
+    assert record.detail["returned"] == {"unrepresentable": "Hostile"}
+
+
+def test_a_value_its_post_check_crashed_on_is_still_recorded(sink):
+    from core.hooks import Admission
+
+    def post(_):
+        raise AttributeError("the check itself broke")
+
+    with pytest.raises(HookFailure) as exc:
+        Invoker(Auditor(sink, "p/1/h"), "c1").call(
+            "IF-SES", "admit", lambda: Admission(permitted=True, reason_code=""), post=post)
+    assert exc.value.reason_code == "hook-error"
+    [record] = sink.records
+    assert record.detail["outcome"] == "error"
+    assert record.detail["returned"] == {"permitted": True, "reason_code": ""}
+
+
+def test_nothing_is_recorded_as_returned_on_a_timeout(sink):
+    import time as _t
+    inv = Invoker(Auditor(sink, "p/1/h"), "c1", budgets_ms={"IF-SES": 1},
+                  mode=DeadlineMode.ENFORCE)
+    with pytest.raises(HookFailure) as exc:
+        inv.call("IF-SES", "decide", lambda: _t.sleep(0.2))
+    assert exc.value.reason_code == "hook-timeout"
+    [record] = sink.records
+    assert record.detail["outcome"] == "timeout" and "returned" not in record.detail
+
+
+def test_every_interface_has_its_icd_deadline():
+    """ICD-GEN-010: IF-ICX had none (RES-OP-02 review)."""
+    from core.invoke import DEFAULT_BUDGETS_MS
+    assert dict(DEFAULT_BUDGETS_MS) == {"IF-IDR": 50, "IF-PRI": 5, "IF-SES": 5,
+                                        "IF-BER": 10, "IF-IWF": 20, "IF-ICX": 20}
+
+
+def test_render_keeps_only_exact_core_types():
+    from enum import Enum
+    from core.hooks import FrozenDict, PathSpec, SessionDecision, SessionModel
+    from core.invoke import plain, render
+
+    class Colour(Enum):
+        RED = "red"
+
+    class Str(str):
+        pass
+
+    assert render(None) == (None, ()) and render(True) == (True, ())
+    assert render(2.5) == (2.5, ()) and render(-3) == (-3, ())
+    assert plain(SessionModel.ON_DEMAND) == "on-demand"
+    assert plain((1, [2, (3,)])) == [1, [2, [3]]]
+    assert plain(frozenset({"b", "a", "c"})) == ["a", "b", "c"]
+    assert plain(FrozenDict({"k": (1,)})) == {"k": [1]} == plain({"k": [1]})
+    assert plain(PathSpec(path_id="p", transport="udp", primary=True)) == {
+        "path_id": "p", "transport": "udp", "primary": True, "weight": 1,
+        "attributes": {}}
+    for value, named in [(Colour.RED, "Colour"), (Str("x"), "Str"), (b"01", "bytes"),
+                         (1j, "complex"), (object(), "object"), (int, "type"),
+                         (SessionDecision, "type"), (float("nan"), "float nan"),
+                         ({1: "x"}, "mapping key of type int"), (_EvilInt(3), "_EvilInt"),
+                         (("ok", {"k": Str("y")}), "Str"),
+                         (__import__("collections").namedtuple("Pair", "a b")(1, 2), "Pair"),
+                         (__import__("core.hooks", fromlist=["Value"]).Value(), "Value"),
+                         (_LyingDict({"k": "v"}), "_LyingDict")]:
+        assert render(value)[1] == (named,), value
+    assert plain({"a": b"x", "b": 1})["a"] == {"unrepresentable": "bytes"}
+
+
+def test_a_value_too_deep_to_render_is_unreadable_not_a_crash(sink):
+    deep = ()
+    for _ in range(100000):
+        deep = (deep,)
+    with pytest.raises(HookFailure) as exc:
+        Invoker(Auditor(sink, "p/1/h"), "c1").call("IF-IDR", "identities_of", lambda: deep)
+    assert exc.value.reason_code == "hook-contract-violation"
+    assert sink.records[0].detail["returned"] == {"unrepresentable": "unreadable"}
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_each_comparison_is_an_audited_invocation(manager, sink, mcx):
+    """compare decided pre-emption victims with no record (RES-OP-02 review)."""
+    manager.establish(req(rid="normal-call"))
+    emergency = mcx.hooks.priority_policy.evaluate(
+        req(call_type="emergency-group"),
+        Resolution(kind=ResolutionKind.USER, members=("x",)))
+    sink.records.clear()
+    assert [v.correlation_id for v in manager.preemption_victims(emergency, "urgent")] == [
+        "normal-call"]
+    [record] = sink.of_type(RecordType.HOOK_INVOCATION)
+    assert (record.correlation_id, record.detail["interface"], record.detail["method"],
+            record.detail["outcome"]) == ("urgent", "IF-PRI", "compare", "ok")
+    assert record.detail["returned"] > 0
+
+
+@pytest.mark.parametrize("result", [True, "1", 1.0, None])
+def test_a_comparison_that_is_not_an_integer_is_a_contract_violation(manager, mcx, result):
+    import dataclasses as dc
+    manager.establish(req(rid="normal-call"))
+    emergency = mcx.hooks.priority_policy.evaluate(
+        req(call_type="emergency-group"),
+        Resolution(kind=ResolutionKind.USER, members=("x",)))
+    pp = mcx.hooks.priority_policy
+
+    class Priority:
+        def __getattr__(self, n):
+            return getattr(pp, n)
+
+        def compare(self, a, b):
+            return result
+
+    manager._hooks = dc.replace(mcx.hooks, priority_policy=Priority())
+    with pytest.raises(HookFailure) as exc:
+        manager.preemption_victims(emergency, "urgent")
+    assert exc.value.reason_code == "hook-contract-violation"
 
 
 def test_vp1_oam_001_profile_identity_on_every_record(manager, sink, mcx):
@@ -755,7 +1051,7 @@ def test_preemption_requires_capability(manager):
                             preemption_capability=False,
                             preemption_vulnerability=False,
                             floor_priority=255, label="weak")
-    assert manager.preemption_victims(weak) == ()
+    assert manager.preemption_victims(weak, "incoming") == ()
 
 
 def test_preemption_selects_vulnerable_lower_priority_sessions(manager, mcx):
@@ -763,7 +1059,7 @@ def test_preemption_selects_vulnerable_lower_priority_sessions(manager, mcx):
     emergency = mcx.hooks.priority_policy.evaluate(
         req(call_type="emergency-group"),
         Resolution(kind=ResolutionKind.USER, members=("x",)))
-    victims = manager.preemption_victims(emergency)
+    victims = manager.preemption_victims(emergency, "incoming")
     assert [v.correlation_id for v in victims] == ["normal-call"]
 
 
@@ -776,7 +1072,7 @@ def test_preemption_never_crosses_scopes(manager, mcx):
         Resolution(kind=ResolutionKind.USER, members=("x",)))
     assert rail_emergency.preemption_capability is True
     assert rail_emergency.level > 90
-    assert manager.preemption_victims(rail_emergency) == ()
+    assert manager.preemption_victims(rail_emergency, "incoming") == ()
 
 
 def test_non_vulnerable_session_is_never_a_victim(manager, mcx):
@@ -784,7 +1080,7 @@ def test_non_vulnerable_session_is_never_a_victim(manager, mcx):
     another = mcx.hooks.priority_policy.evaluate(
         req(call_type="emergency-group"),
         Resolution(kind=ResolutionKind.USER, members=("x",)))
-    assert manager.preemption_victims(another) == ()
+    assert manager.preemption_victims(another, "incoming") == ()
 
 
 def test_higher_priority_still_cannot_preempt_a_non_vulnerable_session(manager):
@@ -796,7 +1092,7 @@ def test_higher_priority_still_cannot_preempt_a_non_vulnerable_session(manager):
                                     preemption_capability=True,
                                     preemption_vulnerability=False,
                                     floor_priority=255, label="overwhelming")
-    assert manager.preemption_victims(overwhelming) == ()
+    assert manager.preemption_victims(overwhelming, "incoming") == ()
 
 
 def test_scope_check_is_a_backstop_for_a_broken_compare(mcx, sink):
@@ -837,7 +1133,7 @@ def test_scope_check_is_a_backstop_for_a_broken_compare(mcx, sink):
                                preemption_capability=True,
                                preemption_vulnerability=False,
                                floor_priority=255, label="foreign-emergency")
-    assert mgr.preemption_victims(foreign) == ()
+    assert mgr.preemption_victims(foreign, "incoming") == ()
 
 
 # --------------------------------------------------------------------------

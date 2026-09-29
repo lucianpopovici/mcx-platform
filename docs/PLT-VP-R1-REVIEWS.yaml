@@ -622,18 +622,23 @@ VP1-HOOK-003:
     invocation.'
   note: Correlation ID and outcome=='ok' are asserted per record.
 VP1-HOOK-004:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
+  - tests/test_icx.py::test_the_outbound_assertion_is_an_audited_invocation
+  - tests/test_session.py::test_a_look_alike_is_named_not_rendered
+  - tests/test_session.py::test_a_priority_decision_the_audit_cannot_record_is_refused
+  - tests/test_session.py::test_a_refused_decision_is_recorded_as_returned
+  - tests/test_session.py::test_a_session_decision_the_audit_cannot_record_is_refused
+  - tests/test_session.py::test_each_comparison_is_an_audited_invocation
   - tests/test_session.py::test_vp1_hook_004_decisions_recorded_in_full
-  gap: '''Each recorded with all fields'' is not asserted. The test checks only the priority label and
-    scope (on SESSION_ADMITTED) and qos_identifier (on SESSION_ESTABLISHED). The core (core/session.py:388-399)
-    records no level, preemption_capability/vulnerability or floor_priority. It records nothing of the
-    session decision except recording_required: no model, auto_answer, acknowledgement_required or max_participants.
-    It records nothing of the bearer decision except qos_identifier: no arp_level, ARP flags, paths or
-    redundancy. A test asserting every field of PriorityDecision, SessionDecision and BearerDecision in
-    the audit trail would fail today, so the implementation looks non-conformant to ICD-GEN-041.'
+  - tests/test_session.py::test_vp1_hook_004_every_field_of_every_decision_type
+  - tests/test_session.py::test_vp1_hook_004_the_record_serialises_as_it_was_returned
+  note: 'Re-reviewed after RES-OP-02: the priority, session and bearer decisions, and every other hook
+    return, are on the invocation record with every field, pinned literally; the field sets are the value
+    types'' own. A value the audit cannot record exactly is refused rather than relied on, and a refused
+    value is recorded too. All three profiles'' in-tree values render with nothing refused.'
 VP1-HOOK-010:
   verdict: pass
   by: independent review (agent)

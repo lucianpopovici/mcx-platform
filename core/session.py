@@ -315,6 +315,15 @@ class SessionManager:
                                   request, priority, tuple(request.media),
                                   post=lambda b: self._check_bearer(b, priority))
 
+            # 7b — IF-ICX.map_outbound: what the partner is told, before any
+            # QoS is reserved, so a failing hook leaves nothing to undo.
+            asserted = None
+            if partner is not None:
+                asserted = invoker.call(
+                    "IF-ICX", "map_outbound",
+                    self._hooks.interconnection_gateway.map_outbound,
+                    request, priority)
+
             # 8 — reserve and establish
             if not self._platform.reserve_qos(bearer):
                 # The core requests the QoS the profile returned; refusal by
@@ -353,8 +362,6 @@ class SessionManager:
             # local fan-out. The resolution carries no local members.
             session.gateway = partner.gateway
             session.partner_id = partner.partner_id
-            asserted = self._hooks.interconnection_gateway.map_outbound(
-                request, priority)
             signals.append(Signal(SignalType.INVITE, target=partner.gateway,
                                   detail={
                                       "auto_answer": decision.auto_answer,
@@ -493,16 +500,23 @@ class SessionManager:
 
     # -- pre-emption -----------------------------------------------------
 
-    def preemption_victims(self, incoming: PriorityDecision) -> Tuple[Session, ...]:
+    def preemption_victims(self, incoming: PriorityDecision,
+                           correlation_id: str) -> Tuple[Session, ...]:
         """§8.2 steps 2–3. Selection only: the caller releases the victims.
 
         Every gate must pass. Cross-scope pairs are excluded by `compare`
         returning 0, and the capability and vulnerability flags are checked
         independently of it (PLT-PRI-002).
+
+        Each `compare` is an invocation like any other (ICD-GEN-040/041),
+        audited under the incoming session's `correlation_id`; one that fails
+        raises HookFailure, and the caller fails the incoming session
+        (ICD-GEN-021), as for any hook on its path.
         """
         if not incoming.preemption_capability:
             return ()
         policy = self._hooks.priority_policy
+        invoker = Invoker(self._auditor, correlation_id)
         victims = []
         for session in self.active:
             candidate = session.priority
@@ -510,7 +524,8 @@ class SessionManager:
                 continue
             if candidate.scope != incoming.scope:
                 continue
-            if policy.compare(incoming, candidate) <= 0:
+            if invoker.call("IF-PRI", "compare", policy.compare, incoming, candidate,
+                            post=self._check_comparison) <= 0:
                 continue
             victims.append(session)
         return tuple(victims)
@@ -609,6 +624,13 @@ class SessionManager:
             raise HookContractViolation(
                 f"resolution returned {len(outside)} member(s) outside the "
                 f"profile's declared domains: {', '.join(map(repr, outside[:3]))}")
+
+    @staticmethod
+    def _check_comparison(result: int) -> None:
+        """§4.2: `compare` returns an integer; `True` is not one."""
+        if type(result) is not int:
+            raise HookContractViolation(
+                f"compare returned {type(result).__name__}, not an integer")
 
     @staticmethod
     def _check_floor_policy(policy: FloorPolicy) -> None:

@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.19 (draft)
+**Version:** 0.20 (draft)
 **Date:** 2026-09-29
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -63,7 +63,7 @@ be handled gracefully: the core fails the session and records the violation
 
 | ID | Rule |
 |---|---|
-| ICD-GEN-010 | The core shall apply a deadline to every hook invocation. Default budgets: IF-IDR 50 ms, IF-PRI 5 ms, IF-SES 5 ms, IF-BER 10 ms, IF-IWF 20 ms, IF-ICX 20 ms. |
+| ICD-GEN-010 | The core shall apply a deadline to every hook invocation. Default budgets: IF-IDR 50 ms, IF-PRI 5 ms, IF-SES 5 ms, IF-BER 10 ms, IF-IWF 20 ms, IF-ICX 20 ms. (Before v0.20 the core applied none to IF-ICX, and called IF-ICX `map_outbound` and IF-PRI `compare` outside its invocation boundary, unaudited and without a deadline.) |
 | ICD-GEN-011 | On deadline expiry the core shall abandon the invocation, fail the session with `hook-timeout`, and record the interface and elapsed time. |
 | ICD-GEN-012 | The core shall not retry a timed-out invocation on the session-establishment path. |
 | ICD-GEN-013 | Budgets are deployment-configurable downward but not upward beyond the §6 latency allowance of PLT-SRS. |
@@ -91,7 +91,7 @@ be handled gracefully: the core fails the session and records the violation
 | ID | Rule |
 |---|---|
 | ICD-GEN-040 | Every invocation shall be recorded with interface ID, session correlation ID, elapsed time and outcome (PLT-OAM-002). |
-| ICD-GEN-041 | Returned decisions shall be recorded in full. A decision absent from the audit trail cannot be relied on in a safety case. |
+| ICD-GEN-041 | Returned decisions shall be recorded in full. A decision absent from the audit trail cannot be relied on in a safety case. **Since v0.20** (PLT-VP-R1 RES-OP-02): each invocation's record carries `returned`, every field of what the hook returned as plain data, whether the value was used or refused by its POST check; a hook that raised, or timed out under an enforced deadline, returned nothing, and nothing is recorded (an overrun measured after the call returned is recorded as usual). Only exact types are rendered: the value classes and enums of `core/hooks.py`, `str`, `int`, `bool`, `None`, a finite `float`, and dicts with string keys, tuples, lists and frozensets of these. Anything else, a subclass included, could show the audit one thing and the core another, or run the profile's code inside the audit, so a value holding one is refused as `hook-contract-violation`: the core never acts on a decision the trail does not hold exactly. Free-form maps such as a path's `attributes` are recorded like any other field, so a profile shall not put key material or credentials in them (PLT-SEC-009). |
 | ICD-GEN-042 | Hooks shall not log. Observability is the core's responsibility, so that one correlation scheme covers all interfaces. |
 
 ### 2.6 Call-type signatures (declared data, not a hook)
@@ -365,6 +365,7 @@ profile knowledge, so it is a hook. `SessionRequest` gains
 3. Antisymmetric: `sign(compare(a,b)) == -sign(compare(b,a))`.
 4. Transitive within a scope.
 5. Reflexive as equality: `compare(a,a) == 0`.
+6. Returns an `int` (not a `bool`). The core checks this one (since v0.20).
 
 **INV**
 1. `0` means *no relation*, not *equal*. The core never pre-empts on `0`, so an
@@ -725,6 +726,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.20 | 2026-09-29 | ICD-GEN-041 made true (PLT-VP-R1 RES-OP-02): every invocation records what the hook returned, in full, and a value the audit cannot record exactly is refused. IF-ICX `map_outbound` and IF-PRI `compare` now go through the invocation boundary; `map_outbound` runs before QoS is reserved. IF-ICX gets the 20 ms deadline ICD-GEN-010 always gave it. §4.2 POST-6. A minor change: signatures unchanged; what is newly refused is a value holding a type the ICD's own value types do not declare. |
 | 0.19 | 2026-09-29 | §5.3 and §6.1: the core checks the floor policy and bearer decision a hook returns (PLT-VP-R1 RES-OP-07). Before, only profile validation checked them, so a substituted hook was not held to its contract. A minor change: no POST is tightened, and a value that passes profile validation passes these checks. ICD-OP-14 opened. |
 | 0.18 | 2026-09-28 | ICD-GEN-001 made true: value types hold nothing mutable (`Value`, `FrozenDict`); VP1-BND-004's gate checks it (PLT-VP-R1 RES-OP-06). A minor change: types and signatures unchanged. What now raises TypeError: a hook mutating a value it received; a value built holding an object that is not known to be immutable (e.g. a profile's own class); a sequence field given a string, a set or a mapping. |
 | 0.17 | 2026-09-28 | §3.2 POST-3 made precise and enforced by the core; §3.5 gains POST-3 (PLT-VP-R1 RES-OP-01). The service profile's `identity.domains` must be lower-case DNS names. A minor change: no hook signature changes, but a resolver that returned members outside the declared domains, or written other than `sip[s]:user@host`, is now a contract violation. |
