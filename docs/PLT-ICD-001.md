@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.18 (draft)
-**Date:** 2026-09-26
+**Version:** 0.19 (draft)
+**Date:** 2026-09-29
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -471,6 +471,15 @@ data-only sessions.
    violation, detected at profile validation.
 4. Omitted timers take the core's specification defaults.
 
+**Checked by the core (since v0.19, PLT-VP-R1 RES-OP-07).** Profile
+validation checks the in-tree floor tables. The core also checks what the hook
+returns, so a hook that computes its policy is held to the same contract: the
+value is a `FloorPolicy` itself, not an object shaped like one; its flags are
+booleans; `max_queue_depth` is an integer and satisfies POST-1 and POST-2; and
+each `timers_ms` entry names a timer in POST-3's set with a positive integer of
+milliseconds. A failure is `hook-contract-violation` on IF-SES, before any
+bearer is selected or QoS reserved.
+
 **INV**
 1. The profile supplies constants only. The floor state machine and its
    transitions are core-owned and not influenceable (PLT-PRF-031, PLT-FC-010).
@@ -496,6 +505,17 @@ data-only sessions.
    with `preemption_capability=False` shall not request
    `arp_preemption_capability=True`.
 
+**Checked by the core (since v0.19, PLT-VP-R1 RES-OP-07).** The core checks
+the returned value before it reserves QoS: it is a `BearerDecision` whose paths
+are `PathSpec`s; POST-1 to POST-3; each transport and the redundancy are ones
+profile validation allows, and each weight is an integer of at least 1; the
+5QI and ARP level are integers and the ARP level is 1 to 15 (TS 23.501
+5.7.2.2), which is as much of POST-4 as the core can know; both ARP flags are
+booleans; and POST-5, where only `preemption_capability is True` grants. A
+failure is `hook-contract-violation` on IF-BER. Each check is one profile
+validation makes of a bearer rule, so a profile that validates is never
+refused here. Whether POST-5 also covers the vulnerability flag is ICD-OP-14.
+
 **INV**
 1. The core performs no priority-to-QoS mapping (PLT-HOK-043).
 2. The core requests the returned QoS from the network. Refusal by the network
@@ -510,7 +530,9 @@ data-only sessions.
 
 **POST**
 1. Returns `None` to leave the current decision unchanged.
-2. A returned decision shall satisfy every POST of §6.1.
+2. A returned decision shall satisfy every POST of §6.1. The core does not yet
+   call this method (§8.4 is not implemented); when it does, it applies §6.1's
+   check to the returned decision, against the session's own priority.
 3. Shall not raise for an unrecognised event type; returns `None`.
 
 **INV**
@@ -695,6 +717,7 @@ environmental condition.
 | ICD-OP-11 | **From v0.9.** The inbound guard records a request's (Call-ID, CSeq) before the identity check runs. A refused, spoofed request therefore uses up that pair, and a genuine request that later carries the same pair is answered 482. This matters only if Call-IDs can be predicted. | R2 |
 | ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. | before a two-digit-MNC deployment |
 | ICD-OP-13 | **From v0.13.** A request relayed by a gateway (§7.2) has two weaknesses. (1) Its audit trail records `session-admitted` before §8.1 runs, so a request refused at step 0 shows "admitted" and then "refused". (2) The gateway may name a local user as the initiator, and step 0 then authorises it with that user's roles. The gateway's word is taken for who is calling. Both predate v0.13. The remedy for the second is to authorise gateway-originated requests on the gateway's own rights. | R4 start |
+| ICD-OP-14 | **From v0.19.** §6.1 POST-5 says the ARP pre-emption *flags* are consistent with the priority decision, but states only capability. A bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` is accepted, and makes the session immune to network pre-emption that IF-PRI left it open to. Decide whether POST-5 covers vulnerability (a major change: it tightens a POST, and every in-tree bearer rule must then agree with its priority rule). Related: IF-PRI's own decision is not checked by the core, and the 5QI is checked only as an integer, in profile validation and at runtime alike (TS 23.501 values are 0 to 255). | R2 start |
 
 ---
 
@@ -702,6 +725,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.19 | 2026-09-29 | §5.3 and §6.1: the core checks the floor policy and bearer decision a hook returns (PLT-VP-R1 RES-OP-07). Before, only profile validation checked them, so a substituted hook was not held to its contract. A minor change: no POST is tightened, and a value that passes profile validation passes these checks. ICD-OP-14 opened. |
 | 0.18 | 2026-09-28 | ICD-GEN-001 made true: value types hold nothing mutable (`Value`, `FrozenDict`); VP1-BND-004's gate checks it (PLT-VP-R1 RES-OP-06). A minor change: types and signatures unchanged. What now raises TypeError: a hook mutating a value it received; a value built holding an object that is not known to be immutable (e.g. a profile's own class); a sequence field given a string, a set or a mapping. |
 | 0.17 | 2026-09-28 | §3.2 POST-3 made precise and enforced by the core; §3.5 gains POST-3 (PLT-VP-R1 RES-OP-01). The service profile's `identity.domains` must be lower-case DNS names. A minor change: no hook signature changes, but a resolver that returned members outside the declared domains, or written other than `sip[s]:user@host`, is now a contract violation. |
 | 0.16 | 2026-09-26 | §2.8: the network profile gains `groups` and `users` (ICD-NET-005; PLT-VP-R1 SVC-OP-03 decided). `MCX_GROUPS_FILE` is withdrawn and refused. A minor change: no hook or parameter object changes. |

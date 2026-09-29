@@ -30,6 +30,7 @@ from enum import Enum
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import identity
+from . import qos as qos_spec
 from . import floor as floor_mod
 from .audit import Auditor, RecordType
 from .errors import (
@@ -49,7 +50,9 @@ from .errors import (
 from .hooks import (
     Admission,
     BearerDecision,
+    FloorPolicy,
     MediaKind,
+    PathSpec,
     ResolutionKind,
     PriorityDecision,
     Resolution,
@@ -58,6 +61,7 @@ from .hooks import (
 )
 from .invoke import HookFailure, Invoker
 from .loader import LoadedProfile
+from .validation import FLOOR_TIMERS, REDUNDANCY, TRANSPORTS
 
 
 class SessionState(Enum):
@@ -302,12 +306,14 @@ class SessionManager:
             if self._has_floor_media(request):
                 floor_policy = invoker.call(
                     "IF-SES", "floor_policy",
-                    self._hooks.session_policy.floor_policy, request, resolution)
+                    self._hooks.session_policy.floor_policy, request, resolution,
+                    post=self._check_floor_policy)
 
             # 7 — IF-BER
             bearer = invoker.call("IF-BER", "select",
                                   self._hooks.bearer_selector.select,
-                                  request, priority, tuple(request.media))
+                                  request, priority, tuple(request.media),
+                                  post=lambda b: self._check_bearer(b, priority))
 
             # 8 — reserve and establish
             if not self._platform.reserve_qos(bearer):
@@ -579,7 +585,6 @@ class SessionManager:
     def _check_resolution(self, resolution: Resolution) -> None:
         """PLT-ICD-001 §3.2 POST-1: kind and member count must agree; POST-2:
         no duplicates; POST-3: every member within a declared domain."""
-        from .errors import HookContractViolation
         if resolution.kind is ResolutionKind.USER and len(resolution.members) != 1:
             raise HookContractViolation(
                 f"USER resolution returned {len(resolution.members)} members")
@@ -604,6 +609,111 @@ class SessionManager:
             raise HookContractViolation(
                 f"resolution returned {len(outside)} member(s) outside the "
                 f"profile's declared domains: {', '.join(map(repr, outside[:3]))}")
+
+    @staticmethod
+    def _check_floor_policy(policy: FloorPolicy) -> None:
+        """PLT-ICD-001 §5.3 POST-1/2/3, checked on what the hook returned:
+        profile validation checks the in-tree tables, not a hook that computes
+        its policy (RES-OP-07). The value must be a FloorPolicy itself, not
+        something shaped like one: only a Value is known to read the same
+        twice, so a check on anything else proves nothing about what the
+        floor machine is then built from."""
+        if type(policy) is not FloorPolicy:
+            raise HookContractViolation(
+                f"floor policy is a {type(policy).__name__}, not a FloorPolicy")
+        for name in ("initial_grant_to_initiator", "queueing_enabled", "override_allowed"):
+            if not isinstance(getattr(policy, name), bool):
+                raise HookContractViolation(
+                    f"floor policy {name} {getattr(policy, name)!r} is not a boolean")
+        depth = policy.max_queue_depth
+        # A negative depth needs no clause of its own: POST-1 or POST-2 refuses it.
+        if isinstance(depth, bool) or not isinstance(depth, int):
+            raise HookContractViolation(
+                f"floor policy max_queue_depth {depth!r} is not an integer")
+        if not policy.queueing_enabled and depth != 0:
+            raise HookContractViolation(
+                f"floor policy disables queueing but sets max_queue_depth {depth}")
+        if policy.queueing_enabled and depth < 1:
+            raise HookContractViolation(
+                "floor policy enables queueing with max_queue_depth 0")
+        if not isinstance(policy.timers_ms, Mapping):
+            raise HookContractViolation(
+                f"floor policy timers_ms is a {type(policy.timers_ms).__name__}, "
+                "not a mapping")
+        for name, ms in policy.timers_ms.items():
+            if name not in FLOOR_TIMERS:
+                raise HookContractViolation(
+                    f"floor policy names {name!r}, which is not a TS 24.380 timer")
+            if isinstance(ms, bool) or not isinstance(ms, int) or ms <= 0:
+                raise HookContractViolation(
+                    f"floor policy timer {name} is {ms!r}, not a positive integer "
+                    "of milliseconds")
+
+    @staticmethod
+    def _check_bearer(bearer: BearerDecision, priority: PriorityDecision) -> None:
+        """PLT-ICD-001 §6.1 POST-1/2/3/5, and of POST-4 what the core can
+        know: the ARP level is within TS 23.501 5.7.2.2. Which 5QIs a network
+        offers is deployment knowledge (RES-OP-07). Each check is one profile
+        validation makes of an in-tree bearer rule, so a profile that
+        validates cannot fail here."""
+        if type(bearer) is not BearerDecision:
+            raise HookContractViolation(
+                f"bearer decision is a {type(bearer).__name__}, not a BearerDecision")
+        paths = bearer.paths
+        if not isinstance(paths, tuple):
+            raise HookContractViolation(
+                f"bearer decision paths is a {type(paths).__name__}, not a sequence")
+        if not all(type(p) is PathSpec for p in paths):
+            raise HookContractViolation("bearer decision paths are not all PathSpecs")
+        if not all(isinstance(p.primary, bool) for p in paths):
+            raise HookContractViolation("bearer decision path primary flags "
+                                        f"{[p.primary for p in paths]!r} are not booleans")
+        primaries = sum(1 for p in paths if p.primary)
+        if primaries != 1:
+            raise HookContractViolation(
+                f"bearer decision has {len(paths)} paths and {primaries} primary; "
+                "exactly one primary is required")
+        ids = [p.path_id for p in paths]
+        if not all(isinstance(i, str) for i in ids) or len(set(ids)) != len(ids):
+            raise HookContractViolation(
+                f"bearer decision path ids {ids!r} are not distinct strings")
+        for p in paths:
+            if p.transport not in TRANSPORTS:
+                raise HookContractViolation(
+                    f"bearer decision path {p.path_id!r} transport {p.transport!r} "
+                    f"is not one of {', '.join(TRANSPORTS)}")
+            if isinstance(p.weight, bool) or not isinstance(p.weight, int) or p.weight < 1:
+                raise HookContractViolation(
+                    f"bearer decision path {p.path_id!r} weight {p.weight!r} is not "
+                    "an integer of at least 1")
+        if bearer.redundancy not in REDUNDANCY:
+            raise HookContractViolation(
+                f"bearer decision redundancy {bearer.redundancy!r} is not one of "
+                f"{', '.join(REDUNDANCY)}")
+        if bearer.redundancy == "single" and len(paths) != 1:
+            raise HookContractViolation(
+                f"bearer decision redundancy 'single' with {len(paths)} paths")
+        if bearer.redundancy != "single" and len(paths) < 2:
+            raise HookContractViolation(
+                f"bearer decision redundancy {bearer.redundancy!r} with one path")
+        for name in ("qos_identifier", "arp_level"):
+            v = getattr(bearer, name)
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise HookContractViolation(f"bearer decision {name} {v!r} is not an integer")
+        if not qos_spec.ARP_MIN <= bearer.arp_level <= qos_spec.ARP_MAX:
+            raise HookContractViolation(
+                f"bearer decision ARP level {bearer.arp_level} is outside "
+                f"{qos_spec.ARP_MIN}..{qos_spec.ARP_MAX} (TS 23.501 5.7.2.2)")
+        for name in ("arp_preemption_capability", "arp_preemption_vulnerability"):
+            if not isinstance(getattr(bearer, name), bool):
+                raise HookContractViolation(
+                    f"bearer decision {name} {getattr(bearer, name)!r} is not a boolean")
+        # `is not True`: IF-PRI's decision is not itself checked, and a truthy
+        # "false" there must not grant what only True grants.
+        if bearer.arp_preemption_capability and priority.preemption_capability is not True:
+            raise HookContractViolation(
+                "bearer decision asks for ARP pre-emption capability, which the "
+                "priority decision does not grant (§6.1 POST-5)")
 
     def _located(self, request: SessionRequest) -> SessionRequest:
         """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains

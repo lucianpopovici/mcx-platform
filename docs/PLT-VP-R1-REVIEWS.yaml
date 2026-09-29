@@ -792,37 +792,44 @@ VP1-HOOK-033:
     T with recording unavailable -> refused; max_participants N with N+1 members. Include a decision contradicting
     the urgency (e.g. emergency with auto_answer=False) to show the core does not infer.'
 VP1-HOOK-034:
-  verdict: fail
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
-  - tests/test_loader.py::test_vp1_hook_034_floor_policy_matches_profile
-  gap: The test injects neither inconsistency. It asserts that the valid emergency-group floor policy
-    is queueing=False and depth=0, with T2=2000. Neither 'queueing disabled with depth>0' nor 'enabled
-    with depth 0' is returned or rejected. The core has no runtime check of FloorPolicy POST-1/2 (session.py
-    passes it straight to floor.Policy.from_hook); only profile validation (validation.py:329-335) checks
-    it. Close with stub floor_policy hooks returning each inconsistent pair through SessionManager.establish,
-    asserting refusal 'hook-contract-violation' and no session. The runtime check would need implementing.
+  - tests/test_loader.py::test_every_in_tree_floor_policy_passes_the_core_check
+  - tests/test_session.py::test_a_consistent_floor_policy_is_accepted
+  - tests/test_session.py::test_an_inconsistent_floor_policy_from_a_hook_is_a_contract_violation
+  note: 'Re-reviewed after RES-OP-07: a substituted floor_policy hook returning queueing disabled with
+    depth > 0, or enabled with depth 0, is refused through SessionManager.establish as hook-contract-violation
+    on IF-SES, with no session, no INVITE and no QoS reservation. So are unknown or non-positive timers,
+    non-boolean flags, a non-integer depth, and a value that is not a FloorPolicy. Every in-tree floor
+    policy of mcx, frmcs and utility passes the same check.'
 VP1-HOOK-040:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
   - tests/test_loader.py::test_vp1_hook_040_bearer_decision_well_formed
-  gap: 'Iterates the call types of mcx and frmcs only. The utility profile is omitted. Close by iterating
-    all profiles, and every media kind each call type declares, selected individually. The assertions
-    themselves are complete: one primary, unique path IDs, redundancy vs count.'
+  - tests/test_session.py::test_a_consistent_multipath_bearer_decision_is_accepted
+  - tests/test_session.py::test_an_inconsistent_bearer_decision_from_a_hook_is_a_contract_violation
+  - tests/test_session.py::test_bearer_decisions_profile_validation_accepts_are_accepted
+  note: 'Re-reviewed after RES-OP-07: every call type of mcx, frmcs and utility, with every non-empty
+    set of the media it declares, is selected and passed through the core''s own post-check, and the
+    POSTs are also asserted directly. A substituted selector breaking POST-1, 2 or 3 is refused as hook-contract-violation
+    on IF-BER.'
 VP1-HOOK-041:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
+  - tests/test_session.py::test_a_truthy_priority_flag_does_not_grant_arp_preemption
+  - tests/test_session.py::test_arp_preemption_beyond_the_priority_decision_is_a_contract_violation
+  - tests/test_session.py::test_arp_preemption_the_priority_decision_grants_is_accepted
   - tests/test_loader.py::test_vp1_hook_041_arp_consistency_violation
-  gap: The evidence shows only that the in-tree TableBearerSelector refuses to build such a decision.
-    Nothing tests a hook that returns a BearerDecision with arp_preemption_capability=True against a non-capable
-    priority. The core has no POST-5 check, so a substituted selector returning it would be accepted.
-    Close with a stub selector returning that decision through SessionManager.establish, asserting 'hook-contract-violation',
-    no INVITE and no session.
+  note: 'Re-reviewed after RES-OP-07: a substituted selector returning ARP pre-emption capability against
+    a non-capable priority decision, or one whose flag is a truthy non-boolean, is refused through establish
+    as hook-contract-violation, with no INVITE and no session. The granted case establishes. Consistency of
+    the vulnerability flag is not in POST-5 as written (ICD-OP-14).'
 VP1-FC-001:
   verdict: partial
   by: independent review (agent)

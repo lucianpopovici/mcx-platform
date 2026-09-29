@@ -522,19 +522,51 @@ def test_vp1_hook_034_floor_policy_matches_profile(mcx):
     assert fp.timers_ms["T2"] == 2000
 
 
-def test_vp1_hook_040_bearer_decision_well_formed(mcx, frmcs):
-    for lp in (mcx, frmcs):
-        res = Resolution(kind=ResolutionKind.USER, members=("x",))
-        for ct in lp.profile.call_types:
-            media = tuple(MediaKind(m) for m in ct.media)
-            priority = lp.hooks.priority_policy.evaluate(request_for(ct.id), res)
-            d = lp.hooks.bearer_selector.select(request_for(ct.id), priority, media)
+def _declared_media(ct):
+    """Every non-empty set of media a session of `ct` may carry."""
+    from itertools import combinations
+    kinds = tuple(MediaKind(m) for m in ct.media)
+    return [c for n in range(1, len(kinds) + 1) for c in combinations(kinds, n)]
+
+
+@pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
+def test_vp1_hook_040_bearer_decision_well_formed(name):
+    """Every in-tree profile, every call type, every set of media it declares:
+    the decision is one the core accepts (§6.1 POST-1 to 5, checked by the
+    core's own post-check, RES-OP-07), and the POSTs hold stated directly."""
+    from core.session import SessionManager
+    lp = loader.load(PROFILES / name)
+    res = Resolution(kind=ResolutionKind.USER, members=("x",))
+    seen = 0
+    for ct in lp.profile.call_types:
+        for media in _declared_media(ct):
+            request = request_for(ct.id, media=media)
+            priority = lp.hooks.priority_policy.evaluate(request, res)
+            d = lp.hooks.bearer_selector.select(request, priority, media)
+            SessionManager._check_bearer(d, priority)
             assert sum(1 for p in d.paths if p.primary) == 1
             assert len({p.path_id for p in d.paths}) == len(d.paths)
-            if d.redundancy == "single":
-                assert len(d.paths) == 1
-            else:
-                assert len(d.paths) >= 2
+            assert (len(d.paths) == 1) == (d.redundancy == "single")
+            assert not d.arp_preemption_capability or priority.preemption_capability
+            seen += 1
+    assert seen >= len(lp.profile.call_types)
+
+
+@pytest.mark.vp("VP1-HOOK-034")
+@pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
+def test_every_in_tree_floor_policy_passes_the_core_check(name):
+    """The control for RES-OP-07's floor check: nothing in-tree is refused."""
+    from core.session import SessionManager
+    lp = loader.load(PROFILES / name)
+    res = Resolution(kind=ResolutionKind.GROUP, members=("sip:a@mcptt.example",),
+                     group_id="grp:alpha")
+    checked = 0
+    for ct in lp.profile.call_types:
+        if {"voice", "video"} & set(ct.media):
+            SessionManager._check_floor_policy(
+                lp.hooks.session_policy.floor_policy(request_for(ct.id), res))
+            checked += 1
+    assert checked
 
 
 def test_vp1_hook_041_arp_consistency_violation(mcx):

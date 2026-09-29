@@ -447,6 +447,225 @@ def test_ad_hoc_participants_outside_the_domains_are_a_contract_violation(manage
 
 
 # --------------------------------------------------------------------------
+# RES-OP-07 — the core checks a floor policy and a bearer decision as returned
+# --------------------------------------------------------------------------
+
+
+def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
+    """A manager whose in-tree hooks' answers are changed by `floor`,
+    `bearer` or `priority` (functions of the in-tree answer): a substituted
+    hook, as the core sees one."""
+    import dataclasses as dc
+    resolver = mcx.hooks.identity_resolver
+    for i in range(4):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    resolver.register_group("grp:alpha", [f"sip:u{i}@mcptt.example" for i in range(4)])
+    sp, bs, pp = (mcx.hooks.session_policy, mcx.hooks.bearer_selector,
+                  mcx.hooks.priority_policy)
+
+    class Session:
+        def __getattr__(self, n):
+            return getattr(sp, n)
+
+        def floor_policy(self, request, resolution):
+            got = sp.floor_policy(request, resolution)
+            return floor(got) if floor else got
+
+    class Bearer:
+        def __getattr__(self, n):
+            return getattr(bs, n)
+
+        def select(self, request, prio, media):
+            got = bs.select(request, prio, media)
+            return bearer(got) if bearer else got
+
+    class Priority:
+        def __getattr__(self, n):
+            return getattr(pp, n)
+
+        def evaluate(self, request, resolution):
+            got = pp.evaluate(request, resolution)
+            return priority(got) if priority else got
+
+    hooks = dc.replace(mcx.hooks, session_policy=Session(), bearer_selector=Bearer(),
+                       priority_policy=Priority())
+    lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+
+
+def _refused_as_violation(mgr, sink, interface):
+    session, signals, refusal = mgr.establish(req())
+    assert session is None and refusal.reason_code == "hook-contract-violation"
+    assert SignalType.INVITE not in types(signals)
+    assert SignalType.RESERVE_QOS not in types(signals)
+    failed = sink.of_type(RecordType.SESSION_FAILED)
+    assert failed and failed[-1].detail["interface"] == interface
+    assert not sink.of_type(RecordType.SESSION_ESTABLISHED)
+
+
+def _floor(**kw):
+    import dataclasses as dc
+    return lambda fp: dc.replace(fp, **kw)
+
+
+@pytest.mark.vp("VP1-HOOK-034")
+@pytest.mark.parametrize("change", [
+    _floor(queueing_enabled=False, max_queue_depth=2),     # POST-1
+    _floor(queueing_enabled=True, max_queue_depth=0),      # POST-2
+    _floor(max_queue_depth=-1),
+    _floor(max_queue_depth=True),
+    _floor(max_queue_depth=2.5),
+    _floor(max_queue_depth="3"),
+    _floor(timers_ms={"T99": 1000}),                       # POST-3
+    _floor(timers_ms={"t2": 1000}),
+    _floor(timers_ms={"T2": 0}),
+    _floor(timers_ms={"T2": -5}),
+    _floor(timers_ms={"T2": "4000"}),
+    _floor(timers_ms={"T2": True}),
+    _floor(queueing_enabled="no", max_queue_depth=8),
+    _floor(queueing_enabled=False, max_queue_depth=-1),
+    _floor(override_allowed="false"),
+    _floor(initial_grant_to_initiator=None),
+    _floor(timers_ms=None),
+    lambda fp: _Shaped(fp),
+    lambda fp: None,
+], ids=["no-queue-depth", "queue-no-depth", "negative-depth", "bool-depth", "float-depth", "string-depth", "unknown-timer",
+        "lowercase-timer", "zero-timer", "negative-timer", "string-timer", "bool-timer",
+        "string-queueing", "no-queue-negative-depth", "string-override",
+        "none-initial-grant", "none-timers", "not-a-floor-policy", "none"])
+def test_an_inconsistent_floor_policy_from_a_hook_is_a_contract_violation(mcx, sink, change):
+    """PLT-ICD-001 §5.3 POST-1/2/3 on what a hook returns, not only on the
+    in-tree table (RES-OP-07)."""
+    _refused_as_violation(_altered(mcx, sink, floor=change), sink, "IF-SES")
+
+
+@pytest.mark.vp("VP1-HOOK-034")
+@pytest.mark.parametrize("change", [
+    _floor(queueing_enabled=False, max_queue_depth=0),
+    _floor(queueing_enabled=True, max_queue_depth=1, timers_ms={"T1": 6000, "T3": 1}),
+])
+def test_a_consistent_floor_policy_is_accepted(mcx, sink, change):
+    session, _, refusal = _altered(mcx, sink, floor=change).establish(req())
+    assert refusal is None and session is not None
+
+
+def _bearer(**kw):
+    import dataclasses as dc
+    return lambda b: dc.replace(b, **kw)
+
+
+def _path(pid="p", transport="udp", primary=True):
+    from core.hooks import PathSpec
+    return PathSpec(path_id=pid, transport=transport, primary=primary)
+
+
+def _path_weighted(weight):
+    from core.hooks import PathSpec
+    return PathSpec(path_id="p", transport="udp", primary=True, weight=weight)
+
+
+class _Shaped:
+    """Shaped like the value it wraps, but not one: its fields can change
+    between the core's check and the core's use (the review's read-twice
+    case), so it is refused whatever it reads as."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+@pytest.mark.vp("VP1-HOOK-040")
+@pytest.mark.parametrize("change", [
+    _bearer(paths=()),                                                      # POST-1
+    _bearer(paths=(_path(primary=False),)),
+    _bearer(paths=(_path("a"), _path("b")), redundancy="multipath"),
+    _bearer(paths=(_path("a"), _path("a", primary=False)), redundancy="multipath"),  # POST-2
+    _bearer(paths=(_path("a"), _path("b", primary=False)), redundancy="single"),     # POST-3
+    _bearer(redundancy="multihomed"),
+    _bearer(redundancy="triple"),
+    _bearer(paths=(_path(transport="quic"),)),
+    _bearer(arp_level=0),                                                   # POST-4
+    _bearer(arp_level=16),
+    _bearer(arp_level=True),
+    _bearer(qos_identifier="65"),
+    _bearer(qos_identifier=True),
+    _bearer(paths=(_path(primary=1),)),
+    _bearer(paths=(_path(3),)),
+    _bearer(arp_preemption_capability=0),
+    _bearer(arp_preemption_vulnerability="no"),
+    _bearer(arp_preemption_vulnerability=None),
+    _bearer(paths=(_path("a"), _path("b", primary=False)), redundancy="triple"),
+    _bearer(paths=("a",)),
+    _bearer(paths=None),
+    _bearer(paths=(_path_weighted(0),)),
+    _bearer(paths=(_path_weighted("2"),)),
+    _bearer(paths=(_path_weighted(True),)),
+    lambda b: _Shaped(b),
+    lambda b: None,
+], ids=["no-path", "no-primary", "two-primaries", "duplicate-id",
+        "single-two-paths", "multihomed-one-path", "unknown-redundancy", "unknown-transport",
+        "arp-0", "arp-16", "arp-bool", "qos-str", "qos-bool", "int-primary", "int-id",
+        "int-arp-capability", "string-vulnerability", "none-vulnerability",
+        "unknown-redundancy-two-paths", "string-paths", "none-paths", "weight-0",
+        "string-weight", "bool-weight", "not-a-bearer-decision", "none"])
+def test_an_inconsistent_bearer_decision_from_a_hook_is_a_contract_violation(mcx, sink, change):
+    """PLT-ICD-001 §6.1 POST-1 to 4 on what a hook returns (RES-OP-07)."""
+    _refused_as_violation(_altered(mcx, sink, bearer=change), sink, "IF-BER")
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+def test_arp_preemption_beyond_the_priority_decision_is_a_contract_violation(mcx, sink):
+    """§6.1 POST-5: the in-tree selector never builds this, so only a
+    substituted hook can, and only the core can refuse it (RES-OP-07)."""
+    _refused_as_violation(_altered(mcx, sink, bearer=_bearer(arp_preemption_capability=True)),
+                          sink, "IF-BER")
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+def test_a_truthy_priority_flag_does_not_grant_arp_preemption(mcx, sink):
+    """IF-PRI's value is not itself checked, so only True grants."""
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_capability=True),
+                   priority=lambda p: dc.replace(p, preemption_capability="false"))
+    _refused_as_violation(mgr, sink, "IF-BER")
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+def test_arp_preemption_the_priority_decision_grants_is_accepted(mcx, sink):
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_capability=True),
+                   priority=lambda p: dc.replace(p, preemption_capability=True))
+    session, _, refusal = mgr.establish(req())
+    assert refusal is None and session.bearer.arp_preemption_capability is True
+
+
+@pytest.mark.vp("VP1-HOOK-040")
+def test_a_consistent_multipath_bearer_decision_is_accepted(mcx, sink):
+    mgr = _altered(mcx, sink, bearer=_bearer(
+        paths=(_path("a"), _path("b", transport="sctp", primary=False)), redundancy="multihomed",
+        arp_level=15))
+    session, _, refusal = mgr.establish(req())
+    assert refusal is None and [p.path_id for p in session.bearer.paths] == ["a", "b"]
+
+
+@pytest.mark.vp("VP1-HOOK-040")
+@pytest.mark.parametrize("change", [
+    _bearer(paths=(_path(""),)),
+    _bearer(paths=(_path("a", transport="tcp"), _path("b", primary=False)),
+            redundancy="multipath", arp_level=1, qos_identifier=200),
+    _bearer(arp_preemption_vulnerability=True),
+    _bearer(paths=(_path_weighted(5),)),
+], ids=["empty-id", "multipath-tcp-arp-1", "vulnerable", "weight-5"])
+def test_bearer_decisions_profile_validation_accepts_are_accepted(mcx, sink, change):
+    """The core refuses nothing a validated profile could hold: an empty path
+    id, an operator 5QI, any valid ARP and weight (RES-OP-07 review)."""
+    session, _, refusal = _altered(mcx, sink, bearer=change).establish(req())
+    assert refusal is None and session is not None
+
+
+# --------------------------------------------------------------------------
 # VP1-HOOK-003/004 — audit
 # --------------------------------------------------------------------------
 
