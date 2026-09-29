@@ -930,3 +930,12 @@ def test_r1_profiles_declare_only_the_session_model_r1_runs(name):
     R3), rather than a model the platform would not carry out."""
     lp = loader.load(PROFILES / name)
     assert {ct.session_model for ct in lp.profile.call_types} == {"on-demand"}
+
+
+@pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
+def test_r1_profiles_require_no_acknowledgement_r1_cannot_carry_out(name):
+    """RES-OP-13, owner ruling 2026-09-29: R1 has no acknowledged group call
+    procedure, so no in-tree call type requires acknowledgement until it
+    does (PLT-RAIL-008, R3), rather than require what would not happen."""
+    lp = loader.load(PROFILES / name)
+    assert not any(ct.acknowledgement_required for ct in lp.profile.call_types)

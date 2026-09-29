@@ -62,7 +62,11 @@ call_types:
     urgency: railway-emergency
     application: rec
     auto_answer: true
-    acknowledgement_required: true
+    # R1 carries out no acknowledged call (no required members, no TNG1):
+    # declared false so the data says what the platform does, until the
+    # procedure exists (PLT-RAIL-008, R3; PLT-VP-R1 RES-OP-13, owner ruling
+    # 2026-09-29).
+    acknowledgement_required: false
     recording_required: true
     initiator_roles: [train-driver, track-controller]
     floor:

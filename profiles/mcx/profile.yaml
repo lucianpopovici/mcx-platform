@@ -77,7 +77,11 @@ call_types:
     session_model: on-demand
     urgency: emergency
     auto_answer: true
-    acknowledgement_required: true
+    # R1 carries out no acknowledged call (no required members, no TNG1):
+    # declared false so the data says what the platform does, until the
+    # procedure exists (PLT-RAIL-008, R3; PLT-VP-R1 RES-OP-13, owner ruling
+    # 2026-09-29).
+    acknowledgement_required: false
     recording_required: true
     max_participants: 200
     initiator_roles: []
@@ -97,7 +101,11 @@ call_types:
     session_model: on-demand
     urgency: imminent-peril
     auto_answer: true
-    acknowledgement_required: true
+    # R1 carries out no acknowledged call (no required members, no TNG1):
+    # declared false so the data says what the platform does, until the
+    # procedure exists (PLT-RAIL-008, R3; PLT-VP-R1 RES-OP-13, owner ruling
+    # 2026-09-29).
+    acknowledgement_required: false
     recording_required: true
     max_participants: 200
     initiator_roles: []
@@ -141,7 +149,11 @@ call_types:
     urgency: elevated
     application: coordination
     auto_answer: false
-    acknowledgement_required: true
+    # R1 carries out no acknowledged call (no required members, no TNG1):
+    # declared false so the data says what the platform does, until the
+    # procedure exists (PLT-RAIL-008, R3; PLT-VP-R1 RES-OP-13, owner ruling
+    # 2026-09-29).
+    acknowledgement_required: false
     recording_required: true
     max_participants: 50
     initiator_roles: []

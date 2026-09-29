@@ -1,6 +1,11 @@
 """HTTP surface: health, readiness and group documents.
 
 Standard library only. Nothing here reaches into `core/`; it reads a Runtime.
+
+Plain HTTP, by the owner's ruling of 2026-09-29 (PLT-VP-R1 RES-OP-05): a
+recorded deviation from HTTP-1 (HTTPS, PLT-SRS 3.1). Group documents name
+every group's members and nothing here authenticates who asks, so until this
+gets TLS it belongs on a network the deployment trusts.
 """
 
 from __future__ import annotations
