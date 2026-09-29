@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from enum import Enum
 import io
 import re
 import sys
@@ -164,28 +165,208 @@ def check_profile_callbacks(root: Path) -> List[str]:
 # --------------------------------------------------------------------------
 
 
+def _is_dataclass_decorator(d: ast.expr) -> bool:
+    """@dataclass, @dataclass(...), @dataclasses.dataclass, @dataclasses.dataclass(...)."""
+    target = d.func if isinstance(d, ast.Call) else d
+    return (isinstance(target, ast.Name) and target.id == "dataclass") or \
+        (isinstance(target, ast.Attribute) and target.attr == "dataclass")
+
+
+_MUTABLE_TYPES = re.compile(
+    r"\b(?:dict|list|set|bytearray|Dict|List|Set|DefaultDict|OrderedDict|Counter|Deque"
+    r"|MutableMapping|MutableSequence|MutableSet)\b")
+
+
+# Every dict method that changes it in place, and __init__, which refills.
+_DICT_MUTATORS = {"__setitem__", "__delitem__", "__ior__", "update", "pop", "popitem",
+                  "clear", "setdefault"}
+
+# Names a value type's field may be declared with (besides the file's own
+# classes and aliases of these): the immutable scalars and the read-only
+# generics Value freezes into.
+_ALLOWED_TYPE_NAMES = {"str", "int", "float", "bool", "bytes", "complex", "None",
+                       "Optional", "Union", "Mapping", "Sequence", "Tuple", "tuple",
+                       "FrozenSet", "frozenset", "typing"}
+
+
+def _annotation_names(expr: ast.expr) -> List[str]:
+    """Every name an annotation refers to (`typing.Mapping` gives both)."""
+    return [n.id if isinstance(n, ast.Name) else n.attr
+            for n in ast.walk(expr) if isinstance(n, (ast.Name, ast.Attribute))]
+
+
+def _probe_hooks_at_runtime(path: Path) -> List[str]:
+    """Load the tree's core/hooks.py and try to change a value (RES-OP-06
+    review: names alone can be satisfied by code that does nothing)."""
+    import dataclasses as dc
+    import importlib.util
+    import typing
+    rel = path
+    name = "_vp1_bnd_004_probe_hooks"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)                     # type: ignore[union-attr]
+    except BaseException as exc:                            # noqa: BLE001
+        # BaseException: a file ending in sys.exit(0) must not end the whole
+        # gate run with success (RES-OP-06 review G3).
+        sys.modules.pop(name, None)
+        return [f"{rel}: cannot be loaded to probe its values ({exc!r})"]
+    try:
+        out: List[str] = []
+        fd_cls, value_cls = getattr(module, "FrozenDict", None), getattr(module, "Value", None)
+        freeze = getattr(module, "freeze", None)
+        if fd_cls is None or value_cls is None or freeze is None:
+            return [f"{rel}: FrozenDict, Value and freeze must all exist"]
+        attempts = {"__setitem__": ("k", 2), "__delitem__": ("k",), "__ior__": ({"k": 2},),
+                    "update": ({"k": 2},), "pop": ("k",), "popitem": (), "clear": (),
+                    "setdefault": ("n", 3), "__init__": ({"k": 2, "n": 3},)}
+        for method, args in attempts.items():
+            fd = fd_cls({"k": 1})
+            try:
+                getattr(fd, method)(*args)
+            except Exception:                               # noqa: BLE001
+                pass
+            if dict(fd) != {"k": 1}:
+                out.append(f"{rel}: FrozenDict.{method} changed it")
+
+        def mutable_inside(v) -> bool:
+            if isinstance(v, (list, set, bytearray)) or \
+                    (isinstance(v, dict) and not isinstance(v, fd_cls)):
+                return True
+            if isinstance(v, dict):
+                return any(mutable_inside(k) or mutable_inside(x) for k, x in v.items())
+            if isinstance(v, (tuple, frozenset)):
+                return any(mutable_inside(x) for x in v)
+            return False
+
+        sample = {"a": [1, {"b": {2}}], "c": bytearray(b"x"), "d": ({"e": []},)}
+        try:
+            if mutable_inside(freeze(sample)):
+                out.append(f"{rel}: freeze() leaves something mutable inside")
+        except Exception as exc:                            # noqa: BLE001
+            out.append(f"{rel}: freeze() refuses plain nested data ({exc})")
+
+        @dc.dataclass(frozen=True)
+        class _Probe(value_cls):
+            m: typing.Mapping[str, typing.Any]
+            s: typing.Sequence[typing.Any]
+            o: typing.Optional[typing.Mapping[str, typing.Any]] = None
+        given_m, given_s, given_o = {"x": [1]}, [{"y": 1}], {"z": {"w": 1}}
+        try:
+            probe = _Probe(given_m, given_s, given_o)
+            if mutable_inside(probe.m) or mutable_inside(probe.s) or mutable_inside(probe.o):
+                out.append(f"{rel}: Value does not freeze its fields at construction")
+        except Exception as exc:                            # noqa: BLE001
+            out.append(f"{rel}: a Value cannot be built from plain data ({exc})")
+        def subclasses(c):
+            for sub in c.__subclasses__():
+                yield sub
+                yield from subclasses(sub)
+
+        # Every class the file defines, however it was made, and every
+        # subclass of its Value (make_dataclass, a class under `if True:`...).
+        mine = {c for c in vars(module).values()
+                if isinstance(c, type) and c.__module__ == name}
+        mine |= {c for c in subclasses(value_cls) if c is not _Probe}
+        for cls in sorted(mine, key=lambda c: c.__name__):
+            if cls in (value_cls, fd_cls) or issubclass(cls, (Enum, BaseException)) or \
+                    getattr(cls, "_is_protocol", False):
+                continue
+            if not issubclass(cls, value_cls):
+                out.append(f"{rel}: {cls.__name__} is not a Value")
+                continue
+            if not dc.is_dataclass(cls) or not cls.__dataclass_params__.frozen:  # type: ignore[attr-defined]
+                out.append(f"{rel}: {cls.__name__} is not a frozen dataclass")
+            elif cls.__post_init__ is not value_cls.__post_init__:
+                out.append(f"{rel}: {cls.__name__} replaces Value.__post_init__")
+            for attr, held in vars(cls).items():
+                if not attr.startswith("__") and (
+                        isinstance(held, (list, set, bytearray)) or
+                        (isinstance(held, dict) and not isinstance(held, fd_cls))):
+                    out.append(f"{rel}: {cls.__name__}.{attr} is a mutable "
+                               f"{type(held).__name__} shared by every instance")
+        return out
+    finally:
+        sys.modules.pop(name, None)
+
+
 def check_frozen_value_objects(root: Path) -> List[str]:
-    """VP1-BND-004 / PLT-HOK-001."""
+    """VP1-BND-004 / PLT-HOK-001: every value type in core/hooks.py is frozen
+    and holds nothing mutable.
+
+    A frozen dataclass still lets a dict or list in it be changed in place
+    (RES-OP-06). Statically: every class other than a Protocol, an Enum,
+    `Value` or `FrozenDict` is a frozen dataclass deriving from `Value`, does
+    not define its own `__post_init__`, and declares its fields only with
+    immutable types (scalars, Optional/Mapping/Sequence/Tuple/FrozenSet, the
+    file's own classes, aliases of these). At runtime, the file is loaded and
+    a FrozenDict, freeze() and a probe Value are made to change: names alone
+    can be satisfied by code that does nothing (RES-OP-06 review)."""
     violations: List[str] = []
     path = root / CORE / "hooks.py"
-    for node in _parse(path).body:
-        if not isinstance(node, ast.ClassDef):
+    rel = path.relative_to(root)
+    tree = _parse(path)
+    classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+    names = {c.name for c in classes}
+    aliases: Dict[str, ast.expr] = {
+        t.id: n.value for n in tree.body if isinstance(n, ast.Assign)
+        for t in n.targets if isinstance(t, ast.Name) and not t.id.startswith("_")}
+
+    def allowed(name: str, seen=()) -> bool:
+        if name in _ALLOWED_TYPE_NAMES or name in names:
+            return True
+        if name in aliases and name not in seen:
+            return all(allowed(n, seen + (name,)) for n in _annotation_names(aliases[name]))
+        return False
+
+    value = next((c for c in classes if c.name == "Value"), None)
+    if value is None or not any(isinstance(n, ast.FunctionDef) and n.name == "__post_init__"
+                                for n in value.body):
+        violations.append(f"{rel}: no `Value` base with a __post_init__ that freezes "
+                          "its fields")
+    for node in classes:
+        bases = {ast.unparse(b) for b in node.bases}
+        if node.name in ("Value", "FrozenDict") or bases & {"Protocol", "Enum"} or \
+                any(b.endswith("Enum") or b.startswith("Protocol") for b in bases):
             continue
-        decorators = node.decorator_list
-        is_dataclass = any(
-            (isinstance(d, ast.Call) and getattr(d.func, "id", "") == "dataclass")
-            or getattr(d, "id", "") == "dataclass" for d in decorators)
-        if not is_dataclass:
+        where = f"{rel}:{node.lineno}: {node.name!r}"
+        decorators = [d for d in node.decorator_list if _is_dataclass_decorator(d)]
+        if not decorators:
+            violations.append(f"{where} is not a dataclass: a value type must be a "
+                              "frozen dataclass deriving from Value")
             continue
-        frozen = any(
-            isinstance(d, ast.Call)
-            and any(k.arg == "frozen" and getattr(k.value, "value", False) is True
-                    for k in d.keywords)
-            for d in decorators)
+        frozen = any(isinstance(d, ast.Call) and any(
+            k.arg == "frozen" and isinstance(k.value, ast.Constant) and k.value.value is True
+            for k in d.keywords) for d in decorators)
         if not frozen:
-            violations.append(
-                f"{path.relative_to(root)}:{node.lineno}: dataclass {node.name!r} "
-                "is not frozen")
+            violations.append(f"{where} is not frozen")
+        if "Value" not in bases and not (bases & (names - {"Value", "FrozenDict"})):
+            violations.append(f"{where} does not derive from Value, so its fields "
+                              "are not frozen")
+        for stmt in node.body:
+            if isinstance(stmt, (ast.Assign, ast.AugAssign)):
+                violations.append(f"{rel}:{stmt.lineno}: {node.name} has a class attribute "
+                                  "without a declared type: shared by every instance, "
+                                  "and not frozen")
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    stmt.name.startswith("__") and stmt.name != "__post_init__":
+                violations.append(f"{rel}:{stmt.lineno}: {node.name} defines {stmt.name}, "
+                                  "which can change how a value behaves")
+            if isinstance(stmt, ast.FunctionDef) and stmt.name == "__post_init__":
+                violations.append(f"{rel}:{stmt.lineno}: {node.name} defines its own "
+                                  "__post_init__, which would replace Value's freezing")
+            if isinstance(stmt, ast.AnnAssign):
+                bad = sorted({n for n in _annotation_names(stmt.annotation) if not allowed(n)})
+                if bad or _MUTABLE_TYPES.search(ast.unparse(stmt.annotation)):
+                    violations.append(f"{rel}:{stmt.lineno}: {node.name}."
+                                      f"{ast.unparse(stmt.target)} is declared "
+                                      f"{ast.unparse(stmt.annotation)}, a mutable type or "
+                                      f"one not known to be immutable"
+                                      + (f" ({', '.join(bad)})" if bad else ""))
+    if not violations:
+        violations += _probe_hooks_at_runtime(path)
     return violations
 
 
@@ -690,7 +871,8 @@ CHECKS: Tuple[Tuple[str, str, Callable[[Path], List[str]]], ...] = (
     ("VP1-BND-001", "no profile-specific terms in core", check_forbidden_terms),
     ("VP1-BND-002", "core does not import profiles", check_imports),
     ("VP1-BND-003", "hook interfaces are the only crossing", check_hook_call_sites),
-    ("VP1-BND-004", "hook value objects are frozen", check_frozen_value_objects),
+    ("VP1-BND-004", "hook value objects are frozen and hold nothing mutable",
+     check_frozen_value_objects),
     ("VP1-BND-005", "profiles do not reach into core internals",
      check_profile_callbacks),
     ("VP1-BND-006", "one core, one profile per image", check_per_profile_images),

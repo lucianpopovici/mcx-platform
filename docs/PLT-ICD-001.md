@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.17 (draft)
+**Version:** 0.18 (draft)
 **Date:** 2026-09-26
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -52,7 +52,7 @@ be handled gracefully: the core fails the session and records the violation
 
 | ID | Rule |
 |---|---|
-| ICD-GEN-001 | A hook shall not mutate any object it receives. All parameter objects are frozen. |
+| ICD-GEN-001 | A hook shall not mutate any object it receives. All parameter objects are frozen, and hold nothing mutable: every value type derives from `core.hooks.Value`, which on construction replaces each field by a copy with nothing mutable in it at any depth (`core.hooks.freeze`: mappings become read-only `FrozenDict`s, lists and tuples tuples, sets frozensets; anything that is not a scalar, an enum, a frozen Value or one of these is refused). A field declared as a sequence refuses a string, a set or a mapping and takes any other iterable as a tuple. A mapping the core passes to a hook as an argument (IF-IWF `map_inbound`) is a read-only copy too. Since v0.18 (PLT-VP-R1 RES-OP-06); before, a frozen value's dict could be changed in place. |
 | ICD-GEN-002 | A hook shall not retain a reference to a parameter object beyond the call. |
 | ICD-GEN-003 | A hook shall not call into the core, directly or by any callback. |
 | ICD-GEN-004 | A hook shall not block on network I/O on the session-establishment path except where §3 explicitly permits it (IF-IDR only). |
@@ -702,6 +702,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.18 | 2026-09-28 | ICD-GEN-001 made true: value types hold nothing mutable (`Value`, `FrozenDict`); VP1-BND-004's gate checks it (PLT-VP-R1 RES-OP-06). A minor change: types and signatures unchanged. What now raises TypeError: a hook mutating a value it received; a value built holding an object that is not known to be immutable (e.g. a profile's own class); a sequence field given a string, a set or a mapping. |
 | 0.17 | 2026-09-28 | §3.2 POST-3 made precise and enforced by the core; §3.5 gains POST-3 (PLT-VP-R1 RES-OP-01). The service profile's `identity.domains` must be lower-case DNS names. A minor change: no hook signature changes, but a resolver that returned members outside the declared domains, or written other than `sip[s]:user@host`, is now a contract violation. |
 | 0.16 | 2026-09-26 | §2.8: the network profile gains `groups` and `users` (ICD-NET-005; PLT-VP-R1 SVC-OP-03 decided). `MCX_GROUPS_FILE` is withdrawn and refused. A minor change: no hook or parameter object changes. |
 | 0.15 | 2026-09-25 | ICD-OP-08 amended: a dialog follows its party to a new connection that proves the same identity, and the old connection is dropped from it. The hook surface is unchanged. |

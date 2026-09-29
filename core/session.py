@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+from types import MappingProxyType
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -411,6 +412,9 @@ class SessionManager:
         resolved, prioritised and admitted exactly like a local request.
         Priority the foreign system asserted is advisory; IF-PRI decides.
         """
+        # A read-only copy: the gateway must not change what the core reads
+        # back below, nor the caller's own mapping (RES-OP-06).
+        foreign = MappingProxyType(dict(foreign))
         cid = str(foreign.get("request_id") or "")
         invoker = Invoker(self._auditor, cid)
         try:

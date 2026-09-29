@@ -90,7 +90,114 @@ def test_frozen_check_detects_a_mutable_value_object(tmp_path):
         "from dataclasses import dataclass\n\n\n"
         "@dataclass\nclass Leaky:\n    x: int = 0\n", encoding="utf-8")
     violations = gate.check_frozen_value_objects(tmp_path)
-    assert violations and "Leaky" in violations[0]
+    assert any("Leaky" in v for v in violations)
+
+
+REAL_HOOKS = (ROOT / "core" / "hooks.py").read_text(encoding="utf-8")
+
+
+def _hooks_with(tmp_path, extra="", replace=None):
+    _stage(tmp_path)
+    text = REAL_HOOKS
+    if replace:
+        assert replace[0] in text
+        text = text.replace(*replace)
+    (tmp_path / "core" / "hooks.py").write_text(text + extra, encoding="utf-8")
+    return gate.check_frozen_value_objects(tmp_path)
+
+
+@pytest.mark.vp("VP1-BND-004")
+@pytest.mark.parametrize("planted,expect", [
+    ("@dataclass\nclass P(Value):\n    x: int = 0\n", "'P' is not frozen"),
+    ("@dataclasses.dataclass\nclass P(Value):\n    x: int = 0\n", "'P' is not frozen"),
+    ("@dataclasses.dataclass(frozen=False)\nclass P(Value):\n    x: int = 0\n",
+     "'P' is not frozen"),
+    ("@dataclass(frozen=True)\nclass P:\n    x: int = 0\n", "'P' does not derive from Value"),
+    ("class P:\n    x: int = 0\n", "'P' is not a dataclass"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: dict = None\n", "P.x is declared dict"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: List[str] = ()\n", "P.x is declared List[str]"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: Optional[Dict[str, str]] = None\n",
+     "a mutable type"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: MutableMapping[str, str] = None\n",
+     "a mutable type"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: Set[str] = ()\n", "a mutable type"),
+    # review F2/F3: an alias, a type not known to be immutable, an override
+    ("Attrs = Dict[str, str]\n\n\n@dataclass(frozen=True)\nclass P(Value):\n    x: Attrs = None\n",
+     "(Attrs)"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: Iterable[str] = ()\n", "(Iterable)"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: object = None\n", "(object)"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: int = 0\n\n"
+     "    def __post_init__(self):\n        pass\n", "P defines its own __post_init__"),
+    ("@dataclass(frozen=True)\nclass P(FrozenDict):\n    x: int = 0\n",
+     "'P' does not derive from Value"),
+    # review G2: a shared class attribute, a dunder that changes behaviour,
+    # a class hidden under `if`, a dataclass made at runtime
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: int = 0\n    cache = {}\n",
+     "P has a class attribute without a declared type"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: int = 0\n\n"
+     "    def __getattribute__(self, n):\n        return {}\n", "P defines __getattribute__"),
+    ("if True:\n    class Q:\n        pass\n", "Q is not a Value"),
+    ("P = dataclasses.make_dataclass('P', [('d', dict)], bases=(Value,))\n",
+     "P is not a frozen dataclass"),
+    ("P = dataclasses.make_dataclass('P', [('d', int)], bases=(Value,), frozen=True,\n"
+     "                                namespace={'__post_init__': lambda self: None})\n",
+     "P replaces Value.__post_init__"),
+    ("@dataclass(frozen=True)\nclass P(Value):\n    x: int = 0\n\n\nP.cache = []\n",
+     "P.cache is a mutable list shared by every instance"),
+    # review G3: a file that exits must not end the gate run with success
+    ("import sys\nsys.exit(0)\n", "cannot be loaded to probe its values"),
+])
+def test_frozen_check_catches_every_way_a_value_type_can_be_mutable(tmp_path, planted, expect):
+    """RES-OP-06: the ways the review found around the old gate, and more."""
+    violations = _hooks_with(tmp_path, "\n\n" + planted)
+    assert any(expect in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-004")
+def test_frozen_check_requires_value_to_freeze(tmp_path):
+    violations = _hooks_with(tmp_path, replace=("    def __post_init__(self) -> None:",
+                                                "    def _unused(self) -> None:"))
+    assert any("no `Value` base" in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-004")
+@pytest.mark.parametrize("change,expect", [
+    # a mutator left out of the refusals
+    (("    update = pop = popitem = clear = setdefault = _refuse",
+      "    pop = popitem = clear = setdefault = _refuse"), "FrozenDict.update changed it"),
+    (("    __setitem__ = __delitem__ = __ior__ = _refuse",
+      "    __delitem__ = __ior__ = _refuse"), "FrozenDict.__setitem__ changed it"),
+    # a def placed after the refusals, shadowing one (names alone pass it)
+    (("    @classmethod\n    def fromkeys",
+      "    def update(self, *a, **k):\n        dict.update(self, *a, **k)\n\n"
+      "    @classmethod\n    def fromkeys"), "FrozenDict.update changed it"),
+    # __init__ refilling a live one (RES-OP-06 review F1)
+    (("    def __init__(self, *args, **kwargs) -> None:            # filled in __new__\n        pass",
+      "    def __init__(self, *args, **kwargs) -> None:\n        dict.__init__(self, *args, **kwargs)"),
+     "FrozenDict.__init__ changed it"),
+    # Value keeping the name but freezing nothing (review F3)
+    (("            object.__setattr__(self, f.name, freeze(value))",
+      "            pass"), "Value does not freeze its fields"),
+    # freeze() shallow
+    (("        return tuple(freeze(v) for v in value)", "        return tuple(value)"),
+     "freeze() leaves something mutable inside"),
+])
+def test_frozen_check_probes_the_values_at_runtime(tmp_path, change, expect):
+    violations = _hooks_with(tmp_path, replace=change)
+    assert any(expect in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-004")
+@pytest.mark.parametrize("planted", [
+    "@dataclass(frozen=True)\nclass P(Value):\n    x: Mapping[str, str] = field(default_factory=dict)\n",
+    "@dataclass(frozen=True)\nclass P(Resolution):\n    y: Sequence[str] = ()\n",
+    "@dataclass(frozen=True)\nclass P(Value):\n    y: Optional[Mapping[str, MCServiceId]] = None\n",
+    "@dataclass(frozen=True)\nclass P(Value):\n    y: typing.Tuple[int, ...] = ()\n",
+    "class P(Protocol):\n    def f(self, x: dict) -> None: ...\n",
+    "class P(str, Enum):\n    A = 'a'\n",
+])
+def test_frozen_check_accepts_what_is_frozen(tmp_path, planted):
+    assert _hooks_with(tmp_path, "\n\n" + planted) == []
 
 
 def test_ci_check_detects_a_missing_profile_suite(tmp_path):

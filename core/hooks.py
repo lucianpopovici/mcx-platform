@@ -11,9 +11,10 @@ them, so adding a call type is a config change, not a code change.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 # --------------------------------------------------------------------------
 # Opaque identifiers. Profile-defined vocabulary, core-defined plumbing.
@@ -59,8 +60,107 @@ class ResolutionKind(Enum):
 # --------------------------------------------------------------------------
 
 
+
+class FrozenDict(dict):
+    """A dict that refuses to change. A dict subclass rather than
+    MappingProxyType so that a value still serialises to JSON, survives
+    dataclasses.asdict and copy.deepcopy, and compares equal to a plain dict
+    with the same items (RES-OP-06). Its items are filled in `__new__`, so
+    calling `__init__` again on a live one does nothing."""
+
+    __slots__ = ()
+
+    def __new__(cls, *args, **kwargs):
+        self = dict.__new__(cls)
+        dict.__init__(self, *args, **kwargs)
+        return self
+
+    def __init__(self, *args, **kwargs) -> None:            # filled in __new__
+        pass
+
+    def _refuse(self, *args, **kwargs):
+        raise TypeError("a hook value's mapping is read-only")
+
+    __setitem__ = __delitem__ = __ior__ = _refuse           # type: ignore[assignment]
+    update = pop = popitem = clear = setdefault = _refuse    # type: ignore[assignment]
+
+    @classmethod
+    def fromkeys(cls, iterable, value=None):                 # type: ignore[override]
+        return cls(dict.fromkeys(iterable, value))
+
+    def __hash__(self) -> int:                               # type: ignore[override]
+        return hash(frozenset(self.items()))
+
+    def __reduce__(self):
+        # Also how copy and deepcopy rebuild one (deepcopy copies the items):
+        # dict's own reduction would refill it through __setitem__.
+        return (FrozenDict, (dict(self),))
+
+
+# What may sit in a hook value as it is: types whose instances cannot change.
+_IMMUTABLE = (str, bytes, int, float, complex, bool, type(None), Enum)
+
+
+def freeze(value: Any) -> Any:
+    """`value` with nothing mutable left in it, at any depth: a mapping
+    becomes a FrozenDict, a list or tuple a tuple, a set a frozenset, a
+    bytearray bytes, each of their items frozen in turn. A Value is already
+    frozen. Anything else is refused: whether an arbitrary object can change
+    cannot be told, and a hook value has no need of one (RES-OP-06 review)."""
+    if isinstance(value, _IMMUTABLE) or _is_frozen_value(value):
+        return value
+    if isinstance(value, Mapping):
+        return FrozenDict({freeze(k): freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(freeze(v) for v in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(freeze(v) for v in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    raise TypeError(f"a hook value cannot hold a {type(value).__name__}: "
+                    "it may be mutable")
+
+
+def _is_frozen_value(value: Any) -> bool:
+    """A Value whose type really is frozen: a frozen dataclass that freezes
+    its fields with Value's own __post_init__. Deriving from Value is not
+    enough (RES-OP-06 review G1: a profile's non-frozen Value subclass)."""
+    cls = type(value)
+    params = getattr(cls, "__dataclass_params__", None)
+    return isinstance(value, Value) and params is not None and params.frozen and \
+        cls.__post_init__ is Value.__post_init__
+
+
+class Value:
+    """The base of every value that crosses a hook boundary (PLT-ICD-001
+    ICD-GEN-001, VP1-BND-004: every type frozen, no mutable field).
+
+    `frozen=True` stops a field being reassigned, not a dict or list in it
+    being changed in place: `request.attributes["x"] = "y"` used to succeed
+    (PLT-VP-R1 RES-OP-06). So on construction every field is replaced by
+    `freeze(field)`: a copy with nothing mutable in it at any depth. The copy
+    matters: a read-only view of the caller's own dict would still change
+    when the caller changed it. It goes by the value, not by how the field is
+    declared, so no spelling of a type can leave a dict in place. A
+    subclass must not define its own `__post_init__` (the gate checks).
+    """
+
+    def __post_init__(self) -> None:
+        for f in dataclasses.fields(self):          # type: ignore[arg-type]
+            value = getattr(self, f.name)
+            if "Sequence[" in str(f.type) and value is not None:
+                if isinstance(value, (str, bytes, bytearray, set, frozenset, Mapping)):
+                    # A string would become its characters; a set or a
+                    # mapping has no order a sequence could keep.
+                    raise TypeError(f"{type(self).__name__}.{f.name}: expected an "
+                                    f"ordered sequence of items, not {type(value).__name__}")
+                if not isinstance(value, (list, tuple)):
+                    value = tuple(value)          # a generator, range, keys view...
+            object.__setattr__(self, f.name, freeze(value))
+
+
 @dataclass(frozen=True)
-class LocationContext:
+class LocationContext(Value):
     """Whatever the access network and the client reported.
 
     Cell and tracking area are the common cases. A profile needing richer
@@ -74,7 +174,7 @@ class LocationContext:
 
 
 @dataclass(frozen=True)
-class SessionRequest:
+class SessionRequest(Value):
     request_id: str
     initiator: MCServiceId
     target: TargetRef
@@ -97,7 +197,7 @@ class SessionRequest:
 
 
 @dataclass(frozen=True)
-class Resolution:
+class Resolution(Value):
     """The outcome of resolving a target.
 
     EXTERNAL carries no members: `resolved_from` holds the foreign target and
@@ -113,7 +213,7 @@ class Resolution:
 
 
 @dataclass(frozen=True)
-class PriorityDecision:
+class PriorityDecision(Value):
     level: int  # higher wins, profile-defined range
     scope: PreemptionScope
     preemption_capability: bool
@@ -123,13 +223,13 @@ class PriorityDecision:
 
 
 @dataclass(frozen=True)
-class Admission:
+class Admission(Value):
     permitted: bool
     reason_code: str  # "" when permitted; a profile-defined code otherwise
 
 
 @dataclass(frozen=True)
-class FloorPolicy:
+class FloorPolicy(Value):
     initial_grant_to_initiator: bool
     queueing_enabled: bool
     override_allowed: bool
@@ -140,7 +240,7 @@ class FloorPolicy:
 
 
 @dataclass(frozen=True)
-class SessionDecision:
+class SessionDecision(Value):
     model: SessionModel
     auto_answer: bool
     acknowledgement_required: bool
@@ -149,7 +249,7 @@ class SessionDecision:
 
 
 @dataclass(frozen=True)
-class PathSpec:
+class PathSpec(Value):
     path_id: str
     transport: str  # "udp", "tcp", "sctp"
     primary: bool
@@ -158,7 +258,7 @@ class PathSpec:
 
 
 @dataclass(frozen=True)
-class BearerDecision:
+class BearerDecision(Value):
     qos_identifier: int  # 5QI / QCI
     arp_level: int
     arp_preemption_capability: bool
@@ -168,7 +268,7 @@ class BearerDecision:
 
 
 @dataclass(frozen=True)
-class PartnerRoute:
+class PartnerRoute(Value):
     """Where a partner MC system is reached, and under whose authority."""
 
     partner_id: str
@@ -180,7 +280,7 @@ class PartnerRoute:
 
 
 @dataclass(frozen=True)
-class PartnerRights:
+class PartnerRights(Value):
     """What a partner system may do inside THIS system.
 
     Defaults are the safe ones: no pre-emption, no call types. A partner gains
@@ -194,7 +294,7 @@ class PartnerRights:
 
 
 @dataclass(frozen=True)
-class InterworkingRoute:
+class InterworkingRoute(Value):
     system: str  # profile-declared legacy system identifier
     gateway: str
     attributes: Mapping[str, str] = field(default_factory=dict)
