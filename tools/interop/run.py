@@ -214,6 +214,17 @@ def start_asterisk(work: Path, core_port: int, platform_port: int) -> Proc:
                     if _dir_exists(p, "asterisk")), None)
     if modules is None:
         raise RuntimeError("asterisk module directory not found")
+    # Asterisk's CLI reaches the daemon through a Unix socket in astrundir,
+    # and a socket path holds at most 107 bytes (sun_path is 108, with the
+    # NUL). Past that the daemon creates no socket, or a truncated one that
+    # works only while client and daemon happen to truncate alike; the CLI
+    # then answers nothing, and the scenario reports registrations missing
+    # that are there.
+    ctl = work / "asterisk-run" / "asterisk.ctl"
+    if len(str(ctl).encode()) > 107:
+        raise RuntimeError(
+            f"--workdir is too long for Asterisk's control socket ({ctl}, "
+            f"{len(str(ctl).encode())} bytes; at most 107): use a shorter one")
     for d in ("asterisk-etc", "asterisk-var", "asterisk-spool", "asterisk-run",
               "asterisk-log"):
         (work / d).mkdir(exist_ok=True)
