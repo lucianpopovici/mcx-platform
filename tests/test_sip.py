@@ -297,6 +297,7 @@ def test_replay_window_is_bounded():
     ("not-authorised", Status.FORBIDDEN),
     ("call-type-not-permitted", Status.FORBIDDEN),
     ("capacity-exhausted", Status.SERVICE_UNAVAILABLE),
+    ("participant-limit-exceeded", Status.BUSY_HERE),
     ("recording-unavailable", Status.SERVICE_UNAVAILABLE),
     ("qos-unavailable", Status.SERVICE_UNAVAILABLE),
     ("hook-error", Status.SERVER_ERROR),
@@ -583,6 +584,8 @@ def test_every_specification_warning_code_is_in_the_specification_table():
             (187, "can't determine the adhoc group participants"),
         "adhoc-too-many-participants":
             (189, "maximum number of allowed adhoc group participants exceeded"),
+        # V17.15.0 and later; 10.1.2 answers a full call 486 with it.
+        "participant-limit-exceeded": (122, "too many participants"),
     }
 
 
@@ -964,3 +967,23 @@ def test_a_step_0_refusal_with_another_code_keeps_that_code():
         authorisation=True)
     assert '"179 service not authorized with the interconnected system"' in \
         r.headers.get("Warning")
+
+
+def test_a_session_over_its_participant_limit_is_refused_486_with_122():
+    """RES-OP-12 review: this used to be `capacity-exhausted`, answered 503
+    "maximum number of sessions reached" -- a server condition, and one a
+    caller may retry. TS 24.379 10.1.2 answers a full call 486 + 122."""
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_17)
+    ctx = DialogContext(call_id="c1", local_uri="sip:server@mcptt.example")
+    response = adapter.reject("participant-limit-exceeded", ctx)
+    assert response.status.code == 486
+    assert response.headers.get("Warning") == \
+        '399 mcptt.example "122 too many participants"'
+
+
+def test_the_participant_limit_code_is_the_core_s_own():
+    """RES-OP-12: reserved (§9) and originated only by the core, so no profile
+    can declare it with another meaning."""
+    from core.errors import CORE_ORIGINATED, RESERVED_REASON_CODES
+    assert "participant-limit-exceeded" in RESERVED_REASON_CODES
+    assert "participant-limit-exceeded" in CORE_ORIGINATED

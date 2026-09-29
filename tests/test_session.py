@@ -166,7 +166,7 @@ def test_participant_limit_refuses_before_establishment(manager):
     session, signals, refusal = manager.establish(
         req(call_type="private", target="grp:alpha"))
     assert session is None
-    assert refusal.reason_code == "capacity-exhausted"
+    assert refusal.reason_code == "participant-limit-exceeded"
     assert SignalType.INVITE not in types(signals)
 
 
@@ -451,13 +451,14 @@ def test_ad_hoc_participants_outside_the_domains_are_a_contract_violation(manage
 # --------------------------------------------------------------------------
 
 
-def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
+def _altered(mcx, sink, *, floor=None, bearer=None, priority=None, decision=None,
+             profile=None, **manager_kw):
     """A manager whose in-tree hooks' answers are changed by `floor`,
     `bearer` or `priority` (functions of the in-tree answer): a substituted
     hook, as the core sees one."""
     import dataclasses as dc
     resolver = mcx.hooks.identity_resolver
-    for i in range(4):
+    for i in range(6):
         resolver.register_user(f"sip:u{i}@mcptt.example")
     resolver.register_group("grp:alpha", [f"sip:u{i}@mcptt.example" for i in range(4)])
     sp, bs, pp = (mcx.hooks.session_policy, mcx.hooks.bearer_selector,
@@ -470,6 +471,10 @@ def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
         def floor_policy(self, request, resolution):
             got = sp.floor_policy(request, resolution)
             return floor(got) if floor else got
+
+        def decide(self, request, resolution):
+            got = sp.decide(request, resolution)
+            return decision(got) if decision else got
 
     class Bearer:
         def __getattr__(self, n):
@@ -489,8 +494,9 @@ def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
 
     hooks = dc.replace(mcx.hooks, session_policy=Session(), bearer_selector=Bearer(),
                        priority_policy=Priority())
-    lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
-    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+    lp = loader.LoadedProfile(profile=profile or mcx.profile, hooks=hooks, source=mcx.source)
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()),
+                          **manager_kw)
 
 
 def _refused_as_violation(mgr, sink, interface):
@@ -663,6 +669,244 @@ def test_bearer_decisions_profile_validation_accepts_are_accepted(mcx, sink, cha
     id, an operator 5QI, any valid ARP and weight (RES-OP-07 review)."""
     session, _, refusal = _altered(mcx, sink, bearer=change).establish(req())
     assert refusal is None and session is not None
+
+
+# --------------------------------------------------------------------------
+# RES-OP-12 — the session decision is applied as decided (§5.2 INV-1)
+# --------------------------------------------------------------------------
+
+
+def _decide(**kw):
+    import dataclasses as dc
+    return lambda d: dc.replace(d, **kw)
+
+
+def _inverted(d):
+    """Every field the profile would not choose, the model aside (POST-1
+    ties it to the call type)."""
+    import dataclasses as dc
+    return dc.replace(d, auto_answer=not d.auto_answer,
+                      acknowledgement_required=not d.acknowledgement_required,
+                      recording_required=not d.recording_required,
+                      max_participants=4)
+
+
+@pytest.mark.vp("VP1-CC-006")
+@pytest.mark.parametrize("call_type", ["prearranged-group", "emergency-group",
+                                       "coordination-group"])
+def test_vp1_cc_006_the_hook_s_decision_is_applied_not_the_table_s(mcx, sink, call_type):
+    """Nothing is inferred from the call type: a decide() differing from the
+    profile in every field is what the session follows."""
+    declared = mcx.profile.call_type(call_type)
+    session, signals, refusal = _altered(mcx, sink, decision=_inverted).establish(
+        req(call_type=call_type))
+    assert refusal is None
+    assert session.decision.auto_answer is (not declared.auto_answer)
+    assert session.decision.max_participants == 4
+    invites = [s for s in signals if s.type is SignalType.INVITE]
+    assert invites
+    for invite in invites:
+        assert invite.detail["auto_answer"] is (not declared.auto_answer)
+        assert invite.detail["acknowledgement_required"] is \
+            (not declared.acknowledgement_required)
+    assert (SignalType.START_RECORDING in types(signals)) is (not declared.recording_required)
+
+
+@pytest.mark.vp("VP1-HOOK-033")
+@pytest.mark.parametrize("auto,ack", [(True, True), (True, False), (False, True),
+                                      (False, False)])
+def test_vp1_hook_033_every_answer_combination_is_signalled_as_decided(mcx, sink, auto, ack):
+    """Emergency group calls are auto-answered in the table; a decision saying
+    otherwise is followed, so nothing is inferred from urgency."""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(auto_answer=auto, acknowledgement_required=ack)
+    ).establish(req(call_type="emergency-group"))
+    assert refusal is None
+    invites = [s for s in signals if s.type is SignalType.INVITE]
+    assert len(invites) == 3
+    assert {(i.detail["auto_answer"], i.detail["acknowledgement_required"])
+            for i in invites} == {(auto, ack)}
+
+
+@pytest.mark.vp("VP1-HOOK-033")
+@pytest.mark.parametrize("required,established", [(True, False), (False, True)])
+def test_vp1_hook_033_recording_follows_the_decision_not_the_table(mcx, sink, required,
+                                                                  established):
+    """No recorder is available. The table requires recording for every mcx
+    call type; only the decision says whether this session does."""
+    mgr = _altered(mcx, sink, decision=_decide(recording_required=required),
+                   platform=Platform(recording_available=lambda: False))
+    session, signals, refusal = mgr.establish(req())
+    assert (session is not None) is established
+    if established:
+        assert SignalType.START_RECORDING not in types(signals)
+    else:
+        assert refusal.reason_code == "recording-unavailable"
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_vp1_cc_006_a_changed_table_changes_nothing_the_hook_decided(mcx, sink):
+    """The converse: the manager's profile says otherwise in every field the
+    decision carries, and the session still follows the hook."""
+    import dataclasses as dc
+    changed = dc.replace(mcx.profile, call_types=tuple(
+        dc.replace(ct, auto_answer=not ct.auto_answer,
+                   acknowledgement_required=not ct.acknowledgement_required,
+                   recording_required=not ct.recording_required, max_participants=1)
+        for ct in mcx.profile.call_types))
+    declared = mcx.profile.call_type("prearranged-group")
+    session, signals, refusal = _altered(mcx, sink, profile=changed).establish(req())
+    assert refusal is None and len(session.members) == 4
+    invite = [s for s in signals if s.type is SignalType.INVITE][0]
+    assert invite.detail["auto_answer"] is declared.auto_answer
+    assert invite.detail["acknowledgement_required"] is declared.acknowledgement_required
+    assert (SignalType.START_RECORDING in types(signals)) is declared.recording_required
+
+
+@pytest.mark.vp("VP1-CC-006", "VP1-HOOK-033")
+@pytest.mark.parametrize("limit,members", [
+    (3, ("sip:u0@mcptt.example", "sip:u1@mcptt.example", "sip:u2@mcptt.example")),
+    (2, ("sip:u0@mcptt.example", "sip:u1@mcptt.example")),
+])
+def test_vp1_cc_006_a_group_over_the_decided_limit_is_truncated(mcx, sink, limit, members):
+    """grp:alpha has 4 members, u0 the caller among them; the profile allows
+    200. TS 24.379 6.3.5.5: only `limit` participants take part, the caller
+    one of them, the rest in the resolver's order (RES-OP-12)."""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=limit)).establish(req())
+    assert refusal is None
+    assert session.members == members and session.truncated_from == 4
+    assert [s.target for s in signals if s.type is SignalType.INVITE] == [
+        m for m in members if m != "sip:u0@mcptt.example"]
+    established = sink.of_type(RecordType.SESSION_ESTABLISHED)[-1].detail
+    assert established["members"] == members and established["truncated_from"] == 4
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_limit_leaving_no_one_to_invite_is_refused(mcx, sink):
+    """A limit of 1 on a group the caller belongs to: truncation would keep
+    only the caller, and a call with no callee is not established (RES-OP-12
+    review; it used to be recorded as established and then answered 480)."""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=1)).establish(req())
+    assert session is None and refusal.reason_code == "participant-limit-exceeded"
+    assert refusal.detail == ("4 participants, the session decision allows 1, "
+                              "so no one else can be invited")
+    assert SignalType.INVITE not in types(signals)
+    assert not sink.of_type(RecordType.SESSION_ESTABLISHED)
+
+
+@pytest.mark.vp("VP1-CC-006")
+@pytest.mark.parametrize("limit", [4, None])
+def test_vp1_cc_006_a_group_within_the_decided_limit_is_whole(mcx, sink, limit):
+    session, _, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=limit)).establish(req())
+    assert refusal is None and len(session.members) == 4
+    assert session.truncated_from is None
+    assert sink.of_type(RecordType.SESSION_ESTABLISHED)[-1].detail["truncated_from"] is None
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_caller_outside_the_group_takes_no_participant_place(mcx, sink):
+    session, _, refusal = _altered(mcx, sink, decision=_decide(max_participants=2)).establish(
+        req(initiator="sip:u5@mcptt.example"))
+    assert refusal is None
+    assert session.members == ("sip:u0@mcptt.example", "sip:u1@mcptt.example")
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_private_call_over_the_limit_is_refused_not_made_a_group_call(mcx, sink):
+    """A private call whose target resolved to a group is not truncated to a
+    smaller group call: 6.3.5.5 is about group sessions."""
+    session, signals, refusal = _altered(mcx, sink).establish(
+        req(call_type="private", target="grp:alpha"))
+    assert session is None and refusal.reason_code == "participant-limit-exceeded"
+    assert refusal.detail == "4 participants, the session decision allows 2"
+    assert SignalType.INVITE not in types(signals)
+    assert SignalType.RESERVE_QOS not in types(signals)
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_group_call_type_with_no_signature_is_truncated_too(mcx, sink):
+    """coordination-group has no MCPTT signature (PRF-OP-01) but is a group
+    call: truncated, not refused."""
+    session, _, refusal = _altered(mcx, sink, decision=_decide(max_participants=2)).establish(
+        req(call_type="coordination-group"))
+    assert refusal is None and session.truncated_from == 4
+    assert session.members == ("sip:u0@mcptt.example", "sip:u1@mcptt.example")
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_broadcast_area_over_the_limit_is_refused_not_truncated(mcx, sink):
+    """6.3.5.5 truncates a group's members; a broadcast area is not a group,
+    and which of its members to drop is nobody's stated policy."""
+    import dataclasses as dc
+    resolver = mcx.hooks.identity_resolver
+    area = tuple(f"sip:u{i}@mcptt.example" for i in range(1, 4))
+
+    class Area:
+        def __getattr__(self, name):
+            return getattr(resolver, name)
+
+        def resolve(self, target, request):
+            return Resolution(kind=ResolutionKind.BROADCAST_AREA, members=area)
+
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=2))
+    mgr._hooks = dc.replace(mgr._hooks, identity_resolver=Area())
+    session, signals, refusal = mgr.establish(req(target="area:yard"))
+    assert session is None and refusal.reason_code == "participant-limit-exceeded"
+    assert SignalType.INVITE not in types(signals)
+    control = _altered(mcx, MemorySink(), decision=_decide(max_participants=3))
+    control._hooks = dc.replace(control._hooks, identity_resolver=Area())
+    session, _, refusal = control.establish(req(target="area:yard"))
+    assert refusal is None and session.members == area
+
+
+def test_a_session_decision_for_an_undeclared_call_type_is_a_violation(manager, mcx):
+    decision = mcx.hooks.session_policy.decide(
+        req(), Resolution(kind=ResolutionKind.USER, members=("x",)))
+    with pytest.raises(HookContractViolation, match="undeclared call type 'nope'"):
+        manager._check_decision(decision, req(call_type="nope"))
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_an_ad_hoc_call_over_the_decided_limit_is_warning_189(mcx, sink):
+    listed = tuple(f"sip:u{i}@mcptt.example" for i in (1, 2, 3))
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=2), adhoc_list_max=10)
+    session, _, refusal = mgr.establish(req(target="", adhoc=True, participants=listed))
+    assert session is None
+    assert refusal.reason_code == "adhoc-too-many-participants"
+    control = _altered(mcx, MemorySink(), decision=_decide(max_participants=3),
+                       adhoc_list_max=10)
+    session, _, refusal = control.establish(req(target="", adhoc=True, participants=listed))
+    assert refusal is None and session.members == listed
+
+
+def _model(name):
+    from core.hooks import ResolutionKind, SessionModel
+    return {"broadcast": SessionModel.BROADCAST, "pre": SessionModel.PRE_ESTABLISHED,
+            "kind": ResolutionKind.GROUP}[name]
+
+
+@pytest.mark.vp("VP1-CC-006")
+@pytest.mark.parametrize("change", [
+    lambda d: _decide(model=_model("broadcast"))(d),
+    lambda d: _decide(model=_model("pre"))(d),
+    lambda d: _decide(model=_model("kind"))(d),
+    _decide(max_participants=0),
+    _decide(max_participants=-1),
+    _decide(max_participants=True),
+    _decide(max_participants="4"),
+    _decide(auto_answer=1),
+    _decide(acknowledgement_required=None),
+    _decide(recording_required=0),
+    lambda d: None,
+], ids=["broadcast", "pre-established", "not-a-model", "limit-0", "limit-negative",
+        "limit-bool", "limit-str", "int-auto-answer", "none-ack", "int-recording", "none"])
+def test_an_inconsistent_session_decision_is_a_contract_violation(mcx, sink, change):
+    """§5.2 POST-1 (the call type's own model) and POST-2 (a limit of at
+    least 1, or none), and boolean flags (RES-OP-12)."""
+    _refused_as_violation(_altered(mcx, sink, decision=change), sink, "IF-SES")
 
 
 # --------------------------------------------------------------------------

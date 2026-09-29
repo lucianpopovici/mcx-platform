@@ -41,6 +41,7 @@ from .errors import (
     NO_BINDING,
     NO_LOCATION_BINDING,
     PARTNER_NOT_PERMITTED,
+    PARTICIPANT_LIMIT_EXCEEDED,
     PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
@@ -55,6 +56,7 @@ from .hooks import (
     PathSpec,
     ResolutionKind,
     PriorityDecision,
+    SessionModel,
     Resolution,
     SessionDecision,
     SessionRequest,
@@ -119,6 +121,9 @@ class Session:
     # system. A session has either members or a gateway, never both.
     gateway: Optional[str] = None
     partner_id: Optional[str] = None
+    # Set when the group had more members than the session decision allows
+    # (TS 24.379 6.3.5.5): how many it had. `members` are those that take part.
+    truncated_from: Optional[int] = None
 
 
 class Platform:
@@ -292,7 +297,32 @@ class SessionManager:
             # 5 — IF-SES.decide
             decision = invoker.call("IF-SES", "decide",
                                     self._hooks.session_policy.decide,
-                                    request, resolution)
+                                    request, resolution,
+                                    post=lambda d: self._check_decision(d, request))
+
+            # §5.2 INV-1: the decision's limit is applied as decided, whatever
+            # the profile's table says (RES-OP-12).
+            truncated_from = None
+            limit = decision.max_participants
+            if limit is not None and len(resolution.members) > limit:
+                over = (f"{len(resolution.members)} participants, "
+                        f"the session decision allows {limit}")
+                if request.adhoc:
+                    # 17.4.2.2: an ad hoc call over its limit is refused, 189.
+                    return self._refuse(cid, request, ADHOC_TOO_MANY_PARTICIPANTS, over)
+                if not self._is_group_call(request, resolution):
+                    return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED, over)
+                # 6.3.5.5 and 10.1.1.4.1: a group call is not refused; only
+                # `limit` of its members take part, and the 200 OK says so
+                # with warning 122.
+                kept = self._first_members(resolution.members, request.initiator, limit)
+                if not [m for m in kept if m != request.initiator]:
+                    # A limit of 1 on a group the caller belongs to leaves no
+                    # one to invite: a call with no callee is not established.
+                    return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED,
+                                        over + ", so no one else can be invited")
+                truncated_from = len(resolution.members)
+                resolution = dataclasses.replace(resolution, members=kept)
 
             # PLT-OAM-008: a session requiring recording is not established
             # when no recorder is available.
@@ -342,7 +372,7 @@ class SessionManager:
         session = Session(
             correlation_id=cid, request=request, resolution=resolution,
             priority=priority, decision=decision, bearer=bearer,
-            members=tuple(resolution.members),
+            members=tuple(resolution.members), truncated_from=truncated_from,
         )
 
         if floor_policy is not None:
@@ -409,6 +439,7 @@ class SessionManager:
                            **self._functions)
         self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
                            members=tuple(resolution.members),
+                           truncated_from=truncated_from,
                            qos_identifier=bearer.qos_identifier,
                            recording=decision.recording_required,
                            **self._functions)
@@ -625,6 +656,57 @@ class SessionManager:
                 f"resolution returned {len(outside)} member(s) outside the "
                 f"profile's declared domains: {', '.join(map(repr, outside[:3]))}")
 
+    def _check_decision(self, decision: SessionDecision,
+                        request: SessionRequest) -> None:
+        """PLT-ICD-001 §5.2 POST-1 and POST-2 on what `decide` returned
+        (RES-OP-12). POST-1's "consistent with the call type's declared
+        session model" is read as the same model: the model is declared per
+        call type and nothing else could make another one consistent."""
+        if type(decision) is not SessionDecision:
+            raise HookContractViolation(
+                f"session decision is a {type(decision).__name__}, not a SessionDecision")
+        for name in ("auto_answer", "acknowledgement_required", "recording_required"):
+            if type(getattr(decision, name)) is not bool:
+                raise HookContractViolation(
+                    f"session decision {name} {getattr(decision, name)!r} is not a boolean")
+        declared = self._profile.call_type(request.call_type)
+        if declared is None:
+            raise HookContractViolation(
+                f"session decision for undeclared call type {request.call_type!r}")
+        if decision.model is not SessionModel(declared.session_model):
+            raise HookContractViolation(
+                f"session decision model {decision.model!r} is not call type "
+                f"{declared.id!r}'s declared {declared.session_model!r} (§5.2 POST-1)")
+        limit = decision.max_participants
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise HookContractViolation(
+                f"session decision max_participants {limit!r} is neither None nor "
+                "an integer of at least 1 (§5.2 POST-2)")
+
+    def _is_group_call(self, request: SessionRequest, resolution: Resolution) -> bool:
+        """A group session in the sense of TS 24.379 6.3.5.5: a group
+        resolved for a call type that is not a private call. A private call
+        whose target resolved to a group is not made a smaller group call."""
+        if resolution.kind is not ResolutionKind.GROUP:
+            return False
+        declared = self._profile.call_type(request.call_type)
+        signature = declared.mc_signature if declared is not None else None
+        return signature is None or signature.session_type != "private"
+
+    @staticmethod
+    def _first_members(members: Sequence[str], initiator: str,
+                       limit: int) -> Tuple[str, ...]:
+        """The `limit` participants of a group call over its limit.
+
+        TS 24.379 6.3.5.5 NOTE 2 counts the session's participants, so the
+        initiator, when a member, is one of them and always kept. The others
+        are taken in the resolver's order: the platform has no
+        <on-network-required> members, and which to prefer is otherwise
+        operator policy (NOTE 3), which the profile states in that order."""
+        keep = limit - 1 if initiator in members else limit
+        others = [m for m in members if m != initiator][:keep]
+        return tuple(m for m in members if m == initiator or m in others)
+
     @staticmethod
     def _check_comparison(result: int) -> None:
         """§4.2: `compare` returns an integer; `True` is not one."""
@@ -783,7 +865,14 @@ class SessionManager:
                    identity) is left out. ii: criteria go to the profile.
                    Neither a list nor criteria: nothing to determine, 187.
         Criteria that find more members than the limit are also 189: the
-        limit is on the call's size, whatever named its members.
+        limit is on the call's size, whatever named its members. That check
+        is the session decision's, after IF-SES `decide` (RES-OP-12).
+
+        Step 6 is the one place the core reads the call type's declared
+        limit rather than the session decision's: 17.4.2.2 checks the list
+        against the configured <max-no-participants> before step 12
+        determines the participants, and `decide` needs them (PLT-ICD-001
+        §5.2, "Checked and applied by the core").
         """
         listed = tuple(u for u in dict.fromkeys(request.participants)
                        if u != request.initiator)
@@ -837,9 +926,6 @@ class SessionManager:
         if not members:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
                           "the criteria matched only the caller")
-        if limit is not None and len(members) > limit:
-            return None, (ADHOC_TOO_MANY_PARTICIPANTS,
-                          f"the criteria matched {len(members)}, limit {limit}")
         return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
                           group_id=group_id,
                           resolved_from=found.resolved_from or "adhoc:criteria"), None

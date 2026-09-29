@@ -82,7 +82,11 @@ call_types:
     mc_signature: null
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
     media: [data]
-    session_model: pre-established
+    # R1 runs on-demand sessions only; this call type is pre-established by
+    # nature and returns to it when PLT-SIG-006 (R2) is implemented. Declared
+    # on-demand so the data says what the platform does (PLT-VP-R1 RES-OP-12,
+    # owner ruling 2026-09-29).
+    session_model: on-demand
     urgency: fault
     application: telemetry
     auto_answer: true

@@ -486,13 +486,15 @@ def test_vp1_hook_031_reason_codes_declared(mcx):
     assert not verdict.permitted and verdict.reason_code in declared
 
 
-def test_admission_enforces_participant_limit(mcx):
+def test_admission_leaves_the_participant_limit_to_the_session_decision(mcx):
+    """RES-OP-12: the limit is decide()'s, applied by the core; admission
+    refusing on it would refuse a group call TS 24.379 6.3.5.5 truncates."""
     members = tuple(f"sip:u{i}@mcptt.example" for i in range(5))
     res = Resolution(kind=ResolutionKind.GROUP, members=members, group_id="g")
     priority = mcx.hooks.priority_policy.evaluate(request_for("private"), res)
     verdict = mcx.hooks.session_policy.admit(request_for("private"), res, priority)
-    assert verdict.permitted is False          # private call caps at 2
-    assert verdict.reason_code == "capacity-exhausted"
+    assert verdict.permitted is True
+    assert mcx.hooks.session_policy.decide(request_for("private"), res).max_participants == 2
 
 
 def test_admission_enforces_capacity(mcx):
@@ -504,7 +506,9 @@ def test_admission_enforces_capacity(mcx):
     assert verdict.reason_code == "capacity-exhausted"
 
 
-def test_vp1_hook_033_session_decision_applied_verbatim(mcx):
+def test_the_in_tree_decision_is_the_table_s_for_emergency_group(mcx):
+    """A table check only: that the core applies the decision is VP1-HOOK-033's
+    SessionManager tests (tests/test_session.py)."""
     res = Resolution(kind=ResolutionKind.GROUP, members=("x",), group_id="g")
     decision = mcx.hooks.session_policy.decide(request_for("emergency-group"), res)
     declared = mcx.profile.call_type("emergency-group")
@@ -916,3 +920,13 @@ def test_every_in_tree_call_type_declares_a_ring_limit(name):
     loaded = loader.load(PROFILES / name)
     assert all(isinstance(ct.no_answer_s, int) and ct.no_answer_s >= 1
                for ct in loaded.profile.call_types)
+
+
+@pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
+def test_r1_profiles_declare_only_the_session_model_r1_runs(name):
+    """RES-OP-12, owner ruling 2026-09-29: R1 runs on-demand sessions only,
+    so an in-tree call type declares on-demand until the release that runs
+    its own model (pre-established PLT-SIG-006, R2; broadcast PLT-CC-010,
+    R3), rather than a model the platform would not carry out."""
+    lp = loader.load(PROFILES / name)
+    assert {ct.session_model for ct in lp.profile.call_types} == {"on-demand"}

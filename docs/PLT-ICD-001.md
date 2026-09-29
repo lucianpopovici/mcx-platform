@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.20 (draft)
+**Version:** 0.21 (draft)
 **Date:** 2026-09-29
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -450,8 +450,14 @@ may raise `HookContractViolation`. The in-tree policy does.
 **PRE** Called only after `admit` returned `permitted=True`.
 
 **POST**
-1. `model` is consistent with the call type's declared session model.
-2. `max_participants`, if set, is ≥ 1; `None` means unlimited.
+1. `model` is consistent with the call type's declared session model. Since
+   v0.21 this is read as *equal to*: the model is declared per call type and
+   nothing else could make another one consistent (see ICD-OP-15 for R2).
+2. `max_participants`, if set, is ≥ 1; `None` means unlimited. It counts the
+   session's participants: for a group, its members, the initiator among them
+   when a member (TS 24.379 6.3.5.5 NOTE 2, `<on-network-max-participant-count>`);
+   for an ad hoc call, the users invited, the caller not counted (17.4.2.2
+   step 6, `<max-no-participants>`).
 3. `recording_required=True` binds: the core refuses establishment if recording
    is unavailable (PLT-OAM-008).
 
@@ -459,6 +465,36 @@ may raise `HookContractViolation`. The in-tree policy does.
 1. The core applies the decision verbatim (PLT-CC-005). It does not infer
    auto-answer from urgency, or recording from call type.
 2. The decision is immutable for the session.
+
+**Checked and applied by the core (since v0.21, PLT-VP-R1 RES-OP-12).** The
+returned value must be a `SessionDecision` with boolean flags that satisfies
+POST-1 and POST-2, or the session fails with `hook-contract-violation`. The
+participant limit is the decision's, applied by the core; admission does not
+apply it. A session over it:
+
+- a group call (a `GROUP` resolution, for a call type that is not a private
+  call) is **not refused**: only `max_participants` participants take part,
+  the initiator always among them when a member and the others in the
+  resolver's order, and the 200 OK to the originator carries warning
+  `122 too many participants` (6.3.5.5, 10.1.1.4.1). The platform has no
+  `<on-network-required>` members; which members to prefer is otherwise
+  operator policy (6.3.5.5 NOTE 3), which the resolver states by its order.
+  IF-SES `floor_policy` and IF-BER `select` see the members that take part;
+  A limit that would leave only the initiator (1, on a group the initiator
+  belongs to) invites no one, and is refused instead, `participant-limit-exceeded`;
+- an ad hoc call is refused, `adhoc-too-many-participants` (warning 189);
+- anything else (a private call whose target resolved to a group, a broadcast
+  area) is refused, `participant-limit-exceeded`: SIP 486 with warning
+  `122 too many participants`, the pairing TS 24.379 10.1.2 uses for a call
+  already at its limit. Before v0.21 these were `capacity-exhausted`, which
+  renders as 503 "maximum number of sessions reached": a server condition, and
+  one a caller may retry.
+
+A routed or partner session has no local members, and the limit is not
+applied to it here. One exception reads the call type's declared limit rather
+than the decision's: 17.4.2.2 step 6 checks an ad hoc caller's list against
+the configured `<max-no-participants>` before step 12 determines the
+participants, and `decide` cannot be asked before then.
 
 ### 5.3 `floor_policy(request, resolution) -> FloorPolicy`
 
@@ -682,6 +718,7 @@ they may not redefine these.
 | `hook-contract-violation` | core | Returned value failed a POST check |
 | `adhoc-participants-undetermined` | core, IF-IDR | Ad hoc participants cannot be determined (TS 24.379 warning 187) |
 | `adhoc-too-many-participants` | core | Ad hoc participants over the call type's limit (warning 189) |
+| `participant-limit-exceeded` | core | More participants than the session decision allows, in a session that is not a group call the core can truncate (§5.2; SIP 486, warning 122). Since v0.21 |
 
 `hook-contract-violation` is distinguished from `hook-error` deliberately: the
 first indicates a profile defect and should be alertable, the second may be an
@@ -719,6 +756,7 @@ environmental condition.
 | ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. | before a two-digit-MNC deployment |
 | ICD-OP-13 | **From v0.13.** A request relayed by a gateway (§7.2) has two weaknesses. (1) Its audit trail records `session-admitted` before §8.1 runs, so a request refused at step 0 shows "admitted" and then "refused". (2) The gateway may name a local user as the initiator, and step 0 then authorises it with that user's roles. The gateway's word is taken for who is calling. Both predate v0.13. The remedy for the second is to authorise gateway-originated requests on the gateway's own rights. | R4 start |
 | ICD-OP-14 | **From v0.19.** §6.1 POST-5 says the ARP pre-emption *flags* are consistent with the priority decision, but states only capability. A bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` is accepted, and makes the session immune to network pre-emption that IF-PRI left it open to. Decide whether POST-5 covers vulnerability (a major change: it tightens a POST, and every in-tree bearer rule must then agree with its priority rule). Related: IF-PRI's own decision is not checked by the core, and the 5QI is checked only as an integer, in profile validation and at runtime alike (TS 23.501 values are 0 to 255). | R2 start |
+| ICD-OP-15 | **From v0.21.** §5.2 POST-1 is read as equality, and R1 runs on-demand sessions only (the in-tree call types that are pre-established or broadcast by nature are declared on-demand until their release, PLT-VP-R1 RES-OP-12). In TS 24.379, falling back to on-demand when no pre-established session exists is ordinary, and equality forbids a hook from choosing it. Revisit POST-1 with PLT-SIG-006 (pre-established sessions). | R2 start |
 
 ---
 
@@ -726,6 +764,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.21 | 2026-09-29 | §5.2: the core checks and applies the session decision (PLT-VP-R1 RES-OP-12). The participant limit is the decision's, and a group call over it is truncated with warning 122 instead of refused (TS 24.379 6.3.5.5, 10.1.1.4.1); the in-tree admission no longer refuses on it. A session over the limit that is not a truncatable group call is refused with the new core code `participant-limit-exceeded` (§9). POST-1 read as equality, POST-2 states what is counted. ICD-OP-15 opened. A minor change: signatures unchanged; a group call the in-tree profiles used to refuse is now established with fewer participants. |
 | 0.20 | 2026-09-29 | ICD-GEN-041 made true (PLT-VP-R1 RES-OP-02): every invocation records what the hook returned, in full, and a value the audit cannot record exactly is refused. IF-ICX `map_outbound` and IF-PRI `compare` now go through the invocation boundary; `map_outbound` runs before QoS is reserved. IF-ICX gets the 20 ms deadline ICD-GEN-010 always gave it. §4.2 POST-6. A minor change: signatures unchanged; what is newly refused is a value holding a type the ICD's own value types do not declare. |
 | 0.19 | 2026-09-29 | §5.3 and §6.1: the core checks the floor policy and bearer decision a hook returns (PLT-VP-R1 RES-OP-07). Before, only profile validation checked them, so a substituted hook was not held to its contract. A minor change: no POST is tightened, and a value that passes profile validation passes these checks. ICD-OP-14 opened. |
 | 0.18 | 2026-09-28 | ICD-GEN-001 made true: value types hold nothing mutable (`Value`, `FrozenDict`); VP1-BND-004's gate checks it (PLT-VP-R1 RES-OP-06). A minor change: types and signatures unchanged. What now raises TypeError: a hook mutating a value it received; a value built holding an object that is not known to be immutable (e.g. a profile's own class); a sequence field given a string, a set or a mapping. |

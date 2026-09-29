@@ -34,6 +34,7 @@ from .errors import (
     ADHOC_TOO_MANY_PARTICIPANTS,
     CALL_TYPE_NOT_PERMITTED,
     IDENTITY_NOT_AUTHENTICATED,
+    PARTICIPANT_LIMIT_EXCEEDED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
@@ -289,6 +290,9 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     NOT_AUTHORISED: Status.FORBIDDEN,
     CALL_TYPE_NOT_PERMITTED: Status.FORBIDDEN,
     CAPACITY_EXHAUSTED: Status.SERVICE_UNAVAILABLE,
+    # 10.1.2: a call already at its maximum number of participants is refused
+    # 486 with warning 122, the one refusal TS 24.379 pairs with 122.
+    PARTICIPANT_LIMIT_EXCEEDED: Status.BUSY_HERE,
     RECORDING_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     QOS_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     RESOLVER_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
@@ -342,6 +346,8 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     # configured limit."
     ADHOC_TOO_MANY_PARTICIPANTS: (189,
                                   "maximum number of allowed adhoc group participants exceeded"),
+    # "The group call has reached its maximum number of participants."
+    PARTICIPANT_LIMIT_EXCEEDED: (122, "too many participants"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -394,6 +400,12 @@ ADHOC_WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
 # Step 3A (6.3.3.1.25): an ad hoc call may carry <adhoc-emergency-ind> or
 # <imminentperil-ind>, not both.
 INVALID_COMBINATION = (150, "invalid combinations of data received in MIME body")
+
+# 10.1.1.4.1: the 200 OK to a group call that has more members than
+# <on-network-max-participant-count> carries this; only that many take part
+# (6.3.5.5). Table 4.4.2-2: "The group call has reached its maximum number of
+# participants." (PLT-VP-R1 RES-OP-12)
+TOO_MANY_PARTICIPANTS = WARNING_TEXTS[PARTICIPANT_LIMIT_EXCEEDED]
 
 # Steps 3B and 3C answer with a body and skip steps 4 and 5, so no MC code
 # goes with it: 185 would say the user may not start ad hoc calls at all,
@@ -981,6 +993,11 @@ class Adapter:
         imminent = info.imminent_peril is not None or \
             "imminentperil-ind" in info.encrypted
         return imminent and info.emergency is not None
+
+    def too_many_participants(self) -> str:
+        """The Warning header value for a group call over its limit."""
+        code, text = TOO_MANY_PARTICIPANTS
+        return f'{WARNING_CODE_MISC} {self._host} "{code} {text}"'
 
     def reject_invalid_combination(self, context: DialogContext) -> Response:
         code, text = INVALID_COMBINATION

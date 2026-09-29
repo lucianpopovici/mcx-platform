@@ -468,6 +468,50 @@ def test_vp1_cc_004_auto_answer_establishes_without_callee_action(core, rt, worl
     assert rt.manager.session("auto1") is not None
 
 
+def _limit_decided(rt, limit):
+    """The runtime's decide() with the participant limit `limit`: a
+    substituted session policy, as the core sees one."""
+    import dataclasses as dc
+    sp = rt.manager._hooks.session_policy
+
+    class Policy:
+        def __getattr__(self, name):
+            return getattr(sp, name)
+
+        def decide(self, request, resolution):
+            return dc.replace(sp.decide(request, resolution), max_participants=limit)
+
+    rt.manager._hooks = dc.replace(rt.manager._hooks, session_policy=Policy())
+
+
+def _ok_to_originator(flow):
+    [ok] = [m for m in flow.messages()
+            if isinstance(m, ReceivedResponse) and m.code == 200]
+    return ok
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_group_call_over_its_limit_is_answered_with_warning_122(core, rt, world):
+    """TS 24.379 6.3.5.5 and 10.1.1.4.1: grp:alpha has 4 members; with a
+    limit of 3 the caller and u1, u2 take part, u3 is not invited, and the
+    200 OK says why (RES-OP-12)."""
+    _limit_decided(rt, 3)
+    core.on_bytes(invite("trunc1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    assert [len(world[u].requests("INVITE")) for u in U[1:]] == [1, 1, 0]
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[0], 200, SDP), world[U[1]])
+    assert world[U[0]].codes() == [100, 200]
+    assert _ok_to_originator(world[U[0]]).headers.get("Warning") == \
+        '399 mcptt.example "122 too many participants"'
+
+
+def test_a_group_call_within_its_limit_carries_no_warning(core, rt, world):
+    _limit_decided(rt, 4)
+    core.on_bytes(invite("whole1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    assert [len(world[u].requests("INVITE")) for u in U[1:]] == [1, 1, 1]
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[0], 200, SDP), world[U[1]])
+    assert _ok_to_originator(world[U[0]]).headers.get("Warning") is None
+
+
 def test_private_call_without_auto_answer_rings_then_answers(core, rt, world):
     core.on_bytes(invite("man1", U[0], U[1], "private"), world[U[0]])
     (req,) = world[U[1]].requests("INVITE")

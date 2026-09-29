@@ -851,6 +851,10 @@ class SipCore:
                      ("Supported", ", ".join(SUPPORTED_ON_ANSWER)),
                      ("Allow", ALLOW)])
         self._timer_headers(h, call.st)
+        # 10.1.1.4.1: a group call over its limit says so (RES-OP-12).
+        session = self.rt.manager.session(call.cid)
+        if session is not None and session.truncated_from is not None:
+            h.add("Warning", self.adapter.too_many_participants())
         return h
 
     @staticmethod

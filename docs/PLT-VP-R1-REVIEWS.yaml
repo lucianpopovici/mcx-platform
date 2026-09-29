@@ -785,17 +785,21 @@ VP1-HOOK-032:
     check at the SIP layer that the store has no session.
   note: For the authorise refusal, all three clauses are asserted.
 VP1-HOOK-033:
-  verdict: fail
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
-  - tests/test_loader.py::test_vp1_hook_033_session_decision_applied_verbatim
-  gap: 'The test never exercises the core. It compares the in-tree hook''s decide() output to the profile
-    YAML for one call type, so it cannot show ''observed behaviour matches the decision'' or ''core infers
-    nothing''. Close with a SessionManager test using a stub SessionPolicy.decide over the varied combinations:
-    auto_answer T/F and acknowledgement T/F, asserted on the INVITE signal detail; recording_required
-    T with recording unavailable -> refused; max_participants N with N+1 members. Include a decision contradicting
-    the urgency (e.g. emergency with auto_answer=False) to show the core does not infer.'
+  - tests/test_session.py::test_vp1_cc_006_a_group_over_the_decided_limit_is_truncated
+  - tests/test_session.py::test_vp1_hook_033_every_answer_combination_is_signalled_as_decided
+  - tests/test_session.py::test_vp1_hook_033_recording_follows_the_decision_not_the_table
+  note: 'Re-reviewed after RES-OP-12: a substituted decide() drives the SessionManager over all four
+    auto-answer/acknowledgement combinations on an emergency group call (so a decision contradicting
+    the urgency is followed), asserted on every INVITE; recording follows the decision with no recorder
+    (required: refused recording-unavailable; not required: established though the table requires it);
+    and a decided limit of N against N+1 members truncates the call per TS 24.379 6.3.5.5. The case
+    runs in ENV-UNIT, so the signals are the behaviour observed: acknowledgement_required reaches the
+    INVITE signal but no acknowledged-call procedure acts on it (RES-OP-13), and START_RECORDING reaches
+    only the R1 stub recorder (PLT-OAM-008 is R2). This PASS is not "acknowledged calls work".'
 VP1-HOOK-034:
   verdict: pass
   by: independent review (agent)
@@ -1261,19 +1265,30 @@ VP1-CC-005:
     targets (not a set) equals the resolved members exactly once each, and add a late-join test (a member
     registering or rejoining after setup) asserting the behaviour the session decision prescribes.'
 VP1-CC-006:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-09-29'
   evidence:
+  - tests/test_session.py::test_a_broadcast_area_over_the_limit_is_refused_not_truncated
+  - tests/test_session.py::test_a_caller_outside_the_group_takes_no_participant_place
+  - tests/test_session.py::test_a_group_call_type_with_no_signature_is_truncated_too
+  - tests/test_session.py::test_a_limit_leaving_no_one_to_invite_is_refused
+  - tests/test_session.py::test_a_private_call_over_the_limit_is_refused_not_made_a_group_call
+  - tests/test_session.py::test_an_ad_hoc_call_over_the_decided_limit_is_warning_189
+  - tests/test_session.py::test_an_inconsistent_session_decision_is_a_contract_violation
+  - tests/test_session.py::test_vp1_cc_006_a_changed_table_changes_nothing_the_hook_decided
+  - tests/test_session.py::test_vp1_cc_006_a_group_over_the_decided_limit_is_truncated
+  - tests/test_session.py::test_vp1_cc_006_a_group_within_the_decided_limit_is_whole
   - tests/test_session.py::test_vp1_cc_006_session_decision_applied_verbatim
-  gap: '''Every field'' is not covered. SessionDecision has model, auto_answer, acknowledgement_required,
-    recording_required and max_participants; only auto_answer and acknowledgement_required are checked,
-    for one call type (emergency-group). ''No field inferred by the core'' is not tested: nothing substitutes
-    a decision hook returning values that differ from the profile to show the core applies the hook''s
-    decision rather than re-deriving it. To close: a test with a stub decide() hook returning non-default
-    values for all five fields across call types, asserting each shows up in the signals, recording and
-    QoS, and max-participant enforcement, and that changing the profile without changing the hook changes
-    nothing.'
+  - tests/test_session.py::test_vp1_cc_006_the_hook_s_decision_is_applied_not_the_table_s
+  - tests/test_sip_transport.py::test_a_group_call_over_its_limit_is_answered_with_warning_122
+  note: 'Re-reviewed after RES-OP-12: a substituted decide() differing from the profile in every field
+    is what the session follows, and a profile changed under an unchanged hook changes nothing. The limit
+    is the decision''s: a group over it is truncated per TS 24.379 6.3.5.5 with 122 on the 200 OK, an
+    ad hoc call refused 189, anything else refused 486 + 122. The model is checked against the call type
+    (POST-1 as equality); R1 call types are all on-demand by the owner''s ruling, so applying it is
+    running on-demand. The one place the core reads the table''s limit, the ad hoc step-6 list check, is
+    an exception the ICD names.'
 VP1-CC-007:
   verdict: partial
   by: independent review (agent)

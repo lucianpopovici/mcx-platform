@@ -157,9 +157,9 @@ class TableSessionPolicy:
                 f"admit called for undeclared call type {request.call_type!r}; "
                 "authorise should have refused it")
 
-        if declared.max_participants is not None and \
-                len(resolution.members) > declared.max_participants:
-            return self._refuse(CAPACITY_EXHAUSTED)
+        # The participant limit is not admission's: it travels in the session
+        # decision, and the core applies it (TS 24.379 6.3.5.5 truncates a
+        # group call over it rather than refusing it; PLT-VP-R1 RES-OP-12).
 
         capacity = self._capacity_check(request, declared)
         if capacity is not None:
