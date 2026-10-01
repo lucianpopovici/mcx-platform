@@ -250,3 +250,145 @@ def test_priority_table_check_ignores_a_mixed_type_defaults_dict(tmp_path):
         '    return {"scope": "", "max_level": 0, "may_preempt": False,\n'
         '            "priority_map": ()}\n'))
     assert gate.check_no_priority_table_in_core(tmp_path) == []
+
+
+# --------------------------------------------------------------------------
+# VP1-BND-012 and VP1-BND-009 as amended (PLT-VP-R1 RES-OP-10)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.vp("VP1-BND-012")
+@pytest.mark.parametrize("planted", [
+    "qos_default: int = 65\n",                          # an annotated assignment
+    "ARP_EMERG, ARP_NORMAL = 1, 9\n",                   # tuple targets
+    "table = {'emergency': 65, 'normal': 69}\n",        # a neutral name
+    "video, data = 67, 70\n",                          # any MC 5QI, neutral names
+    "def f(b):\n    return b.arp_level <= 8\n",         # a comparison
+    "def f(make):\n    return make(qos_identifier=69)\n",   # a keyword
+    "x = 3\nx += 1\nqci = x * 7\n",                     # arithmetic
+], ids=["annotated", "tuple", "neutral-dict", "neutral-mc", "compare", "keyword", "arith"])
+def test_the_qos_gate_catches_what_it_used_to_miss(tmp_path, planted):
+    """RES-OP-10 review: the gate flagged only `name = <int>` with a QoS name."""
+    _stage(tmp_path, core_extra=planted)
+    assert gate.check_no_qos_mapping_in_core(tmp_path)
+
+
+def _qos_module(tmp_path, text):
+    _stage(tmp_path)
+    (tmp_path / "core" / "qos.py").write_text(text, encoding="utf-8")
+    return gate.check_no_qos_mapping_in_core(tmp_path)
+
+
+@pytest.mark.vp("VP1-BND-012")
+def test_core_qos_may_hold_the_ts_23_501_tables_and_nothing_else(tmp_path):
+    """The recorded exception: definitions, not a mapping."""
+    real = (ROOT / "core" / "qos.py").read_text(encoding="utf-8")
+    assert _qos_module(tmp_path, real) == []
+    extra = _qos_module(tmp_path, real + "\nEMERGENCY_5QI = 69\n")
+    assert extra and "EMERGENCY_5QI" in extra[0]
+    mapping = _qos_module(tmp_path, real + "\ndef qos_for(priority):\n    return 65\n")
+    assert any("'qos_for' is not one of the lookups" in v for v in mapping)
+    assert any("mentions 'priority'" in v for v in mapping)
+    # RES-OP-10 review: a mapping that never says "priority".
+    by_label = _qos_module(tmp_path, real + "\ndef for_label(label):\n"
+                           "    return {'emergency': 65, 'normal': 9}.get(label)\n")
+    assert any("'for_label' is not one of the lookups" in v for v in by_label)
+    assert _qos_module(tmp_path, real + "\nf = lambda c: 65\n")
+
+
+@pytest.mark.vp("VP1-BND-012")
+@pytest.mark.parametrize("planted", [
+    "def letter(c):\n    return 65 <= ord(c) <= 90\n",     # an ASCII range
+    "sharp_edge = 9\n",                                  # "arp" inside a word
+    "def f(log, x):\n    log.info('x %s', x, stacklevel=2)\n",
+], ids=["ascii-compare", "sharp", "stacklevel"])
+def test_the_qos_gate_leaves_what_is_not_qos_alone(tmp_path, planted):
+    """RES-OP-10 review: false positives the first hardening would raise."""
+    _stage(tmp_path, core_extra=planted)
+    assert gate.check_no_qos_mapping_in_core(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-012")
+def test_a_line_is_exempt_only_by_being_listed_with_its_reason(tmp_path, monkeypatch):
+    """RES-OP-10 re-review: a marker comment anyone could add exempted a line
+    unseen. Now an exemption is an entry in the gate, reviewed like any
+    other change to it."""
+    _stage(tmp_path, core_extra="T_SLOW = 70   # not-qos\n")
+    assert gate.check_no_qos_mapping_in_core(tmp_path)          # a comment is nothing
+    monkeypatch.setattr(gate, "QOS_REVIEWED_LINES", {
+        ("core/sample.py", "T_SLOW = 70   # not-qos"): "a 70 ms timer"})
+    assert gate.check_no_qos_mapping_in_core(tmp_path) == []
+
+
+def _state_machines(tmp_path, rel=None, find=None, replace=None):
+    """The real state-machine modules, one of them changed."""
+    for name in list(gate.STATE_MACHINE_PROFILE_READS):
+        dst = tmp_path / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        text = (ROOT / name).read_text(encoding="utf-8")
+        if name == rel:
+            assert find in text, find
+            text = text.replace(find, replace, 1)
+        dst.write_text(text, encoding="utf-8")
+    return gate.check_state_machine_ownership(tmp_path)
+
+
+@pytest.mark.vp("VP1-BND-009")
+def test_the_real_state_machines_pass(tmp_path):
+    assert _state_machines(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-009")
+@pytest.mark.parametrize("rel,find,replace,expect", [
+    # A floor guard on a policy setting that is not a 24.380 parameter.
+    ("core/floor.py", "self._policy.override_allowed",
+     "self._policy.emergency_override", "'emergency_override' of its policy"),
+    # Whatever the variable holding the policy is called.
+    ("core/floor.py", "timers_ms=dict(floor_policy.timers_ms),",
+     "timers_ms=dict(floor_policy.timers_ms), label=floor_policy.priority_boost,",
+     "'priority_boost' of its policy"),
+    # The SIP session reading a profile attribute nobody justified.
+    ("service/sip_core.py", "runtime.loaded.profile.media.codecs",
+     "runtime.loaded.profile.priority.rules", "profile.priority"),
+    # Or getting round the list.
+    ("service/sip_core.py", "runtime.loaded.profile.media.codecs",
+     "getattr(runtime.loaded.profile, 'media').codecs", "through getattr"),
+    # A module allowed nothing.
+    ("service/sip_txn.py", "from __future__ import annotations",
+     "from __future__ import annotations\ndef f(profile):\n    return profile.call_types",
+     "profile.call_types"),
+    ("core/sip.py", "from __future__ import annotations",
+     "from __future__ import annotations\ndef f(lp):\n    return lp.profile.bearer",
+     "profile.bearer"),
+    # RES-OP-10 review: the session state machine, through self._profile.
+    ("core/session.py", "self._profile.admission.reject_reason_codes",
+     "self._profile.priority.rules", "profile.priority"),
+    # Through an alias.
+    ("service/sip_core.py", "self._preference = tuple(",
+     "p = runtime.loaded.profile\n        x = p.bearer\n        self._preference = tuple(",
+     "profile.bearer"),
+    ("service/sip_core.py", "self._preference = tuple(",
+     "x = vars(runtime.loaded.profile)\n        self._preference = tuple(",
+     "through vars"),
+    ("service/media.py", "from __future__ import annotations",
+     "from __future__ import annotations\ndef f(rt):\n    return rt.loaded.profile.call_types",
+     "profile.call_types"),
+    # The floor policy through an alias, getattr, or a new field.
+    ("core/floor.py", "        return cls(\n",
+     "        pol = floor_policy\n        x = pol.priority_boost\n        return cls(\n",
+     "'priority_boost' of its policy"),
+    ("core/floor.py", "        return cls(\n",
+     "        x = getattr(floor_policy, 'boost')\n        return cls(\n",
+     "policy through getattr"),
+    ("core/floor.py", "    timers_ms: Mapping[str, int] = field(default_factory=dict)\n",
+     "    timers_ms: Mapping[str, int] = field(default_factory=dict)\n    boost: int = 0\n",
+     "the floor Policy's fields"),
+], ids=["floor-guard", "floor-policy-by-another-name", "sip-core-read", "getattr", "sip-txn",
+        "sip-adapter", "session-self-profile", "alias", "vars", "media", "floor-alias",
+        "floor-getattr", "floor-new-field"])
+def test_the_state_machine_gate_catches_an_unjustified_profile_read(
+        tmp_path, rel, find, replace, expect):
+    """RES-OP-10 review: the gate covered floor.py only, and a guard driven
+    by a policy flag passed."""
+    violations = _state_machines(tmp_path, rel, find, replace)
+    assert violations and any(expect in v for v in violations), violations

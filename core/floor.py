@@ -74,7 +74,6 @@ class DenyReason(Enum):
 
     QUEUEING_DISABLED = "queueing-disabled"
     QUEUE_FULL = "queue-full"
-    ALREADY_QUEUED = "already-queued"
     ALREADY_HOLDER = "already-holder"
     NO_SESSION = "no-session"
     LOWER_PRIORITY = "lower-priority"
@@ -491,9 +490,6 @@ class FloorControl:
         if not self._policy.queueing_enabled:
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.QUEUEING_DISABLED)]
-        if any(e.participant == participant for e in self._queue):
-            return [Action(ActionType.SEND_DENY, target=participant,
-                           reason=DenyReason.ALREADY_QUEUED)]
         if len(self._queue) >= self._policy.max_queue_depth:
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.QUEUE_FULL)]
@@ -538,6 +534,28 @@ class FloorControl:
                                duration_ms=self._t2_remaining())]
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.ALREADY_HOLDER)]
+        # 6.3.5.4.4: a participant already queued that asks again.
+        queued = next((e for e in self._queue if e.participant == participant), None)
+        if queued is not None:
+            if queued.front or queued.floor_priority == event.floor_priority:
+                # Item 4: at the same effective priority its place is kept:
+                # Queue Position Info where queueing was negotiated, else
+                # nothing. Never a Deny: the request is still queued and will
+                # be granted (it used to be denied, then granted later).
+                # The pre-emptor held in front keeps its place at ANY priority
+                # it asks again with: an interpretation (FC-OP-07), where
+                # items 7 and 8 read literally would deny it or move it out of
+                # the place 6.3.4.4.7 item 2e gave it, after its talker was
+                # already revoked for it.
+                if not self._policy.queueing_enabled:
+                    return []
+                return [Action(ActionType.SEND_QUEUE_POSITION, target=participant,
+                               queue_position=self._queue.index(queued) + 1)]
+            # Item 8: at another priority, its position is updated: taken
+            # out, and the request handled afresh -- a pre-emption if it now
+            # outranks the talker (6.3.4.4.7 moves it to the front), else
+            # queued again behind its new peers.
+            self._queue = [e for e in self._queue if e.participant != participant]
         # PLT-FC-005 / PLT-FC-008: override is a policy decision using the floor
         # priority from IF-PRI. Strictly greater, so equal priority never
         # interrupts an active talker.

@@ -489,12 +489,70 @@ def check_no_hot_reload(root: Path) -> List[str]:
 # --------------------------------------------------------------------------
 
 
-def check_state_machine_ownership(root: Path) -> List[str]:
-    """VP1-BND-009 / PLT-PRF-030 / PLT-PRF-031.
+# VP1-BND-009 as amended (PLT-VP-R1 RES-OP-10 ruling 2): what each protocol
+# state machine may read from the profile. The floor machine reads the TS
+# 24.380 configuration parameters and timers of its floor policy, and nothing
+# else; the SIP session and document modules read the profile attributes
+# listed, each for a stated reason, and no module builds a transition from
+# them. A new read fails this gate until it is justified here.
+FLOOR_POLICY_PARAMETERS = frozenset({
+    "timers_ms", "timer",                       # timers (PLT-PRF-031)
+    "queueing_enabled", "override_allowed",     # TS 24.380 configuration
+    "max_queue_depth", "initial_grant_to_initiator",
+})
+STATE_MACHINE_PROFILE_READS: Dict[str, frozenset] = {
+    "core/floor.py": frozenset(),
+    # The session state machine reads the profile only to check a hook's
+    # answer against it or where TS 24.379 orders a check before any hook:
+    "core/session.py": frozenset({
+        "admission",    # declared reason codes (PLT-ICD-001 5.1 POST-3)
+        "identity",     # declared domains (3.2 POST-3; the ad hoc group id)
+        "call_type",    # declared model (5.2 POST-1), private vs group (6.3.5.5),
+                        # the ad hoc list limit (17.4.2.2 step 6, ICD 5.2)
+    }),
+    # Given the call types, not the profile; reads each one's id and
+    # mc_signature (its own docstring; not enforced here).
+    "core/sip.py": frozenset(),
+    "service/sip_core.py": frozenset({
+        "media",        # codec preference (VP-OP-03)
+        "call_types",   # no_answer_s, a timer (SIP-OP-15); signatures (ICD 2.6)
+        "identity",     # declared domains, for registration (PLT-IDM-008)
+    }),
+    "service/sip_txn.py": frozenset(),
+    "service/session_timer.py": frozenset(),
+    "service/groups.py": frozenset(),   # TS 24.481 documents: network profile data
+    "service/http.py": frozenset(),     # serves those documents
+    "service/media.py": frozenset(),    # drives the floor machine
+}
+_PROFILE_NAMES = ("profile", "_profile")
 
-    The floor transition table must be a module-level constant, so a profile
-    cannot supply or alter a transition. Timer VALUES are excepted by
-    PLT-PRF-031 and are supplied through Policy.
+
+def _named(node, name: str) -> bool:
+    return (isinstance(node, ast.Name) and node.id == name) or \
+        (isinstance(node, ast.Attribute) and node.attr == name)
+
+
+def _aliases(tree, is_source) -> set:
+    """Names a module binds to something `is_source` recognises (`p =
+    runtime.loaded.profile`), so reading through an alias is still seen.
+    Function-local or not, by name: a static gate's approximation."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and is_source(node.value):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names
+
+
+def check_state_machine_ownership(root: Path) -> List[str]:
+    """VP1-BND-009 / PLT-PRF-030 / PLT-PRF-031, as amended by RES-OP-10.
+
+    No transition, guard or state is parameterised by profile input, timers
+    and TS 24.380 configuration parameters excepted. The floor transition
+    table is a module-level constant; the floor machine reads only those
+    parameters of its policy; each state-machine module reads only the
+    profile attributes STATE_MACHINE_PROFILE_READS allows it.
     """
     violations: List[str] = []
     path = root / CORE / "floor.py"
@@ -510,13 +568,68 @@ def check_state_machine_ownership(root: Path) -> List[str]:
         violations.append(
             f"{path.relative_to(root)}: the transition table is not a "
             "module-level constant")
-    # A transition table built from a profile object would defeat the point.
+    def policy_like(node) -> bool:
+        held = node.id if isinstance(node, ast.Name) else \
+            node.attr if isinstance(node, ast.Attribute) else ""
+        # A floor policy, whatever the variable holding it is called (the
+        # class itself, `Policy`, is the core's own).
+        return held.lower().endswith("policy") and held != "Policy"
+
+    policy_aliases = _aliases(tree, policy_like)
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in (
                 "call_types", "priority", "bearer", "identity", "admission"):
             violations.append(
                 f"{path.relative_to(root)}:{node.lineno}: floor control reads "
                 f"profile structure {node.attr!r}")
+        if isinstance(node, ast.Attribute) and node.attr not in FLOOR_POLICY_PARAMETERS \
+                and (policy_like(node.value) or
+                     (isinstance(node.value, ast.Name) and node.value.id in policy_aliases)):
+            violations.append(
+                f"{path.relative_to(root)}:{node.lineno}: the floor machine reads "
+                f"{node.attr!r} of its policy, which is not a timer or a TS "
+                "24.380 configuration parameter")
+        if isinstance(node, ast.Call) and _named(node.func, "getattr") and node.args \
+                and (policy_like(node.args[0]) or
+                     (isinstance(node.args[0], ast.Name) and node.args[0].id in policy_aliases)):
+            violations.append(
+                f"{path.relative_to(root)}:{node.lineno}: the floor machine reads its "
+                "policy through getattr")
+    # The policy carries those parameters and no others.
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Policy":
+            fields = {n.target.id for n in node.body
+                      if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
+            if fields != FLOOR_POLICY_PARAMETERS - {"timer"}:
+                violations.append(
+                    f"{path.relative_to(root)}:{node.lineno}: the floor Policy's fields "
+                    f"{sorted(fields)} are not the parameters this gate allows")
+    for rel, allowed in STATE_MACHINE_PROFILE_READS.items():
+        module = root / rel
+        if not module.is_file():
+            violations.append(f"{rel}: state-machine module not found")
+            continue
+        tree = _parse(module)
+
+        def is_profile(node) -> bool:
+            return any(_named(node, n) for n in _PROFILE_NAMES)
+
+        aliases = _aliases(tree, is_profile)
+
+        def profile_ref(node) -> bool:
+            return is_profile(node) or (isinstance(node, ast.Name) and node.id in aliases)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and profile_ref(node.value) \
+                    and node.attr not in allowed:
+                violations.append(
+                    f"{rel}:{node.lineno}: reads profile.{node.attr}, which "
+                    "STATE_MACHINE_PROFILE_READS does not allow this module")
+            if isinstance(node, ast.Call) and node.args and profile_ref(node.args[0]) \
+                    and (_named(node.func, "getattr") or _named(node.func, "vars")):
+                violations.append(
+                    f"{rel}:{node.lineno}: reads the profile through "
+                    f"{node.func.id if isinstance(node.func, ast.Name) else 'a call'}")
     return violations
 
 
@@ -609,24 +722,122 @@ def check_priority_table_declarative(root: Path) -> List[str]:
     return violations
 
 
+# VP1-BND-012 as amended (PLT-VP-R1 RES-OP-10 ruling 1): no priority-to-QoS
+# mapping in the core. What a 5QI is and the ARP range are TS 23.501
+# definitions, allowed in core/qos.py only, and only these tables.
+QOS_DEFINITIONS = frozenset({"STANDARDISED_5QI", "MC_5QI_MEDIA", "ARP_MIN", "ARP_MAX"})
+QOS_FUNCTIONS = frozenset({"is_standardised", "media_of"})   # lookups in those tables
+MC_5QI = frozenset({65, 66, 67, 69, 70})
+# A whole word of an identifier or string: qos_identifier, arp_level, 5QI --
+# not "sharp" or "stacklevel".
+_QOS_NAME = re.compile(r"(?:^|[^a-z])(?:qos|arp|5qi|qci)(?:[^a-z]|$)", re.I)
+# Lines a reviewer has judged not to be QoS values (a 65 ms timer, say), by
+# file and exact stripped text, each with its reason. Reviewed like
+# STATE_MACHINE_PROFILE_READS: a line is exempt only by being listed here.
+QOS_REVIEWED_LINES: Dict[Tuple[str, str], str] = {}
+_PRIORITY_NAME = re.compile(r"priority|preempt|scope|level", re.I)
+
+
+def _names_in(node) -> List[str]:
+    out = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            out.append(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            out.append(sub.attr)
+        elif isinstance(sub, ast.keyword) and sub.arg:
+            out.append(sub.arg)
+        elif isinstance(sub, ast.arg):
+            out.append(sub.arg)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.append(sub.name)
+        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                and len(sub.value) < 40:
+            out.append(sub.value)
+    return out
+
+
+def _ints_in(node) -> List[int]:
+    return [sub.value for sub in ast.walk(node)
+            if isinstance(sub, ast.Constant) and type(sub.value) is int
+            and sub.value not in (0, 1)]
+
+
 def check_no_qos_mapping_in_core(root: Path) -> List[str]:
-    """VP1-BND-012 / PLT-HOK-043 — no QoS literal outside the interface types."""
+    """VP1-BND-012 / PLT-HOK-043, as amended by RES-OP-10. HEURISTIC.
+
+    core/qos.py holds the TS 23.501 definition tables named in
+    QOS_DEFINITIONS, the lookups in QOS_FUNCTIONS and nothing that mentions
+    a priority. Elsewhere in the core (hooks.py's types aside), no int
+    literal appears in a statement, comparison, keyword or mapping that names
+    QoS, ARP, 5QI or QCI, and no mission-critical 5QI value appears outside a
+    comparison; a line listed in QOS_REVIEWED_LINES, with its reason, is
+    exempt.
+
+    Not caught, as a static gate cannot: a value computed (64 + 1), written
+    as a float or a string, passed positionally, or derived from the tables
+    themselves; a mapping onto non-mission-critical values under neutral
+    names. Review is the check for those.
+    """
     violations: List[str] = []
-    for path in _iter_python(root, CORE):
-        if path.name == "hooks.py":
-            continue            # type definitions only, no values
-        for node in ast.walk(_parse(path)):
-            if not isinstance(node, ast.Assign):
-                continue
-            names = [_target_name(t).lower() for t in node.targets]
-            if not any("qos" in n or "arp" in n or "5qi" in n or "qci" in n
-                       for n in names):
-                continue
-            if isinstance(node.value, ast.Constant) and \
-                    isinstance(node.value.value, int):
+    qos = root / CORE / "qos.py"
+    if qos.is_file():
+        tree = _parse(qos)
+        for node in tree.body:
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = [t for t in node.targets]
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            for t in targets:
+                for sub in ast.walk(t):
+                    if isinstance(sub, ast.Name) and sub.id not in QOS_DEFINITIONS:
+                        violations.append(
+                            f"{qos.relative_to(root)}:{node.lineno}: {sub.id!r} is not "
+                            "one of the TS 23.501 definitions core/qos.py may hold")
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                 ast.Lambda)) and \
+                    getattr(node, "name", "<lambda>") not in QOS_FUNCTIONS:
                 violations.append(
-                    f"{path.relative_to(root)}:{node.lineno}: core assigns a QoS "
-                    f"literal to {names}")
+                    f"{qos.relative_to(root)}:{node.lineno}: "
+                    f"{getattr(node, 'name', 'a lambda')!r} is not one of the lookups "
+                    "core/qos.py may define: a function here could map onto QoS")
+        for name in _names_in(tree):
+            if _PRIORITY_NAME.search(name) and not name.startswith("ARP_"):
+                violations.append(
+                    f"{qos.relative_to(root)}: mentions {name!r}: core/qos.py defines "
+                    "QoS, it does not map priority onto it")
+                break
+    for path in _iter_python(root, CORE):
+        if path.name in ("hooks.py", "qos.py"):
+            continue            # the interface types; the named exception
+        lines = path.read_text(encoding="utf-8").splitlines()
+        rel = path.relative_to(root).as_posix()
+        seen = {i + 1 for i, line in enumerate(lines)
+                if (rel, line.strip()) in QOS_REVIEWED_LINES}
+        tree = _parse(path)
+        in_compare = {id(sub) for node in ast.walk(tree) if isinstance(node, ast.Compare)
+                      for sub in ast.walk(node)}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return,
+                                 ast.Expr, ast.Assert, ast.Compare, ast.keyword,
+                                 ast.Dict)):
+                ints = _ints_in(node)
+                if ints and any(_QOS_NAME.search(n) for n in _names_in(node)):
+                    line = getattr(node, "lineno", getattr(node, "value", node).lineno)
+                    if line not in seen:
+                        seen.add(line)
+                        violations.append(
+                            f"{path.relative_to(root)}:{line}: a QoS literal {ints[0]} "
+                            "outside core/qos.py")
+            if isinstance(node, ast.Constant) and type(node.value) is int \
+                    and node.value in MC_5QI and node.lineno not in seen \
+                    and id(node) not in in_compare:
+                seen.add(node.lineno)
+                violations.append(
+                    f"{path.relative_to(root)}:{node.lineno}: the mission-critical "
+                    f"5QI value {node.value} outside core/qos.py")
     return violations
 
 

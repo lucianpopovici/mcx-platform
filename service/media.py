@@ -47,7 +47,6 @@ _DENY_CAUSE = {
     fl.DenyReason.QUEUEING_DISABLED: rtcp.DENY_ANOTHER_HAS_PERMISSION,
     fl.DenyReason.LOWER_PRIORITY: rtcp.DENY_ANOTHER_HAS_PERMISSION,
     fl.DenyReason.QUEUE_FULL: rtcp.DENY_QUEUE_FULL,   # cause #7 exists
-    fl.DenyReason.ALREADY_QUEUED: rtcp.DENY_OTHER,
     fl.DenyReason.ALREADY_HOLDER: rtcp.DENY_OTHER,
     fl.DenyReason.NO_SESSION: rtcp.DENY_INTERNAL_ERROR,
 }

@@ -410,21 +410,14 @@ VP1-BND-008:
     after startup (call-graph check that the loader is invoked once from startup).'
   note: SIGHUP/signal.signal/importlib.reload in core are caught.
 VP1-BND-009:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-01'
   evidence:
   - gate:VP1-BND-009
-  gap: 'Covers core/floor.py only; the criterion names floor control, SIP session and document modules
-    (core/session.py, core/sip.py, document servers untouched — probe adding `p.call_types` read in session.py
-    passes). Within floor.py it only blocks five attribute names and requires a module-level *_DISPATCH;
-    a guard driven by a FloorPolicy flag passes (probe `policy.override_allowed` guard missed). The current
-    floor machine already takes profile-supplied non-timer inputs into guards (FloorPolicy.queueing_enabled,
-    override_allowed, initial_grant_to_initiator, max_queue_depth; floor.py:296) — needs an explicit ruling
-    that these are 24.380 configuration parameters, not transitions. Close with: extend to all state-machine
-    modules; enumerate every profile-derived value reaching a transition/guard (dataflow from hook return
-    types) and allowlist only timers_ms and ruled configuration parameters.'
-  note: Only one of the three named module families is inspected.
+  - tests/test_boundary.py::test_the_real_state_machines_pass
+  - tests/test_boundary.py::test_the_state_machine_gate_catches_an_unjustified_profile_read
+  note: 'Re-reviewed after RES-OP-10 (case amended on the owner''s ruling). The gate covers floor control, the SIP session and session state machine, media and the documents; each reads only listed profile attributes with their reasons, through aliases and getattr/vars too; the floor machine reads only its timers and TS 24.380 parameters, and its Policy carries no others. HEURISTIC: attrgetter and sub-attributes of an allowed read are not seen.'
 VP1-BND-010:
   verdict: fail
   by: independent review (agent)
@@ -455,21 +448,16 @@ VP1-BND-011:
     literal (str or int) in the priority policy.'
   note: Data shape of the table is well checked; 'no imperative logic in the hook' is only sampled.
 VP1-BND-012:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-01'
   evidence:
   - gate:VP1-BND-012
-  gap: 'Flags only `ast.Assign` of an int constant to a target named qos/arp/5qi/qci. Probed misses: AnnAssign
-    `qos_default: int = 65`, a dict `{''emergency'': 65, ''normal'': 69}` bound to a neutral name, and
-    tuple targets `ARP_EMERG, ARP_NORMAL = 1, 9`. Also, the current core/qos.py holds exactly the QoS
-    identifier and ARP literals the step says to inspect for (STANDARDISED_5QI, MC_5QI_MEDIA, ARP_MIN/ARP_MAX
-    = 1, 15) outside hooks.py; the gate passes only because these are frozenset/dict/tuple forms. Either
-    the criterion needs a recorded exception for 3GPP-table validation constants (CONF-AUDIT CA-15) or
-    this is a violation. Close with: flag any int literal in the 5QI/ARP value domain appearing in a QoS/bearer
-    context (dict values, returns, arguments to BearerDecision/PathSpec, AnnAssign/tuple targets) outside
-    hooks.py and an explicit allowlist (core/qos.py) justified in the VP.'
-  note: Detects one syntactic form of a QoS constant, not a priority-to-QoS mapping.
+  - tests/test_boundary.py::test_a_line_is_exempt_only_by_being_listed_with_its_reason
+  - tests/test_boundary.py::test_core_qos_may_hold_the_ts_23_501_tables_and_nothing_else
+  - tests/test_boundary.py::test_the_qos_gate_catches_what_it_used_to_miss
+  - tests/test_boundary.py::test_the_qos_gate_leaves_what_is_not_qos_alone
+  note: 'Re-reviewed after RES-OP-10 (case amended on the owner''s ruling). core/qos.py holds the four TS 23.501 tables and two lookups, no other function and no priority; elsewhere a QoS literal in any statement, comparison, keyword or mapping, or a mission-critical 5QI outside a comparison, fails the gate, and an exemption is a reviewed entry with its reason. HEURISTIC: computed, float, string, positional and table-derived values are stated as not seen.'
 VP1-BND-013:
   verdict: partial
   by: independent review (agent)
@@ -908,35 +896,25 @@ VP1-FC-012:
     IF-PRI ranked highest and that the recorded decision is what the grant used. The in-tree profile question
     in FC-OP-12 also needs resolving.'
 VP1-FC-013:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-01'
   evidence:
-  - tests/test_floor.py::test_vp1_fc_013_duplicate_request_denied
+  - tests/test_floor.py::test_a_repeated_request_at_another_priority_is_repositioned
+  - tests/test_floor.py::test_vp1_fc_013_a_profile_s_queue_is_bounded_and_drains_in_declared_order
+  - tests/test_floor.py::test_vp1_fc_013_a_repeated_request_keeps_its_place
   - tests/test_floor.py::test_vp1_fc_013_queue_bounded_and_excess_denied_not_dropped
   - tests/test_floor.py::test_vp1_fc_013_queue_positions_reported
-  gap: 'Bounded depth and ''excess denied (QUEUE_FULL to p4), not dropped'' are asserted for depth 3.
-    ''Grants follow declared order'' is not asserted by any of the three listed tests: none drains the
-    queue, and queue_positions_reported uses equal priorities. The depth comes from a hand-built Policy,
-    not from a profile''s max_queue_depth. To close: in the FC-013 evidence, load a profile''s floor policy,
-    fill the queue beyond max_queue_depth with mixed priorities, drain it by releases, and assert the
-    grant sequence equals the declared order (priority, then arrival). test_vp1_fc_012_grant_follows_queue_order
-    partly does this and could be cited.'
+  note: 'Re-reviewed after RES-OP-10: with mcx prearranged-group''s own floor policy (depth 8), ten requests at mixed priorities leave the queue never over its depth, the excess denied queue-full and not dropped, and the queue drains in floor-priority then arrival order. A repeated request keeps its place or is repositioned (TS 24.380 6.3.5.4.4 items 4 and 8).'
 VP1-FC-014:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-01'
   evidence:
   - tests/test_floor.py::test_vp1_fc_014_deny_not_queue_when_queueing_disabled
-  - tests/test_floor.py::test_vp1_fc_014_no_queue_entry_created_ever
-  gap: 'Deny (QUEUEING_DISABLED) with an empty queue is asserted only with override_allowed=False. With
-    queueing disabled and override allowed, a higher-priority request creates a queue entry (the front
-    pre-emptor) and gets no Deny. This is documented as the accepted FC-OP-07 behaviour and exercised
-    by test_pre_emption_without_queueing_still_hands_over, and it contradicts the criterion as written.
-    The test name ''no_queue_entry_created_ever'' overclaims. To close: scope the criterion to non-pre-empting
-    requests (or to override disabled) and add a test that pins the override-enabled case explicitly,
-    or change the machine.'
-  note: Judged at ENV-UNIT, which §6 allows for FC-010..014.
+  - tests/test_floor.py::test_vp1_fc_014_no_queue_entry_for_any_request_when_override_is_off
+  - tests/test_floor.py::test_vp1_fc_014_with_override_only_a_pre_emptor_is_held
+  note: 'Re-reviewed after RES-OP-10 (case amended on the owner''s ruling): queueing disabled, an ordinary request is denied with no queue entry; with override allowed a pre-emptor is held in the one front place (6.3.4.4.7 item 2e, FC-OP-07), the talker revoked, with no Deny; any other request while it is held is denied (6.3.5.4.4 items 6 and 7).'
 VP1-FC-020:
   verdict: partial
   by: independent review (agent)

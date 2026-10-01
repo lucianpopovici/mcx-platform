@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.floor import (  # noqa: E402
+    Action,
     ActionType,
     DenyReason,
     Event,
@@ -278,14 +279,49 @@ def test_vp1_fc_013_queue_bounded_and_excess_denied_not_dropped():
     assert len(fc.queue) == 3
 
 
-def test_vp1_fc_013_duplicate_request_denied():
+def test_vp1_fc_013_a_repeated_request_keeps_its_place():
+    """TS 24.380 6.3.5.4.4 item 4: a participant already queued at the same
+    priority that asks again gets Queue Position Info and keeps its place.
+    It used to be denied, although it stayed queued and was granted later
+    (RES-OP-10 review)."""
     fc = machine()
     establish(fc, "holder", 300)
+    request(fc, "p0", 100)
     request(fc, "p1", 100)
     actions = request(fc, "p1", 100)
-    deny = [a for a in actions if a.type is ActionType.SEND_DENY][0]
-    assert deny.reason is DenyReason.ALREADY_QUEUED
-    assert fc.queue == ("p1",)
+    assert actions == (Action(ActionType.SEND_QUEUE_POSITION, target="p1",
+                              queue_position=2),)
+    assert fc.queue == ("p0", "p1")
+
+
+def test_a_repeated_request_without_queueing_is_answered_with_nothing():
+    """Item 4 without queueing negotiated: the held pre-emptor asking again
+    gets no Deny and no Queue Position Info, and is granted in its turn."""
+    fc = machine(Policy(queueing_enabled=False, override_allowed=True,
+                        max_queue_depth=0))
+    establish(fc, "a", 100)
+    request(fc, "b", 200)
+    assert request(fc, "b", 200) == ()
+    assert request(fc, "b", 150) == ()        # in front: nothing outranks it
+    expire(fc, T_STOP_TALKING_GRACE)
+    assert fc.holder == "b"
+
+
+@pytest.mark.vp("VP1-FC-013")
+def test_a_repeated_request_at_another_priority_is_repositioned():
+    """Item 8: a queued participant asking at another priority is moved to
+    follow the requests at its new priority."""
+    fc = machine(Policy(queueing_enabled=True, override_allowed=False,
+                        max_queue_depth=3))
+    establish(fc, "holder", 300)
+    for p, priority in (("p1", 100), ("p2", 50), ("p3", 50)):
+        request(fc, p, priority)
+    assert fc.queue == ("p1", "p2", "p3")
+    actions = request(fc, "p3", 200)
+    assert ActionType.SEND_DENY not in kinds(actions)
+    assert fc.queue == ("p3", "p1", "p2")
+    request(fc, "p3", 50)                      # down again: behind its peers
+    assert fc.queue == ("p1", "p2", "p3")
 
 
 def test_vp1_fc_013_queue_positions_reported():
@@ -339,12 +375,41 @@ def test_vp1_fc_014_deny_not_queue_when_queueing_disabled():
     assert fc.holder == "a"
 
 
-def test_vp1_fc_014_no_queue_entry_created_ever():
+def test_vp1_fc_014_no_queue_entry_for_any_request_when_override_is_off():
+    """Queueing disabled and override not allowed: whatever the priority, no
+    request is held. (The name this replaced, "no queue entry created ever",
+    claimed more: see the next test.)"""
     fc = machine(NO_QUEUEING)
     establish(fc, "a", 100)
     for p in ("b", "c", "d", "e"):
         request(fc, p, 255)
     assert fc.queue == ()
+
+
+def test_vp1_fc_014_with_override_only_a_pre_emptor_is_held():
+    """VP1-FC-014 as amended (RES-OP-10 ruling 3): queueing disabled, an
+    ordinary request is denied with no queue entry; a pre-emption, where
+    override is allowed, is held in the one front place TS 24.380 6.3.4.4.7
+    item 2e requires (FC-OP-07), with no Deny and no Queue Position Info;
+    anything after it is denied."""
+    fc = machine(Policy(queueing_enabled=False, override_allowed=True,
+                        max_queue_depth=0))
+    establish(fc, "a", 100)
+    for p, priority in (("c", 100), ("d", 50)):              # not higher: ordinary
+        actions = request(fc, p, priority)
+        assert [(x.reason, x.target) for x in actions if x.type is ActionType.SEND_DENY] \
+            == [(DenyReason.QUEUEING_DISABLED, p)]
+        assert fc.queue == ()
+    actions = request(fc, "b", 200)                          # higher: pre-emption
+    assert ActionType.SEND_DENY not in kinds(actions)
+    assert ActionType.SEND_QUEUE_POSITION not in kinds(actions)
+    assert [x.target for x in actions if x.type is ActionType.SEND_REVOKE] == ["a"]
+    assert (fc.state, fc.holder, fc.queue) == (FloorState.REVOKING, "a", ("b",))
+    for p, priority in (("e", 250), ("f", 200)):             # the place is taken
+        actions = request(fc, p, priority)
+        assert [(x.reason, x.target) for x in actions if x.type is ActionType.SEND_DENY] \
+            == [(DenyReason.QUEUEING_DISABLED, p)]
+    assert fc.queue == ("b",)
 
 
 def test_request_without_a_session_is_denied():
@@ -958,7 +1023,7 @@ def test_the_audit_feed_is_the_history_through_timers_denials_and_pre_emption():
         ("session-established", "a", T, "a", ()),
         ("media-received", "a", T, "a", ()),
         ("floor-request", "b", T, "a", ("b",)),
-        ("floor-request", "b", T, "a", ("b",)),                   # already queued
+        ("floor-request", "b", T, "a", ("b",)),                   # keeps its place
         ("floor-request", "c", T, "a", ("b", "c")),
         ("floor-request", "d", T, "a", ("b", "c", "d")),
         ("floor-request", "e", T, "a", ("b", "c", "d")),          # queue full
@@ -978,7 +1043,7 @@ def test_the_audit_feed_is_the_history_through_timers_denials_and_pre_emption():
               if a.type is ActionType.SEND_DENY]
     revokes = [a.revoke_reason.value for t in told for a in t.actions
                if a.type is ActionType.SEND_REVOKE]
-    assert denies == ["already-queued", "queue-full"]
+    assert denies == ["queue-full"]
     assert revokes == ["media-burst-too-long", "media-burst-too-long",
                        "media-burst-pre-empted", "media-burst-pre-empted"]
 
@@ -1077,3 +1142,38 @@ def test_a_final_transition_stands_when_its_record_fails():
         fc.handle(Event(EventType.SESSION_RELEASED), final=True)
     assert (fc.state, fc.holder, fc.queue) == (FloorState.RELEASED, None, ())
     assert fc.history[-1].event.type is EventType.SESSION_RELEASED
+
+
+@pytest.mark.vp("VP1-FC-013")
+def test_vp1_fc_013_a_profile_s_queue_is_bounded_and_drains_in_declared_order():
+    """With a profile's own floor policy (mcx prearranged-group, as its hook
+    returns it): requests beyond its max_queue_depth are denied, not dropped,
+    and the queue is granted in floor-priority order, then arrival order
+    (prior review gap of VP1-FC-013)."""
+    from core import loader
+    from core.hooks import MediaKind, Resolution, ResolutionKind, SessionRequest
+    lp = loader.load(ROOT / "profiles" / "mcx")
+    request_ = SessionRequest(request_id="q1", initiator="sip:h@mcptt.example",
+                              target="grp:alpha", call_type="prearranged-group",
+                              media=(MediaKind.VOICE,))
+    hook_policy = lp.hooks.session_policy.floor_policy(
+        request_, Resolution(kind=ResolutionKind.GROUP, members=("x",), group_id="g"))
+    fc = FloorControl(Policy.from_hook(hook_policy), clock=Clock())
+    depth = fc.policy.max_queue_depth
+    assert fc.policy.queueing_enabled and depth == 8
+    establish(fc, "holder", 255)                 # nothing outranks it
+    asks = [(f"p{i}", priority) for i, priority in
+            enumerate((10, 50, 10, 90, 50, 10, 90, 50, 70, 30))]
+    denied = []
+    for participant, priority in asks:
+        actions = request(fc, participant, priority)
+        denied += [a.target for a in actions if a.type is ActionType.SEND_DENY
+                   and a.reason is DenyReason.QUEUE_FULL]
+        assert len(fc.queue) <= depth
+    assert denied == ["p8", "p9"] and len(fc.queue) == depth
+    expected = [p for p, _ in sorted(asks[:depth], key=lambda a: (-a[1], asks.index(a)))]
+    granted = []
+    while fc.queue:
+        release(fc, fc.holder)
+        granted.append(fc.holder)
+    assert granted == expected == ["p3", "p6", "p1", "p4", "p7", "p0", "p2", "p5"]
