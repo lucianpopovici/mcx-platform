@@ -1308,21 +1308,32 @@ VP1-REL-001:
     R17x and blanks. Minor: absent (not empty) MCX_RELEASE is not run at process level, and the process
     test does not assert that the diagnostic names MCX_RELEASE.'
 VP1-REL-002:
-  verdict: fail
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-01'
   evidence:
+  - gate:VP1-REL-002
+  - tests/test_boundary.py::test_the_real_matrix_passes
+  - tests/test_boundary.py::test_the_matrix_gate_fails_when_a_combination_would_go_unrun
+  - tests/test_boundary.py::test_an_unsupported_release_is_an_error_not_a_skip
+  - tests/test_boundary.py::test_a_local_run_of_the_conformance_suite_covers_every_combination
+  - tests/test_boundary.py::test_a_ci_job_collects_exactly_its_combination
+  - tests/test_boundary.py::test_a_pytest_config_from_outside_the_workflow_is_refused
+  - tests/test_boundary.py::test_a_config_file_without_a_pytest_section_is_not_refused
+  - tests/test_conformance.py::test_every_call_type_is_requestable_or_reported_unreachable
+  - tests/test_conformance.py::test_every_refusal_speaks_only_codes_the_release_defines
+  - tests/test_conformance.py::test_every_floor_message_the_policy_can_send_exists_at_the_release
+  - tests/test_conformance.py::test_the_release_axis_changes_what_a_profile_can_carry
   - tests/test_release.py::test_every_supported_release_round_trips_a_basic_call
   - tests/test_release.py::test_the_release_is_independent_of_the_profile
-  gap: 'Neither listed test runs the conformance suite. One round-trips six Rel-13 floor messages per
-    release with no profile; the other only checks that Config accepts 3 profiles × releases 17 and 19.
-    The CI clause is contradicted by .github/workflows/ci.yml: the conformance matrix runs releases [17,
-    19] only, not the eight in core.release.SUPPORTED, and tests/test_conformance.py never reads MCX_RELEASE,
-    so the release axis of the matrix is inert. To close: have test_conformance.py load the profile at
-    the MCX_RELEASE it is given (failing if unset), extend the CI matrix to release 13..20 × {mcx, frmcs,
-    utility}, and add a gate asserting the matrix equals SUPPORTED × profiles.'
-  note: 'Fail rather than partial: the evidence cannot demonstrate the main clause, and the CI configuration
-    shows the opposite of ''every supported release''.'
+  note: 'Re-reviewed after RES-OP-08 (three rounds). CI runs {mcx, frmcs, utility} x Rel-13..20; all 24 combinations
+    pass locally with MCX_PROFILE/MCX_RELEASE set. The suite carries spelled-out release expectations (ad hoc
+    from Rel-18, warning 179 from Rel-17, Floor Revoke cause 7 from Rel-19), so a core whose release tables
+    ignore the release fails it alone. The gate reads the parsed workflow and refuses sampled or filtered
+    matrices, unpinned setup steps, altered suite commands or env, conditions, failure escapes, workflow/job
+    env, defaults, concurrency, trigger filters, pytest configuration and a root conftest. Residual (note):
+    an edit to tests/conftest.py that both drops tests and deselects the collection-count test would pass
+    the gate; it would show in review of that file.'
 VP1-REL-003:
   verdict: partial
   by: independent review (agent)

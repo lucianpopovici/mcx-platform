@@ -198,13 +198,15 @@ def test_the_release_is_independent_of_the_profile():
     base = {"MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
             "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": "/tmp/x/network.yaml",
             "MCX_DATA_DIR": "/tmp/x"}
+    from core.release import SUPPORTED
+    profiles = sorted(p.parent.name for p in (ROOT / "profiles").glob("*/profile.yaml"))
     seen = set()
-    for profile in ("mcx", "frmcs", "utility"):
-        for release in ("17", "19"):
+    for profile in profiles:
+        for release in SUPPORTED:
             cfg = Config.from_env(
-                {**base, "MCX_PROFILE": profile, "MCX_RELEASE": release})
+                {**base, "MCX_PROFILE": profile, "MCX_RELEASE": str(int(release))})
             seen.add((cfg.profile_names[0], cfg.release))
-    assert len(seen) == 6, seen
+    assert len(seen) == len(SUPPORTED) * len(profiles) == 24, seen
 
 
 # -- CA-12: the TS 24.379 signalling layer -------------------------------------

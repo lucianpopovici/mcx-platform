@@ -183,9 +183,12 @@ def test_a_failed_parameter_is_not_undone_by_a_later_pass():
 
 
 def test_gate_and_interop_evidence():
-    gates = v.from_gates("PASS VP1-BND-001  x\nFAIL VP1-BND-002  y\n       detail\n")
-    assert [(e.id, e.outcome) for e in gates] == [("gate:VP1-BND-001", "passed"),
-                                                 ("gate:VP1-BND-002", "failed")]
+    gates = v.from_gates("PASS VP1-BND-001  x\nFAIL VP1-BND-002  y\n       detail\n"
+                         "PASS VP1-REL-002  z\n")
+    assert [(e.id, e.outcome, e.cases) for e in gates] == [
+        ("gate:VP1-BND-001", "passed", ("VP1-BND-001",)),
+        ("gate:VP1-BND-002", "failed", ("VP1-BND-002",)),
+        ("gate:VP1-REL-002", "passed", ("VP1-REL-002",))]
     runs = v.from_interop([{"case": "VP1-SIG-001", "core": "kamailio", "passed": False}])
     assert [(e.id, e.outcome, e.cases) for e in runs] == [
         ("interop:kamailio", "failed", ("VP1-SIG-001",))]

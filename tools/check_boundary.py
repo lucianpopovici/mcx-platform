@@ -975,7 +975,208 @@ def check_ci_runs_both_suites(root: Path) -> List[str]:
                 violations.append(
                     f"{candidate}: contains a conditional or failure escape "
                     f"({escape.strip()})")
+        if candidate.endswith(".yml"):
+            violations += _workflow_escapes(candidate, text)
     return violations
+
+
+def _workflow_escapes(candidate: str, text: str) -> List[str]:
+    """The same ban read from the parsed workflow, so a key spelled any way
+    YAML allows (quoted, value on the next line) is still found."""
+    import yaml
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return [f"{candidate}: not valid YAML ({exc})"]
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return [f"{candidate}: no jobs"]
+    found = []
+    for name, job in jobs.items():
+        blocks = [(f"job {name}", job)]
+        if isinstance(job, dict) and isinstance(job.get("steps"), list):
+            blocks += [(f"job {name} step {i + 1}", st) for i, st in enumerate(job["steps"])]
+        for where, block in blocks:
+            if isinstance(block, dict):
+                for key in sorted({"if", "continue-on-error"} & set(block)):
+                    found.append(f"{candidate}: {where} has {key!r}, a conditional "
+                                 "or failure escape")
+    return found
+
+
+# The one way the conformance job may run its suite (RES-OP-08).
+CONFORMANCE_RUN = "python3 -m pytest tests/test_conformance.py -q"
+CONFORMANCE_ENV = {"MCX_PROFILE": "${{ matrix.profile }}",
+                   "MCX_RELEASE": "${{ matrix.release }}"}
+CI_ESCAPES = frozenset({"if", "continue-on-error", "services", "container"})
+CONFORMANCE_SETUP = [
+    {"uses": "actions/checkout@v4"},
+    {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
+    {"run": "pip install pyyaml pytest cryptography lxml"},
+]
+CI_WORKFLOW_ESCAPES = frozenset({"env", "defaults", "concurrency"})
+PYTEST_CONFIGS = tuple(f"{d}{n}" for d in ("", "tests/")
+                       for n in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"))
+# The section that makes each file a pytest configuration; pytest.ini always is.
+PYTEST_SECTIONS = {"pyproject.toml": r"^\s*\[tool\.pytest", "setup.cfg": r"^\s*\[tool:pytest\]",
+                   "tox.ini": r"^\s*\[pytest\]"}
+CI_TRIGGER_FILTERS = frozenset({"paths", "paths-ignore", "branches", "branches-ignore",
+                                "tags", "tags-ignore", "types"})
+
+
+def check_conformance_matrix(root: Path) -> List[str]:
+    """VP1-REL-002 / PLT-REL-007 (RES-OP-08): the CI conformance job runs
+    every in-tree profile at every supported release, passes both to the
+    suite, and the suite reads both. A matrix that samples releases, or a
+    suite that ignores one, leaves combinations nobody ran."""
+    import yaml
+    violations: List[str] = []
+    # The tree's own supported releases, read from core/release.py without
+    # running it: the members of `Release`, which SUPPORTED must be all of.
+    tree = _parse(root / CORE / "release.py")
+    members = [n.value.value for c in tree.body
+               if isinstance(c, ast.ClassDef) and c.name == "Release"
+               for n in c.body if isinstance(n, ast.Assign)
+               and isinstance(n.value, ast.Constant) and type(n.value.value) is int]
+    supported_all = any(
+        isinstance(n, (ast.Assign, ast.AnnAssign)) and "SUPPORTED" in
+        [_target_name(t) for t in (n.targets if isinstance(n, ast.Assign) else [n.target])]
+        and ast.unparse(n.value) == "tuple(Release)" for n in tree.body)
+    if not members or not supported_all:
+        return [f"{CORE}/release.py: SUPPORTED is not every member of Release; "
+                "this gate cannot tell which releases CI must run"]
+    SUPPORTED = members
+    workflow = root / ".github" / "workflows" / "ci.yml"
+    if not workflow.is_file():
+        return [f"{workflow.relative_to(root)}: not found"]
+    try:
+        doc = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        return [f"ci.yml: not valid YAML ({exc})"]
+    if not isinstance(doc, dict):
+        return ["ci.yml: not a workflow"]
+    # Every change: no path, branch or tag filter on the triggers. YAML 1.1
+    # reads the bare key `on` as True.
+    triggers = doc.get("on", doc.get(True))
+    if isinstance(triggers, dict):
+        for event, spec in triggers.items():
+            if event not in ("push", "pull_request"):
+                continue
+            if spec is not None and not isinstance(spec, dict):
+                violations.append(f"ci.yml: on.{event} is not a mapping")
+                continue
+            for key in sorted(set(spec or {}) & CI_TRIGGER_FILTERS):
+                violations.append(f"ci.yml: on.{event} is filtered by {key!r}")
+    if not (isinstance(triggers, (list, dict)) and
+            {"push", "pull_request"} <= set(triggers)):
+        violations.append("ci.yml: does not run on every push and pull request")
+    # Settings that reach every job from the top of the workflow: an env or
+    # default shell there changes how the suite step runs without touching it.
+    for key in sorted(set(doc) & CI_WORKFLOW_ESCAPES):
+        violations.append(f"ci.yml: workflow-level {key!r} reaches the conformance job")
+    # A pytest configuration file can narrow every combination from outside
+    # the workflow.
+    violations += _pytest_addopts(root)
+    jobs = doc.get("jobs")
+    conformance = jobs.get("conformance") if isinstance(jobs, dict) else None
+    if not isinstance(conformance, dict):
+        return violations + ["ci.yml: no conformance job"]
+    strategy = conformance.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if not isinstance(matrix, dict):
+        return violations + ["ci.yml conformance matrix is not a literal matrix"]
+    if strategy.get("fail-fast") is not False:
+        violations.append("ci.yml conformance strategy does not set fail-fast: false; "
+                          "one failure would cancel the combinations still running")
+    for key in sorted(set(strategy) - {"matrix", "fail-fast"}):
+        violations.append(f"ci.yml conformance strategy has {key!r}")
+    profiles = sorted(p.parent.name for p in (root / PROFILES).glob("*/profile.yaml"))
+    listed = matrix.get("profile")
+    if not isinstance(listed, list) or sorted(map(str, listed)) != profiles:
+        violations.append(f"ci.yml conformance matrix profiles {listed} "
+                          f"are not the in-tree profiles {profiles}")
+    releases = matrix.get("release")
+    if (not isinstance(releases, list)
+            or not all(type(r) is int for r in releases)
+            or sorted(releases) != sorted(SUPPORTED)):
+        violations.append(f"ci.yml conformance matrix releases {releases} are "
+                          f"not the supported releases {sorted(SUPPORTED)}")
+    for key in sorted(set(matrix) - {"profile", "release"}):
+        violations.append(f"ci.yml conformance matrix excludes or adds combinations ({key})")
+    # Nothing on the job or its steps may make a combination conditional or
+    # let it fail quietly.
+    steps = conformance.get("steps")
+    steps = steps if isinstance(steps, list) else []
+    for where, block in [("job", conformance)] + [
+            (f"step {i + 1}", st) for i, st in enumerate(steps)]:
+        if not isinstance(block, dict):
+            violations.append(f"ci.yml conformance {where} is not a mapping")
+            continue
+        for key in sorted(set(block) & CI_ESCAPES):
+            violations.append(f"ci.yml conformance {where} has {key!r}")
+        if "timeout-minutes" in block and not (
+                type(block["timeout-minutes"]) is int and block["timeout-minutes"] > 0):
+            violations.append(f"ci.yml conformance {where} has timeout-minutes "
+                              f"{block['timeout-minutes']!r}")
+    if "env" in conformance or "defaults" in conformance:
+        violations.append("ci.yml conformance job sets env or defaults at job level; "
+                          "the suite's inputs belong on its step")
+    # The steps before the suite are exactly the setup the suite needs: any
+    # other step could rewrite its environment, its configuration or pytest.
+    if steps[:-1] != CONFORMANCE_SETUP:
+        violations.append("ci.yml conformance job's steps before the suite are not "
+                          f"exactly {CONFORMANCE_SETUP}")
+    # Exactly one step runs the suite, with the matrix's values and nothing
+    # that narrows, overrides or swallows the run.
+    suite_steps = [st for st in steps if isinstance(st, dict) and (
+        "MCX_PROFILE" in (st.get("env") or {}) or "MCX_RELEASE" in (st.get("env") or {})
+        or "test_conformance" in str(st.get("run", "")))]
+    if len(suite_steps) != 1:
+        violations.append(f"ci.yml conformance job has {len(suite_steps)} steps that run "
+                          "or configure the suite; exactly one must")
+    for st in suite_steps:
+        if st.get("env") != CONFORMANCE_ENV:
+            violations.append("ci.yml conformance job does not pass the matrix's profile "
+                              f"and release to the suite (env {st.get('env')})")
+        if str(st.get("run", "")).strip() != CONFORMANCE_RUN:
+            violations.append(f"ci.yml conformance step runs {st.get('run')!r}, "
+                              f"not {CONFORMANCE_RUN!r}")
+        for key in sorted(set(st) - {"name", "env", "run"}):
+            violations.append(f"ci.yml conformance step has {key!r}")
+    suite = root / TESTS / "test_conformance.py"
+    source = suite.read_text(encoding="utf-8") if suite.is_file() else ""
+    try:
+        reads = {n.args[0].value for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.Call) and ast.unparse(n.func) == "os.environ.get"
+                 and n.args and isinstance(n.args[0], ast.Constant)}
+    except SyntaxError:
+        reads = set()
+    for name in ("MCX_PROFILE", "MCX_RELEASE"):
+        if name not in reads:
+            violations.append(f"{TESTS}/test_conformance.py does not read {name}")
+    return violations
+
+
+def _pytest_addopts(root: Path) -> List[str]:
+    """pytest configuration from outside the workflow (VP1-REL-002): options,
+    collection patterns or a collection hook would narrow every combination
+    without touching ci.yml. The suite needs none, so any pytest section in a
+    config file pytest could read, and any conftest.py above tests/, is
+    refused rather than interpreted."""
+    found = []
+    for name in PYTEST_CONFIGS:
+        path = root / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        section = PYTEST_SECTIONS.get(Path(name).name)
+        if section is None or re.search(section, text, re.MULTILINE):
+            found.append(f"{name}: configures pytest, which every conformance "
+                         "combination would run with (addopts, collection patterns)")
+    if (root / "conftest.py").is_file():
+        found.append("conftest.py: a root conftest can change what every conformance "
+                     "combination collects")
+    return found
 
 
 def check_per_profile_suite(root: Path) -> List[str]:
@@ -1103,6 +1304,8 @@ CHECKS: Tuple[Tuple[str, str, Callable[[Path], List[str]]], ...] = (
     ("VP1-BND-016", "time discipline", check_time_discipline),
     ("VP1-BND-020", "CI runs both suites per change", check_ci_runs_both_suites),
     ("VP1-BND-021", "per-profile conformance suite exists", check_per_profile_suite),
+    ("VP1-REL-002", "conformance matrix: every profile at every release",
+     check_conformance_matrix),
     ("VP1-BND-022", "release knowledge is in one module",
      check_release_knowledge_is_in_one_module),
     ("VP1-BND-023", "release is a stated deployment parameter",

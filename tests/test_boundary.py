@@ -219,6 +219,21 @@ def test_ci_check_detects_a_failure_escape(tmp_path):
     assert any("escape" in v for v in violations)
 
 
+@pytest.mark.parametrize("escape", [
+    "    if:\n      false\n", '    "continue-on-error": true\n'])
+def test_ci_check_reads_escapes_from_the_parsed_workflow(tmp_path, escape):
+    """Review of RES-OP-08: a key YAML allows in another spelling is the
+    same escape, whatever the text looks like."""
+    _stage(tmp_path)
+    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
+    workflow.parent.mkdir(parents=True, exist_ok=True)
+    workflow.write_text("jobs:\n  t:\n" + escape +
+                        "    steps: [{run: check_boundary mcx frmcs}]\n",
+                        encoding="utf-8")
+    violations = gate.check_ci_runs_both_suites(tmp_path)
+    assert any("job t has" in v for v in violations), violations
+
+
 def _stage(root: Path, core_extra: str = "") -> None:
     """Build a minimal tree the checks can run against."""
     (root / "core").mkdir(parents=True, exist_ok=True)
@@ -392,3 +407,211 @@ def test_the_state_machine_gate_catches_an_unjustified_profile_read(
     by a policy flag passed."""
     violations = _state_machines(tmp_path, rel, find, replace)
     assert violations and any(expect in v for v in violations), violations
+
+
+# --------------------------------------------------------------------------
+# VP1-REL-002 — the conformance matrix (RES-OP-08)
+# --------------------------------------------------------------------------
+
+
+def _matrix_tree(tmp_path, rel=None, find=None, replace=None):
+    files = [".github/workflows/ci.yml", "core/release.py", "tests/test_conformance.py"]
+    files += [str(p.relative_to(ROOT)) for p in (ROOT / "profiles").glob("*/profile.yaml")]
+    for name in files:
+        dst = tmp_path / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        text = (ROOT / name).read_text(encoding="utf-8")
+        if name == rel:
+            assert find in text, find
+            text = text.replace(find, replace, 1)
+        dst.write_text(text, encoding="utf-8")
+    return gate.check_conformance_matrix(tmp_path)
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_the_real_matrix_passes(tmp_path):
+    assert _matrix_tree(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-REL-002")
+@pytest.mark.parametrize("rel,find,replace,expect", [
+    (".github/workflows/ci.yml", "release: [13, 14, 15, 16, 17, 18, 19, 20]",
+     "release: [17, 19]", "not the supported releases"),
+    (".github/workflows/ci.yml", "profile: [mcx, frmcs, utility]",
+     "profile: [mcx, frmcs]", "not the in-tree profiles"),
+    (".github/workflows/ci.yml", "release: [13, 14, 15, 16, 17, 18, 19, 20]",
+     "release: [13, 14, 15, 16, 17, 18, 19, 20]\n        exclude: [{release: 13}]",
+     "excludes or adds"),
+    (".github/workflows/ci.yml", "MCX_RELEASE: ${{ matrix.release }}",
+     "MCX_RELEASE: 19", "does not pass the matrix"),
+    ("tests/test_conformance.py", 'os.environ.get("MCX_RELEASE")',
+     'os.environ.get("MCX_REL")', "does not read MCX_RELEASE"),
+    ("core/release.py", "    REL_20 = 20\n", "    REL_20 = 20\n    REL_21 = 21\n",
+     "not the supported releases"),
+    ("core/release.py", "SUPPORTED: Tuple[Release, ...] = tuple(Release)",
+     "SUPPORTED: Tuple[Release, ...] = (Release.REL_17, Release.REL_19)",
+     "cannot tell which releases"),
+    # Review of RES-OP-08: the step's command, the parsed keys and the
+    # triggers, not just the matrix.
+    (".github/workflows/ci.yml", "run: python3 -m pytest tests/test_conformance.py -q", "run: python3 -m pytest tests/test_conformance.py -q || true", "not 'python3 -m pytest"),
+    (".github/workflows/ci.yml", "run: python3 -m pytest tests/test_conformance.py -q", "run: MCX_RELEASE=17 python3 -m pytest tests/test_conformance.py -q",
+     "not 'python3 -m pytest"),
+    (".github/workflows/ci.yml", "run: python3 -m pytest tests/test_conformance.py -q", "run: python3 -m pytest tests/test_conformance.py -q -k 'not release'", "not 'python3 -m pytest"),
+    (".github/workflows/ci.yml", "run: python3 -m pytest tests/test_conformance.py -q", "run: echo skipped", "not 'python3 -m pytest"),
+    (".github/workflows/ci.yml", "        run: python3 -m pytest tests/test_conformance.py -q", "        run: python3 -m pytest tests/test_conformance.py -q\n        if:\n          false",
+     "step 4 has 'if'"),
+    (".github/workflows/ci.yml", "    needs: boundary\n    strategy:",
+     '    needs: boundary\n    "continue-on-error": true\n    strategy:',
+     "job has 'continue-on-error'"),
+    (".github/workflows/ci.yml", "fail-fast: false", "fail-fast: true", "fail-fast: false"),
+    (".github/workflows/ci.yml", "on: [push, pull_request]",
+     "on:\n  push:\n    paths-ignore: [docs/**]\n  pull_request:",
+     "filtered by 'paths-ignore'"),
+    (".github/workflows/ci.yml", "release: [13, 14, 15, 16, 17, 18, 19, 20]",
+     'release: ["Rel-13", 14, 15, 16, 17, 18, 19, 20]', "not the supported releases"),
+    (".github/workflows/ci.yml", "release: [13, 14, 15, 16, 17, 18, 19, 20]",
+     "release: ${{ fromJSON(vars.RELEASES) }}", "not the supported releases"),
+    (".github/workflows/ci.yml", "      matrix:\n        profile", "      matrix: ${{ fromJSON(vars.M) }}\n      x:\n        profile",
+     "not a literal matrix"),
+    (".github/workflows/ci.yml", "    needs: boundary\n    strategy:",
+     "    needs: boundary\n    env:\n      MCX_RELEASE: 17\n    strategy:", "job level"),
+    (".github/workflows/ci.yml", "      - run: pip install pyyaml pytest cryptography lxml\n      # PLT-REL-007",
+     "      - run: pip install pyyaml pytest cryptography lxml\n"
+     "      - run: python3 -m pytest tests/test_conformance.py -q -k mcx\n      # PLT-REL-007",
+     "2 steps that run"),
+    ("tests/test_conformance.py", 'os.environ.get("MCX_RELEASE")',
+     'os.environ.get("MCX_REL")  # os.environ.get("MCX_RELEASE")', "does not read MCX_RELEASE"),
+    (".github/workflows/ci.yml", "        run: python3 -m pytest tests/test_conformance.py -q",
+     "        run: python3 -m pytest tests/test_conformance.py -q\n        shell: true {0}",
+     "step has 'shell'"),
+    # Second review of RES-OP-08: what reaches the suite step from outside it.
+    (".github/workflows/ci.yml", "on: [push, pull_request]",
+     "on: [push, pull_request]\nenv:\n  PYTEST_ADDOPTS: \"-k 'not release'\"",
+     "workflow-level 'env'"),
+    (".github/workflows/ci.yml", "on: [push, pull_request]",
+     "on: [push, pull_request]\ndefaults: {run: {shell: \"true {0}\"}}",
+     "workflow-level 'defaults'"),
+    (".github/workflows/ci.yml", "on: [push, pull_request]", "on: {workflow_dispatch: }",
+     "every push and pull request"),
+    (".github/workflows/ci.yml", "on: [push, pull_request]", "on: {push: }", "every push and pull request"),
+    (".github/workflows/ci.yml", "on: [push, pull_request]",
+     "on: {push: [paths-ignore], pull_request: }", "on.push is not a mapping"),
+    (".github/workflows/ci.yml", "      - run: pip install pyyaml pytest cryptography lxml\n      # PLT-REL-007",
+     "      - run: pip install pyyaml pytest cryptography lxml\n"
+     "      - run: echo \"PYTEST_ADDOPTS=-k mcx\" >> $GITHUB_ENV\n      # PLT-REL-007",
+     "steps before the suite"),
+    (".github/workflows/ci.yml", "      - run: pip install pyyaml pytest cryptography lxml\n      # PLT-REL-007",
+     "      - run: pip install pyyaml pytest cryptography lxml\n"
+     "      - run: printf '[pytest]\\naddopts = -k mcx\\n' > pytest.ini\n      # PLT-REL-007",
+     "steps before the suite"),
+    (".github/workflows/ci.yml", "      - run: pip install pyyaml pytest cryptography lxml\n      # PLT-REL-007",
+     "      - run: pip install pyyaml ./fake-pytest cryptography lxml\n      # PLT-REL-007",
+     "steps before the suite"),
+    (".github/workflows/ci.yml", "19, 20]\n    steps:\n      - uses: actions/checkout@v4\n",
+     "19, 20]\n    steps:\n      - uses: actions/checkout@v4\n        with: {ref: v0.1}\n",
+     "steps before the suite"),
+    (".github/workflows/ci.yml", "on: [push, pull_request]",
+     "on: [push, pull_request]\nconcurrency: {group: ci, cancel-in-progress: true}",
+     "workflow-level 'concurrency'"),
+], ids=["sampled-releases", "missing-profile", "exclude", "fixed-release",
+        "suite-ignores-release", "new-release", "supported-subset",
+        "or-true", "inline-override", "deselect", "not-the-suite", "if-next-line",
+        "quoted-continue-on-error", "fail-fast", "paths-ignore", "string-release",
+        "expression-releases", "expression-matrix", "job-env", "second-step",
+        "read-only-in-comment", "step-shell",
+        "workflow-env", "workflow-defaults", "dispatch-only", "push-only", "trigger-list",
+        "github-env-step", "pytest-ini-step", "fake-pytest", "old-checkout",
+        "concurrency"])
+def test_the_matrix_gate_fails_when_a_combination_would_go_unrun(
+        tmp_path, rel, find, replace, expect):
+    """RES-OP-08: CI ran releases 17 and 19 of eight, and the suite ignored
+    MCX_RELEASE, so the release axis changed nothing."""
+    violations = _matrix_tree(tmp_path, rel, find, replace)
+    assert violations and any(expect in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_an_unsupported_release_is_an_error_not_a_skip(tmp_path):
+    """The suite refuses an MCX_RELEASE it cannot parse at collection, so a
+    misconfigured CI job fails instead of passing with nothing run."""
+    import os
+    import subprocess
+    env = dict(os.environ, MCX_RELEASE="12", MCX_PROFILE="mcx")
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                        str(ROOT / "tests" / "test_conformance.py")],
+                       cwd=ROOT, env=env, capture_output=True, text=True)
+    assert r.returncode != 0 and "MCX_RELEASE='12'" in (r.stdout + r.stderr)
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_a_local_run_of_the_conformance_suite_covers_every_combination(monkeypatch):
+    """Unset, each axis is all of its values: a developer's `pytest tests/`
+    runs the whole matrix, not one default combination."""
+    import importlib
+    monkeypatch.delenv("MCX_RELEASE", raising=False)
+    monkeypatch.delenv("MCX_PROFILE", raising=False)
+    monkeypatch.syspath_prepend(str(ROOT))
+    conf = importlib.reload(importlib.import_module("tests.test_conformance"))
+    from core.release import SUPPORTED
+    assert conf.RELEASES == list(SUPPORTED)
+    assert conf.PROFILE_NAMES == sorted(
+        p.parent.name for p in (ROOT / "profiles").glob("*/profile.yaml"))
+
+
+@pytest.mark.vp("VP1-REL-002")
+@pytest.mark.parametrize("given", ["13", "20"])
+def test_a_ci_job_collects_exactly_its_combination(given):
+    """What a CI job collects at MCX_RELEASE=N is the whole suite at Rel-N:
+    every test function in the file once, release-parametrised ones at Rel-N
+    only. Counted from the file itself, so a filter that drops any test --
+    profile or release -- is seen."""
+    import ast as _ast
+    defined = sorted(n.name for n in _ast.parse(
+        (ROOT / "tests" / "test_conformance.py").read_text(encoding="utf-8")).body
+        if isinstance(n, _ast.FunctionDef) and n.name.startswith("test_"))
+    import os
+    import subprocess
+    env = dict(os.environ, MCX_RELEASE=given, MCX_PROFILE="frmcs")
+    r = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                        "-p", "no:cacheprovider", str(ROOT / "tests" / "test_conformance.py")],
+                       cwd=ROOT, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    ids = [line for line in r.stdout.splitlines() if "::" in line]
+    assert sorted(i.split("::")[1].split("[")[0] for i in ids) == defined, ids
+    at_release = [i for i in ids if "Rel-" in i]
+    assert len(at_release) == 3
+    assert all(f"Rel-{given}]" in i and "frmcs" in i for i in at_release), at_release
+
+
+@pytest.mark.vp("VP1-REL-002")
+@pytest.mark.parametrize("name,text", [
+    ("pytest.ini", "[pytest]\naddopts = -k mcx\n"),
+    ("pytest.ini", "[pytest]\npython_functions = test_profile*\n"),
+    ("pyproject.toml", "[tool.pytest.ini_options]\naddopts = \"--deselect x\"\n"),
+    ("setup.cfg", "[tool:pytest]\n  addopts=-q -k frmcs\n"),
+    ("tox.ini", "[pytest]\naddopts = -m slow\n"),
+    ("tests/tox.ini", "[pytest]\naddopts = -k \"not release\"\n"),
+    ("tests/setup.cfg", "[tool:pytest]\naddopts = -k \"not release\"\n"),
+    ("tests/pytest.ini", "[pytest]\n"),
+    ("conftest.py", "def pytest_collection_modifyitems(items):\n    items[:] = items[:1]\n"),
+])
+def test_a_pytest_config_from_outside_the_workflow_is_refused(tmp_path, name, text):
+    """Reviews of RES-OP-08: options, patterns or a collection hook from a
+    config file reach every combination without touching ci.yml."""
+    assert _matrix_tree(tmp_path) == []
+    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    violations = gate.check_conformance_matrix(tmp_path)
+    assert any(v.startswith(name + ":") for v in violations), violations
+
+
+@pytest.mark.vp("VP1-REL-002")
+@pytest.mark.parametrize("name,text", [
+    ("tox.ini", "[testenv]\ncommands = pytest\n"),
+    ("setup.cfg", "[metadata]\nname = x\n"),
+    ("pyproject.toml", "[project]\nname = \"x\"\n"),
+])
+def test_a_config_file_without_a_pytest_section_is_not_refused(tmp_path, name, text):
+    assert _matrix_tree(tmp_path) == []
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    assert gate.check_conformance_matrix(tmp_path) == []
