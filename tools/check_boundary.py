@@ -499,6 +499,7 @@ FLOOR_POLICY_PARAMETERS = frozenset({
     "timers_ms", "timer",                       # timers (PLT-PRF-031)
     "queueing_enabled", "override_allowed",     # TS 24.380 configuration
     "max_queue_depth", "initial_grant_to_initiator",
+    "preemption_at_full_queue",                 # FC-OP-07, 6.3.4.4.7 item 2e
 })
 STATE_MACHINE_PROFILE_READS: Dict[str, frozenset] = {
     "core/floor.py": frozenset(),
@@ -508,7 +509,8 @@ STATE_MACHINE_PROFILE_READS: Dict[str, frozenset] = {
         "admission",    # declared reason codes (PLT-ICD-001 5.1 POST-3)
         "identity",     # declared domains (3.2 POST-3; the ad hoc group id)
         "call_type",    # declared model (5.2 POST-1), private vs group (6.3.5.5),
-                        # the ad hoc list limit (17.4.2.2 step 6, ICD 5.2)
+                        # the ad hoc list limit (17.4.2.2 step 6, ICD 5.2),
+                        # group_over_limit (6.3.5.5, owner ruling 2026-10-16)
     }),
     # Given the call types, not the profile; reads each one's id and
     # mc_signature (its own docstring; not enforced here).

@@ -688,9 +688,11 @@ def test_policy_built_from_hook_floor_policy():
         override_allowed = False
         max_queue_depth = 5
         timers_ms = {T_STOP_TALKING: 1234}
+        preemption_at_full_queue = "insert"
 
     p = Policy.from_hook(FakeFloorPolicy())
     assert p.max_queue_depth == 5
+    assert p.preemption_at_full_queue == "insert"
     assert p.timer(T_STOP_TALKING) == 1234
 
 

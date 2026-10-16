@@ -188,6 +188,9 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
            "MCX_SESSION_EXPIRES": "1800",
+           "MCX_HTTP_TLS": "off",
+           "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
+           "MCX_LOCATION_REPORTS": "read",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
     env.update(over)
     return env
@@ -401,7 +404,8 @@ def test_guard_runs_before_anything_acts_on_the_request(core, rt):
     bad = msg("INVITE", U[1], "bad1", 1, U[0], U[1]).replace(b"CSeq: 1 INVITE\r\n", b"")
     core.on_bytes(bad, f)
     assert f.codes() == [400] and called == []
-    assert rt.store.audit_records() == []
+    # Nothing but the process's own startup record (owner ruling 2026-10-16).
+    assert [r["type"] for r in rt.store.audit_records()] == ["configuration-accepted"]
 
 
 def test_unknown_session_bye_is_answered_481(core):
@@ -839,7 +843,9 @@ def test_client_auth_has_no_default_and_rejects_nonsense(tmp_path, pki, clock):
 def test_sip_disabled_when_no_listen_configured(tmp_path, pki):
     e = sip_env(tmp_path, pki)
     del e["MCX_SIP_LISTEN"]
-    from service.config import Config
+    from service.config import SIP_ONLY, Config
+    for key in SIP_ONLY:          # refused without SIP (owner ruling 2026-10-16)
+        del e[key]
     assert Config.from_env(e).sip is None
 
 

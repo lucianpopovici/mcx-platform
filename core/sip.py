@@ -312,6 +312,18 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     IDENTITY_NOT_AUTHENTICATED: Status.FORBIDDEN,
 }
 
+# Not covered by that setting: a resolver that cannot answer is a back-end
+# failure with no warning text, and a bare 480 would present it as the callee
+# being away (review of the 2026-10-16 settings).
+KEEP_503 = frozenset({RESOLVER_UNAVAILABLE})
+
+# The statuses a deployment may give the refusals mapped to 503 above
+# (MCX_SERVICE_REFUSAL_STATUS, owner ruling 2026-10-16 on SIP-OP-10).
+SERVICE_REFUSAL_STATUS: Mapping[int, Status] = {
+    503: Status.SERVICE_UNAVAILABLE,
+    480: Status.TEMPORARILY_UNAVAILABLE,
+}
+
 # TS 24.379 clause 4.4.1: the RFC 3261 warn-code is always 399 (miscellaneous
 # warning). The 3-digit MC code is part of the quoted warn-text, not the
 # warn-code -- codes below 300 are not legal RFC 3261 warn-codes at all.
@@ -794,10 +806,24 @@ class Adapter:
     """Renders abstract signals into TS 24.379 messages and parses inbound ones."""
 
     def __init__(self, local_uri: str, release: Release,
-                 call_types: Sequence[Any] = ()) -> None:
+                 call_types: Sequence[Any] = (), *,
+                 service_refusal_status: int = 503,
+                 read_location: bool = True) -> None:
         """`call_types` are the loaded profile's; the adapter reads only each
         one's `id` and `mc_signature` (PLT-ICD-001 2.6) and learns nothing
-        else about the profile."""
+        else about the profile.
+
+        `service_refusal_status` (MCX_SERVICE_REFUSAL_STATUS, SIP-OP-10) is the
+        status of every refusal REASON_TO_STATUS maps to 503 but those in
+        KEEP_503: 503, or 480.
+        `read_location` (MCX_LOCATION_REPORTS, ADHOC-OP-03): False ignores
+        the client's location report. The defaults are the decided behaviour;
+        the service always passes the deployment's stated values."""
+        if service_refusal_status not in SERVICE_REFUSAL_STATUS:
+            raise ValueError(f"service refusal status {service_refusal_status!r} "
+                             f"is not one of {sorted(SERVICE_REFUSAL_STATUS)}")
+        self._service_status = SERVICE_REFUSAL_STATUS[service_refusal_status]
+        self._read_location = read_location is True
         self._local = local_uri
         self._host = _host_of(local_uri)
         self._by_signature: Dict[mcinfo.Signature, str] = {}
@@ -943,6 +969,8 @@ class Adapter:
         (185) or step 5 (186).
         """
         status = REASON_TO_STATUS.get(reason_code, Status.SERVER_ERROR)
+        if status is Status.SERVICE_UNAVAILABLE and reason_code not in KEEP_503:
+            status = self._service_status
         headers = self._common(context)
         info = self._adhoc_info(invite) if authorisation else None
         if info is not None and (info.emergency or info.imminent_peril) and \
@@ -1123,7 +1151,8 @@ class Adapter:
             # the client's location report, when it sent one. The serving
             # cell only; what the cell means is the profile's (section 2.8),
             # applied by the session layer.
-            location=_location(content_type, message.body),
+            location=_location(content_type, message.body) if self._read_location
+            else None,
             attributes=attributes,
             # Clause 17: an ad hoc call's members are listed or described,
             # never a group the core already knows (PLT-ICD-001 section 3.5).

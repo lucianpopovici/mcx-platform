@@ -202,6 +202,10 @@ class Policy:
     override_allowed: bool = False
     max_queue_depth: int = 0
     timers_ms: Mapping[str, int] = field(default_factory=dict)
+    # FC-OP-07, a profile setting since 2026-10-16: "insert" a pre-emptor in
+    # front of a queue already at its depth (6.3.4.4.7 item 2e, one entry
+    # beyond it), or "deny" it queue-full. The hook's value has no default.
+    preemption_at_full_queue: str = "deny"
 
     def timer(self, name: str) -> int:
         return self.timers_ms.get(name, DEFAULT_TIMERS_MS.get(name, 0))
@@ -215,6 +219,7 @@ class Policy:
             override_allowed=floor_policy.override_allowed,
             max_queue_depth=floor_policy.max_queue_depth,
             timers_ms=dict(floor_policy.timers_ms),
+            preemption_at_full_queue=floor_policy.preemption_at_full_queue,
         )
 
 
@@ -350,8 +355,13 @@ class FloorControl:
             raise FloorInvariantViolation(
                 f"state {self._state.value} must have no floor holder, "
                 f"found {self._holder!r}")
-        # PLT-FC-006: the queue never exceeds the declared depth.
-        if len(self._queue) > self._policy.max_queue_depth and \
+        # PLT-FC-006 as amended 2026-10-16 (VP1-FC-013): the queue never
+        # exceeds the declared depth, plus, where the profile chose "insert",
+        # the one pre-emptor held in front of a full queue (6.3.4.4.7 item 2e).
+        allowed = self._policy.max_queue_depth + (
+            1 if self._policy.preemption_at_full_queue == "insert" and
+            any(e.front for e in self._queue) else 0)
+        if len(self._queue) > allowed and \
                 self._policy.queueing_enabled:
             raise FloorInvariantViolation(
                 f"queue depth {len(self._queue)} exceeds declared maximum "
@@ -490,7 +500,13 @@ class FloorControl:
         if not self._policy.queueing_enabled:
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.QUEUEING_DISABLED)]
-        if len(self._queue) >= self._policy.max_queue_depth:
+        # With "insert", the pre-emptor held in front is the one entry beyond
+        # the depth (6.3.4.4.7 item 2e); the depth bounds the others, so a
+        # queued request that asks again at a new priority (6.3.5.4.4 item 8)
+        # keeps a place it already had (review of the 2026-10-16 settings).
+        occupied = len(self._queue) if self._policy.preemption_at_full_queue != "insert" \
+            else sum(1 for e in self._queue if not e.front)
+        if occupied >= self._policy.max_queue_depth:
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.QUEUE_FULL)]
         self._arrivals += 1
@@ -571,15 +587,17 @@ class FloorControl:
         if already queued (item 2e) -- whether or not queueing was
         negotiated. Queue Position Info only where it was (item 2f).
 
-        One case is refused rather than followed: a queue already at its
-        declared depth, with the pre-emptor not in it. Inserting would break
-        the depth the profile declared (PLT-FC-006); pre-empting without
-        inserting would revoke a talker for nobody, which is what this
-        machine used to do with queueing disabled. The request is then an
-        ordinary one and is denied as queue-full.
+        A queue already at its declared depth, with the pre-emptor not in
+        it, is the profile's choice (FC-OP-07, `preemption_at_full_queue`).
+        "insert" follows item 2e: the pre-emptor goes in front, one entry
+        beyond the declared depth. "deny", a recorded deviation, keeps the
+        depth (PLT-FC-006): pre-empting without inserting would revoke a
+        talker for nobody, so the request is an ordinary one and is denied
+        queue-full.
         """
         queued = any(e.participant == participant for e in self._queue)
         if not queued and self._policy.queueing_enabled and \
+                self._policy.preemption_at_full_queue != "insert" and \
                 len(self._queue) >= self._policy.max_queue_depth:
             return self._enqueue(participant, priority)
         self._arrivals += 1

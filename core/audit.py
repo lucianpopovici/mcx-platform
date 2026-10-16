@@ -27,6 +27,10 @@ class RecordType(Enum):
     SESSION_FAILED = "session-failed"
     FLOOR_TRANSITION = "floor-transition"
     BINDING_CHANGED = "binding-changed"
+    # Once per process start, when the configuration has been accepted and
+    # before any listener binds: the deployment's stated behaviour settings
+    # and which of them depart from the standard (owner ruling 2026-10-16).
+    CONFIGURATION_ACCEPTED = "configuration-accepted"
 
 
 @dataclass(frozen=True)

@@ -233,6 +233,7 @@ class TableSessionPolicy:
             queueing_enabled=f.queueing_enabled,
             override_allowed=f.override_allowed,
             max_queue_depth=f.max_queue_depth,
+            preemption_at_full_queue=f.preemption_at_full_queue,
             timers_ms=dict(f.timers_ms),
         )
 

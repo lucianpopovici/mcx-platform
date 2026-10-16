@@ -295,16 +295,22 @@ class SipCore:
                              for ct in runtime.loaded.profile.call_types}
         self.local_uri = local_uri
         self.clock = clock
+        sip_cfg = runtime.config.sip
+        if sip_cfg is None:
+            raise ValueError("SIP requires MCX_SIP_* configuration")
         self.adapter = Adapter(local_uri, runtime.config.release,
-                               runtime.loaded.profile.call_types)
+                               runtime.loaded.profile.call_types,
+                               service_refusal_status=sip_cfg.service_refusal_status,
+                               read_location=sip_cfg.location_reports == "read")
+        # SIP-OP-18 item 6, a deployment setting since 2026-10-16
+        # (MCX_DIALOG_TAKEOVER): "never" keeps every dialog on the connection
+        # it was established on.
+        self._takeover = sip_cfg.dialog_takeover == "same-party"
         self.guard = InboundGuard()
         self.registrations = RegistrationStore(clock)
         self.server = ServerTransactions(clock, t1=t1)
         self.client = ClientTransactions(clock, t1=t1)
         self.flows_by_user: Dict[str, Any] = {}
-        sip_cfg = runtime.config.sip
-        if sip_cfg is None:
-            raise ValueError("SIP requires MCX_SIP_* configuration")
         # RFC 4028: the interval asked for, and the cap on a longer one.
         self._session_expires = sip_cfg.session_expires
         # From the network profile (ICD-OP-08, ICD-OP-10).
@@ -1292,7 +1298,7 @@ class SipCore:
         """
         if flow is bound:
             return True
-        if not moving or flow in retired:
+        if not moving or not self._takeover or flow in retired:
             return False
         if getattr(flow, "peer_is_core", False):
             shared = set(getattr(flow, "peer_dns", ())) & \

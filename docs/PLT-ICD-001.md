@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.21 (draft)
+**Version:** 0.22 (draft)
 **Date:** 2026-09-29
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -143,6 +143,26 @@ no_answer_s: 32        # seconds an invited member may ring
 
 All three in-tree profiles declare 32 for every call type, which keeps the
 previous behaviour. The value per call type is the profile owner's choice.
+
+**Over the participant limit (since v0.22).** Each call type also declares
+what happens to a group call whose session decision allows fewer
+participants than the group has (§5.2), and each floor policy declares a
+pre-emptor's place at a full queue (§5.3 POST-5):
+
+```yaml
+group_over_limit: truncate      # or refuse
+floor:
+  preemption_at_full_queue: deny   # or insert
+```
+
+| ID | Rule |
+|---|---|
+| ICD-LIM-001 | `group_over_limit` is required on every call type, `truncate` or `refuse`, with no default. Anything else, or an absent key, is a load error. |
+| ICD-LIM-002 | `floor.preemption_at_full_queue` is required in every floor policy, `insert` or `deny`, with no default. Anything else, or an absent key, is a load error. |
+| ICD-LIM-003 | `refuse` and `deny` depart from TS 24.379 6.3.5.5 and TS 24.380 6.3.4.4.7 item 2e respectively. A profile may declare them; the service reports each one at startup (log, health document `deviations`, and the `configuration-accepted` audit record). |
+
+The in-tree profiles declare `truncate` and `deny` everywhere: the decisions
+as they stood (PLT-VP-R1 RES-OP-12 ruling 1, FC-OP-07).
 
 
 ### 2.8 Network profile (deployment data, not a hook and not the service profile)
@@ -473,7 +493,8 @@ participant limit is the decision's, applied by the core; admission does not
 apply it. A session over it:
 
 - a group call (a `GROUP` resolution, for a call type that is not a private
-  call) is **not refused**: only `max_participants` participants take part,
+  call) whose call type declares `group_over_limit: truncate` is **not
+  refused**: only `max_participants` participants take part,
   the initiator always among them when a member and the others in the
   resolver's order, and the 200 OK to the originator carries warning
   `122 too many participants` (6.3.5.5, 10.1.1.4.1). The platform has no
@@ -482,6 +503,9 @@ apply it. A session over it:
   IF-SES `floor_policy` and IF-BER `select` see the members that take part;
   A limit that would leave only the initiator (1, on a group the initiator
   belongs to) invites no one, and is refused instead, `participant-limit-exceeded`;
+- a group call whose call type declares `group_over_limit: refuse` (since
+  v0.22, a recorded deviation from 6.3.5.5, reported at startup) is refused
+  `participant-limit-exceeded`, SIP 486 with warning 122;
 - an ad hoc call is refused, `adhoc-too-many-participants` (warning 189);
 - anything else (a private call whose target resolved to a group, a broadcast
   area) is refused, `participant-limit-exceeded`: SIP 486 with warning
@@ -507,12 +531,29 @@ data-only sessions.
 3. `timers_ms` keys are TS 24.380 timer names. Unknown keys are a contract
    violation, detected at profile validation.
 4. Omitted timers take the core's specification defaults.
+5. `preemption_at_full_queue` is `"insert"` or `"deny"` (since v0.22). It
+   decides a pre-emptor's place when the queue is already at
+   `max_queue_depth` and the pre-emptor is not in it: `insert` follows TS
+   24.380 6.3.4.4.7 item 2e, putting it in front of every queued request, one
+   entry beyond the declared depth until it is granted; `deny`, a recorded
+   deviation (PLT-VP-R1 FC-OP-07), treats it as an ordinary request, denied
+   queue-full, and the talker keeps the floor. It takes effect only where
+   queueing and override are both enabled. With `insert`, the declared depth
+   bounds the ordinary entries; the pre-emptor in front is the one beyond it.
+   It must equal the call type's declared `floor.preemption_at_full_queue`
+   (checked by the core): what the service reports at startup is what runs.
+   The startup report lists `deny` where the call type declares queueing and
+   override; a hook that enables both where the declaration does not has the
+   deviation named in that session's `session-established` record
+   (`deviations`).
 
 **Checked by the core (since v0.19, PLT-VP-R1 RES-OP-07).** Profile
 validation checks the in-tree floor tables. The core also checks what the hook
 returns, so a hook that computes its policy is held to the same contract: the
 value is a `FloorPolicy` itself, not an object shaped like one; its flags are
-booleans; `max_queue_depth` is an integer and satisfies POST-1 and POST-2; and
+booleans; `max_queue_depth` is an integer and satisfies POST-1 and POST-2;
+`preemption_at_full_queue` is one of POST-5's two strings and the call type's
+declared one; and
 each `timers_ms` entry names a timer in POST-3's set with a positive integer of
 milliseconds. A failure is `hook-contract-violation` on IF-SES, before any
 bearer is selected or QoS reserved.
@@ -764,6 +805,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.22 | 2026-10-16 | Owner ruling: two decisions become profile settings, required with no default. §2.7 and ICD-LIM-001..003: `group_over_limit` per call type (`truncate`, TS 24.379 6.3.5.5, or `refuse`); §5.3 POST-5: `preemption_at_full_queue` on `FloorPolicy` (`insert`, TS 24.380 6.3.4.4.7 item 2e, or `deny`), checked by the core. A deviation is reported at startup. A signature change: `FloorPolicy` gains a required field; the in-tree profiles state the previous behaviour, so none changes. |
 | 0.21 | 2026-09-29 | §5.2: the core checks and applies the session decision (PLT-VP-R1 RES-OP-12). The participant limit is the decision's, and a group call over it is truncated with warning 122 instead of refused (TS 24.379 6.3.5.5, 10.1.1.4.1); the in-tree admission no longer refuses on it. A session over the limit that is not a truncatable group call is refused with the new core code `participant-limit-exceeded` (§9). POST-1 read as equality, POST-2 states what is counted. ICD-OP-15 opened. A minor change: signatures unchanged; a group call the in-tree profiles used to refuse is now established with fewer participants. |
 | 0.20 | 2026-09-29 | ICD-GEN-041 made true (PLT-VP-R1 RES-OP-02): every invocation records what the hook returned, in full, and a value the audit cannot record exactly is refused. IF-ICX `map_outbound` and IF-PRI `compare` now go through the invocation boundary; `map_outbound` runs before QoS is reserved. IF-ICX gets the 20 ms deadline ICD-GEN-010 always gave it. §4.2 POST-6. A minor change: signatures unchanged; what is newly refused is a value holding a type the ICD's own value types do not declare. |
 | 0.19 | 2026-09-29 | §5.3 and §6.1: the core checks the floor policy and bearer decision a hook returns (PLT-VP-R1 RES-OP-07). Before, only profile validation checked them, so a substituted hook was not held to its contract. A minor change: no POST is tightened, and a value that passes profile validation passes these checks. ICD-OP-14 opened. |

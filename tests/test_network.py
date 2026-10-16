@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.errors import StartupRefused  # noqa: E402
-from service.config import Config  # noqa: E402
+from service.config import SIP_ONLY, Config  # noqa: E402
 from service.network import load_network  # noqa: E402
 from service.runtime import build_runtime  # noqa: E402
 from tests.network_fixture import PLMN, network_yaml  # noqa: E402
@@ -542,7 +542,7 @@ def test_without_sip_there_is_no_users_ca_to_compare(tmp_path, pki):
     net = network_yaml(tmp_path, trusted_cores=["c.example"],
                        core_ca=shared_key_ca(tmp_path, pki), fname="shared.yaml")
     env = {k: v for k, v in sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(net)).items()
-           if not k.startswith(("MCX_SIP_", "MCX_MEDIA_"))}
+           if not k.startswith(("MCX_SIP_", "MCX_MEDIA_")) and k not in SIP_ONLY}
     r = build_runtime(env, Clock())
     assert r.network.trusted_cores == ("c.example",)
     r.close()

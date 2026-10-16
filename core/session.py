@@ -64,7 +64,7 @@ from .hooks import (
 )
 from .invoke import HookFailure, Invoker
 from .loader import LoadedProfile
-from .validation import FLOOR_TIMERS, REDUNDANCY, TRANSPORTS
+from .validation import FLOOR_TIMERS, PREEMPTION_AT_FULL_QUEUE, REDUNDANCY, TRANSPORTS
 
 log = logging.getLogger("mcx.session")
 
@@ -315,6 +315,12 @@ class SessionManager:
                     return self._refuse(cid, request, ADHOC_TOO_MANY_PARTICIPANTS, over)
                 if not self._is_group_call(request, resolution):
                     return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED, over)
+                if self._over_limit(request) == "refuse":
+                    # The profile's recorded deviation from 6.3.5.5 (RES-OP-12
+                    # ruling 1 as a setting, 2026-10-16): 486 + 122 as for a
+                    # call already full (10.1.2).
+                    return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED,
+                                        over + " (group_over_limit: refuse)")
                 # 6.3.5.5 and 10.1.1.4.1: a group call is not refused; only
                 # `limit` of its members take part, and the 200 OK says so
                 # with warning 122.
@@ -340,7 +346,7 @@ class SessionManager:
                 floor_policy = invoker.call(
                     "IF-SES", "floor_policy",
                     self._hooks.session_policy.floor_policy, request, resolution,
-                    post=self._check_floor_policy)
+                    post=lambda p: self._check_floor_policy_for(p, request))
 
             # 7 — IF-BER
             bearer = invoker.call("IF-BER", "select",
@@ -440,11 +446,16 @@ class SessionManager:
                            members=len(resolution.members),
                            resolved_from=resolution.resolved_from,
                            **self._functions)
+        unreported = self._unreported_floor_deviation(request, floor_policy)
+        if unreported:
+            log.warning("session %s: %s", cid, unreported[0]["consequence"],
+                        extra={"correlation_id": cid})
         self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
                            members=tuple(resolution.members),
                            truncated_from=truncated_from,
                            qos_identifier=bearer.qos_identifier,
                            recording=decision.recording_required,
+                           **({"deviations": unreported} if unreported else {}),
                            **self._functions)
         # The floor starts after the session's own records, so the trail
         # reads admitted, established, then the floor.
@@ -725,6 +736,51 @@ class SessionManager:
         signature = declared.mc_signature if declared is not None else None
         return signature is None or signature.session_type != "private"
 
+    def _over_limit(self, request: SessionRequest) -> str:
+        """The call type's `group_over_limit`: "truncate" or "refuse". Only
+        reached for a group call, whose call type `_is_group_call` found."""
+        declared = self._profile.call_type(request.call_type)
+        if declared is None:
+            raise HookContractViolation(
+                f"group call for undeclared call type {request.call_type!r}")
+        return declared.group_over_limit
+
+    def _unreported_floor_deviation(self, request: SessionRequest,
+                                    policy: Optional[FloorPolicy]) -> list:
+        """The startup report lists `deny` where the call type DECLARES both
+        queueing and override. A hook may compute both flags (§5.3), so a
+        session whose policy enables them where the declaration does not runs
+        `deny` unreported: say so in its own record (review, 2026-10-16)."""
+        if policy is None or policy.preemption_at_full_queue != "deny" or \
+                not (policy.queueing_enabled and policy.override_allowed):
+            return []
+        declared = self._profile.call_type(request.call_type)
+        if declared is not None and declared.floor.queueing_enabled and \
+                declared.floor.override_allowed:
+            return []                        # reported at startup
+        return [{"setting": f"call_types[{request.call_type}].floor."
+                            "preemption_at_full_queue",
+                 "value": "deny", "ref": "FC-OP-07",
+                 "departs_from": "TS 24.380 6.3.4.4.7 item 2e",
+                 "consequence": "the floor policy enables queueing and override where "
+                                "the call type declares otherwise, so a pre-emptor "
+                                "meeting a full queue is denied queue-full, which the "
+                                "startup report does not list"}]
+
+    def _check_floor_policy_for(self, policy: FloorPolicy,
+                                request: SessionRequest) -> None:
+        """§5.3 POST-1..5, and POST-5 read as equality: the pre-emptor's
+        place is the call type's declared choice, so what the service reports
+        at startup is what runs (review of the 2026-10-16 settings)."""
+        self._check_floor_policy(policy)
+        declared = self._profile.call_type(request.call_type)
+        if declared is not None and policy.preemption_at_full_queue != \
+                declared.floor.preemption_at_full_queue:
+            raise HookContractViolation(
+                f"floor policy preemption_at_full_queue "
+                f"{policy.preemption_at_full_queue!r} is not the call type's declared "
+                f"{declared.floor.preemption_at_full_queue!r} (§5.3 POST-5)")
+
     @staticmethod
     def _first_members(members: Sequence[str], initiator: str,
                        limit: int) -> Tuple[str, ...]:
@@ -772,6 +828,12 @@ class SessionManager:
         if policy.queueing_enabled and depth < 1:
             raise HookContractViolation(
                 "floor policy enables queueing with max_queue_depth 0")
+        if type(policy.preemption_at_full_queue) is not str or \
+                policy.preemption_at_full_queue not in PREEMPTION_AT_FULL_QUEUE:
+            raise HookContractViolation(
+                f"floor policy preemption_at_full_queue "
+                f"{policy.preemption_at_full_queue!r} is not one of "
+                f"{', '.join(PREEMPTION_AT_FULL_QUEUE)}")
         if not isinstance(policy.timers_ms, Mapping):
             raise HookContractViolation(
                 f"floor policy timers_ms is a {type(policy.timers_ms).__name__}, "

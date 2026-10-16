@@ -33,6 +33,7 @@ call_types:
     # TS 24.379 11.1.1.2.1.1: <session-type> private.
     mc_signature: {session_type: private}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: normal
@@ -46,6 +47,7 @@ call_types:
       queueing_enabled: true
       override_allowed: false
       max_queue_depth: 4
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}
 
   - id: prearranged-group
@@ -53,6 +55,7 @@ call_types:
     # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
     mc_signature: {session_type: prearranged}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: normal
@@ -66,6 +69,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 8
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}
 
   - id: emergency-group
@@ -73,6 +77,7 @@ call_types:
     # TS 24.379 6.2.8.1.1 item 1: prearranged, with <emergency-ind> true.
     mc_signature: {session_type: prearranged, emergency: true}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: emergency
@@ -90,6 +95,7 @@ call_types:
       queueing_enabled: false
       override_allowed: true
       max_queue_depth: 0
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 2000, T20: 100, T8: 1000, T3: 3000}
 
   - id: imminent-peril-group
@@ -97,6 +103,7 @@ call_types:
     # TS 24.379 6.2.8.1.9: prearranged, with <imminentperil-ind> true.
     mc_signature: {session_type: prearranged, imminent_peril: true}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: imminent-peril
@@ -114,6 +121,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 4
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 3000, T20: 100, T8: 1000, T3: 3000}
 
   - id: sds
@@ -121,6 +129,7 @@ call_types:
     # MCData (TS 24.282), not an MCPTT session: no MCPTT signature.
     mc_signature: null
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [data]
     session_model: on-demand
     urgency: normal
@@ -133,6 +142,7 @@ call_types:
       queueing_enabled: false
       override_allowed: false
       max_queue_depth: 0
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {}
 
   - id: coordination-group
@@ -144,6 +154,7 @@ call_types:
     # request it.
     mc_signature: null
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: elevated
@@ -162,6 +173,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 6
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 3500, T20: 100, T8: 1000, T3: 3000}
 
 identity:

@@ -42,6 +42,11 @@ class FloorConfig:
     override_allowed: bool
     max_queue_depth: int
     timers_ms: Mapping[str, int]
+    # What a pre-emptor meets at a queue already at max_queue_depth (FC-OP-07,
+    # a profile setting since 2026-10-16): "insert" in front of it, as TS
+    # 24.380 6.3.4.4.7 item 2e orders, one entry beyond the declared depth;
+    # or "deny" it queue-full, a recorded deviation. Required.
+    preemption_at_full_queue: str = "deny"
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,11 @@ class CallType:
     # loader requires it; None only in a CallType built by hand, and then
     # the transaction layer's Timer B is the only limit.
     no_answer_s: Optional[int] = None
+    # A group call whose session decision allows fewer participants than the
+    # group has (RES-OP-12 ruling 1, a profile setting since 2026-10-16):
+    # "truncate" to the first members with warning 122 (TS 24.379 6.3.5.5,
+    # 10.1.1.4.1), or "refuse" it 486 + 122, a recorded deviation. Required.
+    group_over_limit: str = "truncate"
 
 
 @dataclass(frozen=True)

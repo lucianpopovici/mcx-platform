@@ -144,6 +144,11 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         "MCX_SIP_ROLES": "participating,controlling",
         # RFC 4028 (SIP-OP-17): short, so a run can see a refresh.
         "MCX_SESSION_EXPIRES": "90",
+        # The decisions of PLT-VP-R1, stated as the deployment settings they
+        # are since 2026-10-16. Plain HTTP: the harness reads /healthz.
+        "MCX_HTTP_TLS": "off",
+        "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
+        "MCX_LOCATION_REPORTS": "read",
         # The core under test authenticates its users; by its certificate's
         # DNS name and issuer it may assert their identities (ICD-OP-08,
         # ICD-OP-10). Both are network data.

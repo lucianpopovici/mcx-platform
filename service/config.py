@@ -49,6 +49,89 @@ KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 # anyone having chosen to.
 STRICT_RELEASE_VALUES = {"true": True, "false": False}
 
+# Owner ruling 2026-10-16: the decisions taken as fixed behaviour become
+# deployment settings, each required with no default like the ones above. A
+# value that departs from the standard the original decision followed starts,
+# but is reported: logged at startup, listed in the health document and in the
+# startup audit record (service/runtime.py, `deviations`).
+#
+# SIP-OP-10: the status of a refusal for a service condition (capacity,
+# recording, QoS, gateway, partner; not resolver-unavailable, core/sip.py
+# KEEP_503). 503 is RFC 3261 21.5.4's; a
+# proxy that receives only a 503 sends 500 upstream and drops the Warning
+# (16.7 step 6). 480 crosses a proxy intact but says "temporarily
+# unavailable" of the callee, which is not what happened.
+SERVICE_REFUSAL_STATUSES = (503, 480)
+# SIP-OP-18 item 6: may a dialog move to a new connection that proves the same
+# party (a reconnecting client keeps its calls), or does it stay on the one it
+# was established on.
+DIALOG_TAKEOVER_VALUES = ("same-party", "never")
+# ADHOC-OP-03: read the client's location report (TS 24.379 annex F.3) or
+# ignore it. Ignored, a call to a location-dependent identity is refused
+# `no-location-binding`.
+LOCATION_REPORT_VALUES = ("read", "ignore")
+# RES-OP-05: HTTPS on the HTTP interface (HTTP-1, PLT-SRS 3.1), or plain HTTP.
+HTTP_TLS_VALUES = ("on", "off")
+SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS")
+HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
+
+
+def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
+    """A required setting with no default, one of `values`."""
+    raw = (env.get(key) or "").strip().lower()
+    shown = " or ".join(repr(str(v)) for v in values)
+    if not raw:
+        raise StartupRefused(f"{key} is not set: {what} ({shown}); there is no default")
+    if raw not in {str(v) for v in values}:
+        raise StartupRefused(f"{key}={raw!r} must be {shown}")
+    return raw
+
+
+@dataclass(frozen=True)
+class HttpTlsConfig:
+    cert: Path
+    key: Path
+    ca: Optional[Path]
+    client_auth: str            # "required" | "optional" | "none"
+
+    @staticmethod
+    def from_env(env: Mapping[str, str]) -> Optional["HttpTlsConfig"]:
+        """None when MCX_HTTP_TLS=off. On, every file must be stated and
+        exist, and a CA is required unless client authentication is none."""
+        if _choice(env, "MCX_HTTP_TLS", HTTP_TLS_VALUES,
+                   "state whether the HTTP interface (health, group documents) "
+                   "uses TLS") == "off":
+            for key in ("MCX_HTTP_TLS_CERT", "MCX_HTTP_TLS_KEY", "MCX_HTTP_TLS_CA",
+                        "MCX_HTTP_CLIENT_AUTH"):
+                if (env.get(key) or "").strip():
+                    # Refused rather than ignored: whoever set it would believe
+                    # the interface is encrypted.
+                    raise StartupRefused(f"{key} is set but MCX_HTTP_TLS=off")
+            return None
+        paths = []
+        for key in ("MCX_HTTP_TLS_CERT", "MCX_HTTP_TLS_KEY"):
+            raw = (env.get(key) or "").strip()
+            if not raw:
+                raise StartupRefused(f"{key} is not set: MCX_HTTP_TLS=on requires it")
+            if not Path(raw).is_file():
+                raise StartupRefused(f"{key}: TLS file {raw} does not exist")
+            paths.append(Path(raw))
+        auth = _choice(env, "MCX_HTTP_CLIENT_AUTH", HTTP_CLIENT_AUTH_VALUES,
+                       "state whether HTTP clients must present a certificate")
+        raw_ca = (env.get("MCX_HTTP_TLS_CA") or "").strip()
+        if auth == "none":
+            if raw_ca:
+                raise StartupRefused("MCX_HTTP_TLS_CA is set but MCX_HTTP_CLIENT_AUTH=none")
+            return HttpTlsConfig(paths[0], paths[1], None, auth)
+        if not raw_ca:
+            raise StartupRefused(
+                f"MCX_HTTP_TLS_CA is not set: MCX_HTTP_CLIENT_AUTH={auth} cannot "
+                "verify a client certificate without a CA")
+        if not Path(raw_ca).is_file():
+            raise StartupRefused(f"MCX_HTTP_TLS_CA: CA file {raw_ca} does not exist")
+        return HttpTlsConfig(paths[0], paths[1], Path(raw_ca), auth)
+
+
 # Settings whose content moved into the network profile (NET-OP-01).
 MOVED_TO_NETWORK = ("MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS", "MCX_GROUPS_FILE")
 
@@ -82,6 +165,10 @@ class SipConfig:
     # how long a call whose far end vanished without a BYE can outlive it.
     # Required, no default; at least 90 (RFC 4028's smallest Min-SE).
     session_expires: int = 0
+    # Owner ruling 2026-10-16 (see SERVICE_REFUSAL_STATUSES and the rest).
+    service_refusal_status: int = 503
+    dialog_takeover: str = "same-party"
+    location_reports: str = "read"
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -91,6 +178,12 @@ class SipConfig:
         client authentication."""
         listen = (env.get("MCX_SIP_LISTEN") or "").strip()
         if not listen:
+            for key in SIP_ONLY:
+                if (env.get(key) or "").strip():
+                    # Refused rather than ignored, like a TLS setting with
+                    # MCX_HTTP_TLS=off: whoever set it would believe it applies.
+                    raise StartupRefused(f"{key} is set but SIP is not enabled "
+                                         "(MCX_SIP_LISTEN)")
             return None
         host, _, port_s = listen.rpartition(":")
         try:
@@ -145,8 +238,19 @@ class SipConfig:
                 f"MCX_SESSION_EXPIRES={raw_se!r}: give the RFC 4028 session "
                 f"interval in whole seconds, at least {MIN_SE_S}. It bounds how "
                 "long a call whose far end vanished without a BYE stays up")
+        status = _choice(env, "MCX_SERVICE_REFUSAL_STATUS", SERVICE_REFUSAL_STATUSES,
+                         "state the SIP status of a refusal for a service condition "
+                         "such as capacity (PLT-VP-R1 SIP-OP-10)")
+        takeover = _choice(env, "MCX_DIALOG_TAKEOVER", DIALOG_TAKEOVER_VALUES,
+                           "state whether a dialog may move to a new connection that "
+                           "proves the same party (SIP-OP-18 item 6)")
+        location = _choice(env, "MCX_LOCATION_REPORTS", LOCATION_REPORT_VALUES,
+                           "state whether the client's location report is read "
+                           "(ADHOC-OP-03)")
         return SipConfig(host, port, uri, cert, key, ca, auth, roles,
-                         session_expires=int(raw_se))
+                         session_expires=int(raw_se),
+                         service_refusal_status=int(status),
+                         dialog_takeover=takeover, location_reports=location)
 
 
 @dataclass(frozen=True)
@@ -204,6 +308,8 @@ class Config:
     network: Path
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
+    # RES-OP-05, owner ruling 2026-10-16: None is MCX_HTTP_TLS=off.
+    http_tls: Optional[HttpTlsConfig] = None
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
@@ -303,6 +409,7 @@ class Config:
                 "cell map, trusted SIP cores and their CA, groups and users); there is no default, "
                 "and every audit record names the one in force")
 
+        http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
             profile_names=names,
@@ -320,4 +427,5 @@ class Config:
             network=Path(network),
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
+            http_tls=http_tls,
         )

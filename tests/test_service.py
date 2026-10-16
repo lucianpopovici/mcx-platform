@@ -51,7 +51,7 @@ def env(tmp_path):
             "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false", "MCX_ADHOC_LIST_MAX": "100",
             "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
             "MCX_DATA_DIR": str(tmp_path / "data"),
-            "MCX_HTTP_PORT": "0"}
+            "MCX_HTTP_PORT": "0", "MCX_HTTP_TLS": "off"}
 
 
 def with_network(env, fname, **kw):

@@ -31,6 +31,10 @@ from .errors import CORE_ORIGINATED, ProfileValidationError
 
 MEDIA_KINDS = ("voice", "video", "data")
 SESSION_MODELS = ("on-demand", "pre-established", "broadcast")
+# Owner ruling 2026-10-16: two decisions become profile settings. The first
+# value of each is the 3GPP behaviour; the second a recorded deviation.
+PREEMPTION_AT_FULL_QUEUE = ("insert", "deny")       # TS 24.380 6.3.4.4.7 item 2e
+GROUP_OVER_LIMIT = ("truncate", "refuse")            # TS 24.379 6.3.5.5
 TRANSPORTS = ("udp", "tcp", "sctp")
 REDUNDANCY = ("single", "multipath", "multihomed")
 BINDINGS = ("static", "dynamic")
@@ -317,14 +321,29 @@ def _media_list(c: _Checker, path: str, node: Any) -> Tuple[str, ...]:
     return tuple(out)
 
 
+def _required_choice(c: _Checker, path: str, value: Any, allowed: Sequence[str]) -> str:
+    """A required choice with no default (owner ruling 2026-10-16): an empty
+    or null value is not one of the choices, and is a load error like any
+    other (`enum` lets None through, for optional keys). The value returned
+    after an error is never used: the profile does not load."""
+    if value is None:
+        c.add(path, "bad-value", f"null is not one of: {', '.join(allowed)}")
+        return allowed[0]
+    return c.enum(path, value, allowed) or allowed[0]
+
+
 def _floor(c: _Checker, path: str, node: Any) -> model.FloorConfig:
     default = model.FloorConfig(False, False, False, 0, model.freeze_map({}))
     if not c.keys(path, node, allowed=(
             "initial_grant_to_initiator", "queueing_enabled", "override_allowed",
-            "max_queue_depth", "timers_ms"),
+            "max_queue_depth", "timers_ms", "preemption_at_full_queue"),
             required=("initial_grant_to_initiator", "queueing_enabled",
-                      "override_allowed", "max_queue_depth")):
+                      "override_allowed", "max_queue_depth",
+                      "preemption_at_full_queue")):
         return default
+    preemption = _required_choice(c, f"{path}.preemption_at_full_queue",
+                                  node.get("preemption_at_full_queue"),
+                                  PREEMPTION_AT_FULL_QUEUE)
 
     queueing = bool(c.typed(path, node, "queueing_enabled", bool, False))
     depth = c.typed(path, node, "max_queue_depth", int, 0)
@@ -366,6 +385,7 @@ def _floor(c: _Checker, path: str, node: Any) -> model.FloorConfig:
         override_allowed=bool(c.typed(path, node, "override_allowed", bool, False)),
         max_queue_depth=depth,
         timers_ms=model.freeze_map(timers),
+        preemption_at_full_queue=preemption,
     )
 
 
@@ -382,11 +402,11 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                 "id", "label", "media", "session_model", "urgency", "application",
                 "auto_answer", "acknowledgement_required", "recording_required",
                 "max_participants", "initiator_roles", "floor", "mc_signature",
-                "no_answer_s"),
+                "no_answer_s", "group_over_limit"),
                 required=("id", "label", "media", "session_model", "urgency",
                           "auto_answer", "acknowledgement_required",
                           "recording_required", "initiator_roles", "floor",
-                          "mc_signature", "no_answer_s")):
+                          "mc_signature", "no_answer_s", "group_over_limit")):
             continue
         ident = c.typed(p, item, "id", str, "")
         if ident in seen:
@@ -456,6 +476,9 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
             floor=_floor(c, f"{p}.floor", item.get("floor")),
             mc_signature=_mc_signature(c, f"{p}.mc_signature", item.get("mc_signature")),
             no_answer_s=no_answer,
+            group_over_limit=_required_choice(c, f"{p}.group_over_limit",
+                                              item.get("group_over_limit"),
+                                              GROUP_OVER_LIMIT),
         ))
 
     # A signature must name at most one call type, or the core would have to

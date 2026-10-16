@@ -53,6 +53,7 @@ call_types:
     # from Rel-18; emergency is <adhoc-emergency-ind> (TS 24.379 6.2.8.1.21).
     mc_signature: {session_type: adhoc, emergency: true}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     # R1 runs on-demand sessions only; this call type is broadcast by
     # nature and returns to it when PLT-CC-010, PLT-RAIL-006 (R3) is implemented. Declared
@@ -74,6 +75,7 @@ call_types:
       queueing_enabled: false
       override_allowed: true
       max_queue_depth: 0
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 1000, T20: 100, T8: 1000, T3: 3000}
 
   - id: shunting-group
@@ -82,6 +84,7 @@ call_types:
     # emergency alert); no prearranged group call occurs anywhere in the SRS. Shunting itself is not covered by the SRS (SHUNT-OP-01).
     mc_signature: {session_type: adhoc}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: operational
@@ -96,6 +99,7 @@ call_types:
       queueing_enabled: true
       override_allowed: true
       max_queue_depth: 4
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 3000, T20: 100, T8: 1000, T3: 3000}
 
   - id: driver-controller
@@ -103,6 +107,7 @@ call_types:
     # SRS 21.4.4: private call.
     mc_signature: {session_type: private}
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: operational
@@ -117,6 +122,7 @@ call_types:
       queueing_enabled: true
       override_allowed: false
       max_queue_depth: 2
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}
 
   - id: etcs-ipcon
@@ -124,6 +130,7 @@ call_types:
     # MCData IP connectivity (SRS 21.4.4), not an MCPTT session.
     mc_signature: null
     no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [data]
     # R1 runs on-demand sessions only; this call type is pre-established by
     # nature and returns to it when PLT-SIG-006 (R2), PLT-DAT-008 (R3) is implemented. Declared
@@ -141,6 +148,7 @@ call_types:
       queueing_enabled: false
       override_allowed: false
       max_queue_depth: 0
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {}
 
 identity:

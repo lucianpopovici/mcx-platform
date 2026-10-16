@@ -953,6 +953,7 @@ def test_vp1_hook_004_decisions_recorded_in_full(manager, sink):
     assert got[("IF-SES", "floor_policy")] == {
         "initial_grant_to_initiator": True, "queueing_enabled": True,
         "override_allowed": True, "max_queue_depth": 8,
+        "preemption_at_full_queue": "deny",
         "timers_ms": {"T2": 4000, "T20": 100, "T3": 3000, "T8": 1000}}
     assert got[("IF-IDR", "resolve")] == {
         "kind": "group", "group_id": "grp:alpha", "resolved_from": None,
