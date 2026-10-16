@@ -74,6 +74,11 @@ LOCATION_REPORT_VALUES = ("read", "ignore")
 HTTP_TLS_VALUES = ("on", "off")
 SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS")
 HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
+# RES-OP-14 (owner ruling 2026-10-16): a floor transition the audit store
+# cannot take is undone and not sent ("deny", PLT-FC-011 kept: the floor
+# stops while the store fails), or sent unrecorded and counted, the gap
+# written to the trail when the store recovers ("allow").
+FLOOR_UNRECORDED_VALUES = ("deny", "allow")
 
 
 def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
@@ -306,6 +311,8 @@ class Config:
     # map, trusted SIP cores and their CA, and (SVC-OP-03, decided
     # 2026-09-26) the groups and users. Required, no default.
     network: Path
+    # RES-OP-14: "deny" or "allow". Required, no default.
+    floor_unrecorded: str = ""
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
     # RES-OP-05, owner ruling 2026-10-16: None is MCX_HTTP_TLS=off.
@@ -409,6 +416,10 @@ class Config:
                 "cell map, trusted SIP cores and their CA, groups and users); there is no default, "
                 "and every audit record names the one in force")
 
+        floor_unrecorded = _choice(
+            env, "MCX_FLOOR_UNRECORDED", FLOOR_UNRECORDED_VALUES,
+            "state whether the floor may run unrecorded while the audit store is "
+            "failing (PLT-VP-R1 RES-OP-14)")
         http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
@@ -425,6 +436,7 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             network=Path(network),
+            floor_unrecorded=floor_unrecorded,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
             http_tls=http_tls,

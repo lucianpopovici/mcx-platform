@@ -648,7 +648,10 @@ class SipCore:
                     cache[uri] = session.priority.floor_priority
                 else:
                     request = dataclasses.replace(session.request, initiator=uri)
-                    decision = Invoker(self.rt.auditor, session.correlation_id).call(
+                    # RES-OP-14: recorded as the floor's own work, so the
+                    # deployment's MCX_FLOOR_UNRECORDED applies to it too.
+                    decision = Invoker(self.rt.manager.floor_auditor(),
+                                       session.correlation_id).call(
                         "IF-PRI", "evaluate",
                         self.rt.loaded.hooks.priority_policy.evaluate,
                         request, session.resolution)
@@ -1703,6 +1706,9 @@ class SipCore:
         self.media.close_all()
 
     def tick(self) -> None:
+        # RES-OP-14: a pending audit gap is retried here too, so it reaches the
+        # trail even when no further record would carry it.
+        self.rt.auditor.try_flush()
         self.media.tick()
         self._session_timers()
         events = self.server.tick()

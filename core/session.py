@@ -129,6 +129,21 @@ class Session:
     truncated_from: Optional[int] = None
 
 
+# RES-OP-14: what a floor transition the audit store cannot take does.
+FLOOR_UNRECORDED = ("deny", "allow")
+
+
+
+class _CountingAuditor:
+    """MCX_FLOOR_UNRECORDED=allow: the floor's records, written or counted
+    (RES-OP-14)."""
+
+    def __init__(self, auditor: Auditor) -> None:
+        self._auditor = auditor
+
+    def emit(self, record_type: RecordType, correlation_id: str, **detail: Any):
+        return self._auditor.emit_or_count(record_type, correlation_id, **detail)
+
 class Platform:
     """Environment the session manager depends on but does not own.
 
@@ -154,7 +169,8 @@ class SessionManager:
                  functions: Optional[Mapping[str, str]] = None,
                  defer_floor_start: bool = False,
                  adhoc_list_max: Optional[int] = None,
-                 cells: Optional[Mapping[str, Mapping[str, str]]] = None) -> None:
+                 cells: Optional[Mapping[str, Mapping[str, str]]] = None,
+                 floor_unrecorded: str = "deny") -> None:
         self._loaded = loaded
         self._hooks = loaded.hooks
         self._profile = loaded.profile
@@ -178,6 +194,16 @@ class SessionManager:
         # Serving cell -> location attributes: deployment data, supplied by
         # the host (the network profile; PLT-ICD-001 2.8, PRF-OP-03).
         self._cells = dict(cells or {})
+        # RES-OP-14 (owner ruling 2026-10-16, MCX_FLOOR_UNRECORDED, required
+        # in the service): a floor transition the audit store cannot take is
+        # "deny": undone and not sent, so the floor stops until the store
+        # recovers (PLT-FC-011 kept); or "allow": it stands and is sent, and
+        # the transitions lost are counted and written as one `audit-gap`
+        # record when the store takes records again.
+        if floor_unrecorded not in FLOOR_UNRECORDED:
+            raise ValueError(f"floor_unrecorded {floor_unrecorded!r} is not one of "
+                             f"{', '.join(FLOOR_UNRECORDED)}")
+        self._floor_unrecorded = floor_unrecorded
 
     # -- observation ----------------------------------------------------
 
@@ -390,8 +416,7 @@ class SessionManager:
             # RES-OP-03).
             session.floor = floor_mod.FloorControl(
                 floor_mod.Policy.from_hook(floor_policy), clock=self._clock,
-                observer=lambda t: self._auditor.emit(
-                    RecordType.FLOOR_TRANSITION, cid, **t.as_record()))
+                observer=self._floor_observer(cid))
 
         if decision.recording_required:
             signals.append(Signal(SignalType.START_RECORDING))
@@ -438,25 +463,36 @@ class SessionManager:
 
         session.state = SessionState.ESTABLISHED
         self._sessions[cid] = session
-
-        self._auditor.emit(RecordType.SESSION_ADMITTED, cid,
-                           call_type=request.call_type,
-                           initiator=request.initiator,
-                           priority=priority.label, scope=priority.scope,
-                           members=len(resolution.members),
-                           resolved_from=resolution.resolved_from,
-                           **self._functions)
         unreported = self._unreported_floor_deviation(request, floor_policy)
         if unreported:
             log.warning("session %s: %s", cid, unreported[0]["consequence"],
                         extra={"correlation_id": cid})
-        self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
-                           members=tuple(resolution.members),
-                           truncated_from=truncated_from,
-                           qos_identifier=bearer.qos_identifier,
-                           recording=decision.recording_required,
-                           **({"deviations": unreported} if unreported else {}),
-                           **self._functions)
+        try:
+            self._auditor.emit(RecordType.SESSION_ADMITTED, cid,
+                               call_type=request.call_type,
+                               initiator=request.initiator,
+                               priority=priority.label, scope=priority.scope,
+                               members=len(resolution.members),
+                               resolved_from=resolution.resolved_from,
+                               **self._functions)
+            self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
+                               members=tuple(resolution.members),
+                               truncated_from=truncated_from,
+                               qos_identifier=bearer.qos_identifier,
+                               recording=decision.recording_required,
+                               **({"deviations": unreported} if unreported else {}),
+                               **self._functions)
+        except BaseException:
+            # Not recorded, so not established: a session left here would
+            # count toward capacity and be a pre-emption candidate, with no
+            # record of it ever (review of RES-OP-14). Its trail is closed
+            # where it can be: a failure record, best effort.
+            self._sessions.pop(cid, None)
+            self._emit_unless_lost(RecordType.SESSION_FAILED, cid,
+                                   call_type=request.call_type,
+                                   initiator=request.initiator,
+                                   reason_code="", detail="establishment not recorded")
+            raise
         # The floor starts after the session's own records, so the trail
         # reads admitted, established, then the floor.
         if session.floor is not None and not self._defer_floor:
@@ -542,6 +578,30 @@ class SessionManager:
             log.exception("session %s: %s record lost; the session ended anyway",
                           correlation_id, record_type.value,
                           extra={"correlation_id": correlation_id})
+
+    # -- floor audit (PLT-FC-011, RES-OP-14) ------------------------------
+
+    def _floor_observer(self, cid: str) -> Callable[[floor_mod.Transition], None]:
+        auditor = self.floor_auditor()
+        return lambda transition: auditor.emit(
+            RecordType.FLOOR_TRANSITION, cid, **transition.as_record())
+
+    def floor_auditor(self) -> Any:
+        """What records the floor's work: its transitions, and the IF-PRI
+        evaluations a floor request makes (a host's Invoker for those uses
+        this). Under "deny" the auditor itself: a failed write reaches the
+        caller, and FloorControl.handle undoes the transition. Under "allow"
+        one whose failed write is counted into the auditor's gap and lets the
+        work go on (Auditor.emit_or_count)."""
+        return self._auditor if self._floor_unrecorded == "deny" else \
+            _CountingAuditor(self._auditor)
+
+    def floor_audit_state(self) -> Dict[str, Any]:
+        """For the health document: the setting, the floor's records lost
+        since the process started (transitions and floor-request IF-PRI
+        evaluations), and the gap still to be written, if any."""
+        return {"floor_unrecorded": self._floor_unrecorded,
+                **self._auditor.gap_state()}
 
     def start_floor(self, correlation_id: str) -> Tuple[floor_mod.Action, ...]:
         """Start a deferred floor machine; returns its opening actions.

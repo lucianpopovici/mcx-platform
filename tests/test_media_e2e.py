@@ -92,9 +92,10 @@ class UE:
 
 
 @pytest.fixture
-def call(tmp_path, pki):
+def call(tmp_path, pki, request):
     clock = Clock()
-    rt = build_runtime(sip_env(tmp_path, pki), clock, platform=Platform())
+    rt = build_runtime(sip_env(tmp_path, pki, **getattr(request, "param", {})), clock,
+                       platform=Platform())
     core = SipCore(rt, LOCAL, clock)
     flows = {u: Flow(u) for u in U}
     ues = {u: UE(u) for u in U}
@@ -654,3 +655,117 @@ def test_vp1_oam_004_two_calls_log_under_their_own_correlation_ids(call, json_lo
     for cid in ("call-a", "call-b"):
         assert {r["correlation_id"] for r in rt.store.audit_records(cid)} == {cid}
         assert rt.store.audit_records(cid)
+
+
+
+# Not VP1-FC-021 evidence: under allow transitions are, by the deployment's
+# choice, not all recorded (RES-OP-14, a reported deviation).
+@pytest.mark.parametrize("call", [{"MCX_FLOOR_UNRECORDED": "allow"}], indirect=True)
+def test_with_unrecorded_allowed_the_floor_runs_and_the_gap_is_written(call):
+    """RES-OP-14 (owner ruling 2026-10-16): with MCX_FLOOR_UNRECORDED=allow a
+    request is taken while the store fails -- Queue Position Info sent, the
+    sender queued -- and the next record the store takes is preceded by one
+    audit-gap record counting what it lost."""
+    rt, core, flows, ues, clock = call
+    setup_call(call)
+    for u in U[:3]:
+        while ues[u].floor_msg(0.2):
+            pass
+    floor = rt.manager.session("e2e").floor
+    emit = rt.store.emit
+    failing = {"on": True}
+
+    def flaky(record):
+        if failing["on"]:
+            raise OSError("audit store unavailable")
+        emit(record)
+
+    rt.store.emit = flaky
+    try:
+        ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+        q = ues[U[1]].floor_msg()
+        assert q.type is MsgType.QUEUE_POSITION_INFO and q.queue_info[0] == 1
+        assert floor.queue == (U[1],)
+        audit = rt.health.snapshot()["audit"]
+        assert audit["floor_unrecorded"] == "allow"
+        assert audit["unrecorded_floor_records"] >= 1
+        lost = audit["pending_gap"]["unrecorded"]
+        failing["on"] = False
+        clock.now += 1_000                 # past the retry interval (GAP_RETRY_MS)
+        ues[U[2]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+        assert ues[U[2]].floor_msg().type is MsgType.QUEUE_POSITION_INFO
+    finally:
+        rt.store.emit = emit
+    gaps = [r for r in rt.store.audit_records("audit-gap") if r["type"] == "audit-gap"]
+    assert len(gaps) == 1
+    gap = gaps[0]["detail"]
+    assert gap["unrecorded"] == lost and gap["sessions"] == ["e2e"]
+    # U1's IF-PRI evaluation (the floor request's own hook record) and its
+    # floor transition
+    assert gap["by_type"] == {"floor-transition": 1, "hook-invocation": 1}
+    assert gap["error"] == "OSError: audit store unavailable"
+    after = rt.store.audit_records()
+    i = next(n for n, r in enumerate(after) if r["type"] == "audit-gap")
+    assert after[i + 1]["type"] == "hook-invocation"        # U2's IF-PRI, then
+    assert after[i + 2]["type"] == "floor-transition"
+    assert after[i + 2]["detail"]["trigger"]["participant"] == U[2]
+    assert rt.health.snapshot()["audit"]["pending_gap"] is None
+    # the trail says where the hole is: sequences jump by what was lost
+    seqs = [d["sequence"] for d in _floor_records(rt)]
+    assert seqs[-1] - seqs[-2] == gap["by_type"]["floor-transition"] + 1
+
+
+# Not VP1-FC-021 evidence: under allow transitions are, by the deployment's
+# choice, not all recorded (RES-OP-14, a reported deviation).
+@pytest.mark.parametrize("call", [{"MCX_FLOOR_UNRECORDED": "allow"}], indirect=True)
+def test_with_unrecorded_allowed_a_whole_call_runs_with_its_floor_unrecorded(call):
+    """RES-OP-14 consequences 1-3, end to end under allow: every floor record
+    fails from before the deferred floor start, and still the initiator is
+    granted, the others told the floor is taken, the holder's voice is
+    forwarded, and the call ends; the gap is written ahead of its end."""
+    rt, core, flows, ues, clock = call
+    emit = rt.store.emit
+
+    def floor_down(record):
+        if record.type.value == "floor-transition":
+            raise OSError("audit store unavailable")
+        emit(record)
+
+    rt.store.emit = floor_down
+    try:
+        setup_call(call)
+        assert ues[U[0]].floor_msg().type is MsgType.GRANTED          # (1) deferred start
+        assert ues[U[1]].floor_msg().type is MsgType.TAKEN
+        for seq in range(1, 4):                                       # (2) media
+            ues[U[0]].send_voice(seq=seq)
+            assert ues[U[1]].voice() is not None
+        assert rt.manager.session("e2e").floor.holder == U[0]
+    finally:
+        rt.store.emit = emit
+    clock.now += 1_000
+    with core.lock:
+        core.on_bytes(msg("BYE", LOCAL, "e2e", 2, U[0], "grp:alpha"), flows[U[0]])
+    assert rt.manager.session("e2e").state.value == "released"
+    trail = [r["type"] for r in rt.store.audit_records()]
+    gap_at = trail.index("audit-gap")
+    assert "session-released" in trail[gap_at + 1:]
+    gap = rt.store.audit_records("audit-gap")[0]["detail"]
+    assert gap["by_type"]["floor-transition"] >= 2 and gap["sessions"] == ["e2e"]
+
+
+@pytest.mark.parametrize("call", [{"MCX_FLOOR_UNRECORDED": "allow"}], indirect=True)
+def test_the_sip_tick_writes_a_pending_gap_with_no_other_record(call):
+    rt, core, flows, ues, clock = call
+    emit = rt.store.emit
+    rt.store.emit = lambda rec: (_ for _ in ()).throw(OSError("down"))
+    from core.audit import RecordType
+    rt.auditor.emit_or_count(RecordType.FLOOR_TRANSITION, "lonely")
+    rt.store.emit = emit
+    with core.lock:
+        core.tick()                             # within the retry interval
+    assert rt.store.audit_records("audit-gap") == []
+    clock.now += 1_000
+    with core.lock:
+        core.tick()
+    assert [r["detail"]["sessions"] for r in rt.store.audit_records("audit-gap")] == \
+        [["lonely"]]

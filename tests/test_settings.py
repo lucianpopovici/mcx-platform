@@ -62,7 +62,7 @@ def _plain_env(tmp_path, **over):
            "MCX_ADHOC_LIST_MAX": "100",
            "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_HTTP_PORT": "0",
-           "MCX_HTTP_TLS": "off"}
+           "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny"}
     env.update(over)
     return {k: v for k, v in env.items() if v is not None}
 

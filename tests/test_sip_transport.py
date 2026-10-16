@@ -188,7 +188,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
            "MCX_SESSION_EXPIRES": "1800",
-           "MCX_HTTP_TLS": "off",
+           "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
            "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
            "MCX_LOCATION_REPORTS": "read",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}

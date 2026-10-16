@@ -51,6 +51,9 @@ class SessionStore(Protocol):
     def close(self) -> None: ...
 
 
+BUSY_TIMEOUT_S = 1.0
+
+
 class SqliteStore:
     FILENAME = "mcx.sqlite3"
 
@@ -58,7 +61,11 @@ class SqliteStore:
         directory.mkdir(parents=True, exist_ok=True)
         self.path = directory / self.FILENAME
         self._lock = threading.Lock()
+        # A locked database is waited on this long, not sqlite3's default 5 s:
+        # every write is made under the core lock that RTP forwarding takes,
+        # so a write that waits stalls every call (review of RES-OP-14).
         self._db = sqlite3.connect(str(self.path), check_same_thread=False,
+                                   timeout=BUSY_TIMEOUT_S,
                                    isolation_level=None)   # explicit commits
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=FULL")

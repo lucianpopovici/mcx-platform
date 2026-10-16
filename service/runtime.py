@@ -72,6 +72,10 @@ class Health:
         self._call_types: dict = {}
         self._settings: dict = {}
         self._deviations: list = []
+        self._audit: Callable[[], dict] = lambda: {}
+
+    def set_audit(self, fn: Callable[[], dict]) -> None:
+        self._audit = fn
 
     def set_deviations(self, settings: dict, deviations: list) -> None:
         with self._lock:
@@ -123,6 +127,7 @@ class Health:
                     "call_types": self._call_types,
                     "settings": self._settings,
                     "deviations": self._deviations,
+                    "audit": self._audit(),
                     **self._extra()}
 
 
@@ -189,6 +194,11 @@ class Runtime:
 
     def close(self) -> None:
         self.health.set_ready(False)
+        # RES-OP-14: a gap still pending reaches the trail before the store
+        # closes, or, if the store still fails, the log in full.
+        if not self.auditor.try_flush(force=True):
+            log.error("audit gap not written before shutdown: %s",
+                      self.auditor.pending_gap())
         self.store.close()
 
 
@@ -222,10 +232,21 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
     followed, with that standard. Profile settings are listed where they take
     effect: a pre-emptor's place only where the call type both queues and
     allows override."""
-    settings: dict = {"MCX_HTTP_TLS": "off" if config.http_tls is None else "on"}
+    settings: dict = {"MCX_HTTP_TLS": "off" if config.http_tls is None else "on",
+                      "MCX_FLOOR_UNRECORDED": config.floor_unrecorded}
     if config.http_tls is not None:
         settings["MCX_HTTP_CLIENT_AUTH"] = config.http_tls.client_auth
     deviations: list = []
+    if config.floor_unrecorded == "allow":
+        deviations.append({
+            "setting": "MCX_FLOOR_UNRECORDED", "value": "allow", "ref": "RES-OP-14",
+            "departs_from": "PLT-SRS PLT-FC-011 (every floor transition recorded); "
+                            "PLT-ICD-001 ICD-GEN-040/041 (the IF-PRI evaluation of a "
+                            "floor request)",
+            "consequence": "while the audit store fails the floor runs unrecorded; "
+                           "the records lost are counted and written as one "
+                           "audit-gap record ahead of the next record the store "
+                           "takes, or logged in full at shutdown if it never does"})
     if config.http_tls is None:
         deviations.append({
             "setting": "MCX_HTTP_TLS", "value": "off", "ref": "RES-OP-05",
@@ -351,7 +372,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                  clock=clock, functions=role_functions(config),
                                  defer_floor_start=config.sip is not None,
                                  adhoc_list_max=config.adhoc_list_max,
-                                 cells=network.cells)
+                                 cells=network.cells,
+                                 floor_unrecorded=config.floor_unrecorded)
 
         groups = GroupDirectory(network.groups, network.users)
         # Provision the resolver from the same source the documents are served
@@ -391,6 +413,7 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
 
         # Owner ruling 2026-10-16: a setting that departs from the standard is
         # allowed, and said so -- in the log, the health document and the audit.
+        health.set_audit(manager.floor_audit_state)
         settings, deviations = behaviour_settings(config, loaded)
         health.set_deviations(settings, deviations)
         auditor.emit(RecordType.CONFIGURATION_ACCEPTED, STARTUP_CORRELATION_ID,
