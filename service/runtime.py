@@ -233,10 +233,21 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
     effect: a pre-emptor's place only where the call type both queues and
     allows override."""
     settings: dict = {"MCX_HTTP_TLS": "off" if config.http_tls is None else "on",
-                      "MCX_FLOOR_UNRECORDED": config.floor_unrecorded}
+                      "MCX_FLOOR_UNRECORDED": config.floor_unrecorded,
+                      "MCX_FOREIGN_INITIATOR": config.foreign_initiator}
     if config.http_tls is not None:
         settings["MCX_HTTP_CLIENT_AUTH"] = config.http_tls.client_auth
     deviations: list = []
+    if config.foreign_initiator == "allow":
+        deviations.append({
+            "setting": "MCX_FOREIGN_INITIATOR", "value": "allow", "ref": "RES-OP-11",
+            "departs_from": "PLT-SRS PLT-IDM-008 (no identity outside the declared "
+                            "domains); TS 24.379 10.1.1.3.1.1 step 2a (404, warning 141)",
+            "consequence": "a caller outside the profile's declared domains, as a "
+                           "trusted SIP core may assert, is served, including a "
+                           "partner system's users, whose priority is then not capped "
+                           "by its interconnection rules (there is no inbound IF-ICX "
+                           "path); such a caller still cannot register here"})
     if config.floor_unrecorded == "allow":
         deviations.append({
             "setting": "MCX_FLOOR_UNRECORDED", "value": "allow", "ref": "RES-OP-14",
@@ -373,7 +384,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                  defer_floor_start=config.sip is not None,
                                  adhoc_list_max=config.adhoc_list_max,
                                  cells=network.cells,
-                                 floor_unrecorded=config.floor_unrecorded)
+                                 floor_unrecorded=config.floor_unrecorded,
+                                 foreign_initiator=config.foreign_initiator)
 
         groups = GroupDirectory(network.groups, network.users)
         # Provision the resolver from the same source the documents are served

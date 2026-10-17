@@ -79,6 +79,10 @@ HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
 # stops while the store fails), or sent unrecorded and counted, the gap
 # written to the trail when the store recovers ("allow").
 FLOOR_UNRECORDED_VALUES = ("deny", "allow")
+# RES-OP-11 (owner ruling 2026-10-17): a caller outside the profile's
+# declared domains -- possible when a trusted SIP core asserts it -- is
+# refused 404 + 141 ("refuse", PLT-IDM-008) or served ("allow").
+FOREIGN_INITIATOR_VALUES = ("refuse", "allow")
 
 
 def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
@@ -313,6 +317,8 @@ class Config:
     network: Path
     # RES-OP-14: "deny" or "allow". Required, no default.
     floor_unrecorded: str = ""
+    # RES-OP-11: "refuse" or "allow". Required, no default.
+    foreign_initiator: str = ""
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
     # RES-OP-05, owner ruling 2026-10-16: None is MCX_HTTP_TLS=off.
@@ -420,6 +426,10 @@ class Config:
             env, "MCX_FLOOR_UNRECORDED", FLOOR_UNRECORDED_VALUES,
             "state whether the floor may run unrecorded while the audit store is "
             "failing (PLT-VP-R1 RES-OP-14)")
+        foreign_initiator = _choice(
+            env, "MCX_FOREIGN_INITIATOR", FOREIGN_INITIATOR_VALUES,
+            "state whether a caller outside the profile's declared domains is "
+            "served (PLT-VP-R1 RES-OP-11)")
         http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
@@ -437,6 +447,7 @@ class Config:
             port=port,
             network=Path(network),
             floor_unrecorded=floor_unrecorded,
+            foreign_initiator=foreign_initiator,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
             http_tls=http_tls,

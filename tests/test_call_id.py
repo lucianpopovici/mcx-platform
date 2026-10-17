@@ -203,7 +203,7 @@ def test_session_timer_errors_are_clipped(parse, value):
 
 
 @pytest.mark.parametrize("sdp_line", ["c=IN IP6 ff02::1%" + "z" * 5000,
-                                      "c=IN IP4 0.0.0.0"])
+                                      "c=IN IP4 0.0.0.0"], ids=["long-scope", "zero"])
 def test_an_sdp_error_is_bounded_in_the_audit_and_the_log(core, rt, world, caplog, sdp_line):
     from tests.test_sip_transport import SDP
     from tests import mcpttinfo_fixture as mcf
@@ -212,7 +212,7 @@ def test_an_sdp_error_is_bounded_in_the_audit_and_the_log(core, rt, world, caplo
         core.on_bytes(msg("INVITE", LOCAL, "sdp1", 1, U[0], LOCAL,
                           body=mcf.body_for("private", U[1], bad), ctype=mcf.CONTENT_TYPE),
                       world[U[0]])
-    for r in rt.store.audit_records():
+    for r in rt.store.audit_records("sdp1"):
         assert len(str(r["detail"])) < 1500
     assert all(len(r.getMessage()) < 400 for r in caplog.records)
 

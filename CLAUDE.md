@@ -46,13 +46,13 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (1947 tests)
+python3 -m pytest tests/ -q                   # must stay green (1969 tests)
 python3 tools/check_boundary.py --root .      # must stay 21/21
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
 MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
   MCX_STRICT_RELEASE=true MCX_ADHOC_LIST_MAX=100 MCX_NETWORK_FILE=examples/network.yaml \
-  MCX_HTTP_TLS=off MCX_FLOOR_UNRECORDED=deny MCX_DATA_DIR=/tmp/mcx python3 -m service
+  MCX_HTTP_TLS=off MCX_FLOOR_UNRECORDED=deny MCX_FOREIGN_INITIATOR=refuse MCX_DATA_DIR=/tmp/mcx python3 -m service
 # with SIP (MCX_SIP_LISTEN) also MCX_SERVICE_REFUSAL_STATUS=503|480,
 # MCX_DIALOG_TAKEOVER=same-party|never, MCX_LOCATION_REPORTS=read|ignore;
 # MCX_HTTP_TLS=on needs MCX_HTTP_TLS_CERT/KEY and MCX_HTTP_CLIENT_AUTH (+ _CA).

@@ -35,6 +35,7 @@ from .errors import (
     CALL_TYPE_NOT_PERMITTED,
     IDENTITY_NOT_AUTHENTICATED,
     PARTICIPANT_LIMIT_EXCEEDED,
+    INITIATOR_NOT_SERVED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
@@ -310,6 +311,9 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     ADHOC_PARTICIPANTS_UNDETERMINED: Status.FORBIDDEN,
     ADHOC_TOO_MANY_PARTICIPANTS: Status.FORBIDDEN,
     IDENTITY_NOT_AUTHENTICATED: Status.FORBIDDEN,
+    # TS 24.379 10.1.1.3.1.1 step 2a and the other participating-function
+    # procedures: no binding of the caller to an MCPTT ID is 404, warning 141.
+    INITIATOR_NOT_SERVED: Status.NOT_FOUND,
 }
 
 # Not covered by that setting: a resolver that cannot answer is a back-end
@@ -360,6 +364,10 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
                                   "maximum number of allowed adhoc group participants exceeded"),
     # "The group call has reached its maximum number of participants."
     PARTICIPANT_LIMIT_EXCEEDED: (122, "too many participants"),
+    # "The participating function is unable to associate the public user
+    # identity with an MCPTT ID." A caller outside the domains this
+    # deployment serves is one it has no MCPTT ID for (RES-OP-11).
+    INITIATOR_NOT_SERVED: (141, "user unknown to the participating function"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -1135,8 +1143,8 @@ class Adapter:
         if message.method != "INVITE":
             raise SipError(f"expected INVITE, found {message.method}")
 
-        initiator = _uri(message.headers.get("P-Asserted-Identity")
-                         or message.headers.get("From") or "")
+        initiator = _asserted_identity(message.headers.get_all("P-Asserted-Identity")) \
+            or _uri(message.headers.get("From") or "")
         target = _uri(message.uri)
         if not initiator or not target:
             raise SipError("INVITE lacks a usable initiator or target")
@@ -1373,6 +1381,22 @@ def _location(content_type: str, body: str) -> Optional["LocationContext"]:
     if report is None or report.cell is None:
         return None
     return LocationContext(cell_id=report.cell)
+
+
+def _asserted_identity(values: Sequence[str]) -> str:
+    """The identity P-Asserted-Identity asserts: its first sip: or sips:
+    value, else its first value. RFC 3325 9.1 allows one sip: and one tel:,
+    as one header or two, in either order, and TS 24.379 binds the MCPTT ID
+    to the SIP public user identity (review of RES-OP-11: an S-CSCF that
+    asserted tel: first had its user taken as foreign)."""
+    found = []
+    for value in values:
+        found += re.findall(r"<([^>]+)>", value) or [v for v in value.split(",") if v.strip()]
+    found = [f.split(";")[0].strip() for f in found if f.strip()]
+    for f in found:
+        if f.lower().startswith(("sip:", "sips:")):
+            return f
+    return found[0] if found else ""
 
 
 def _uri(value: str) -> str:

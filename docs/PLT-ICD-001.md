@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.22 (draft)
-**Date:** 2026-09-29
+**Version:** 0.23 (draft)
+**Date:** 2026-10-17
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -663,6 +663,8 @@ refused here. Whether POST-5 also covers the vulnerability flag is ICD-OP-14.
 ### 8.1 Session establishment — normal
 
 ```
+-  core: initiator within the declared domains (MCX_FOREIGN_INITIATOR=refuse, v0.23)
+   ── if not: refuse initiator-not-served (404 + 141), stop — no hook runs ──
 0  IF-IDR.identities_of(initiator)             → the initiator's roles (§3.4)
 0  IF-SES.authorise(request without target)     → Admission   (v0.13, §5.0)
    ── if not permitted: reject, stop — nothing about the target looked up ──
@@ -760,6 +762,7 @@ they may not redefine these.
 | `adhoc-participants-undetermined` | core, IF-IDR | Ad hoc participants cannot be determined (TS 24.379 warning 187) |
 | `adhoc-too-many-participants` | core | Ad hoc participants over the call type's limit (warning 189) |
 | `participant-limit-exceeded` | core | More participants than the session decision allows, in a session that is not a group call the core can truncate (§5.2; SIP 486, warning 122). Since v0.21 |
+| `initiator-not-served` | core | The initiator is not within the profile's declared domains, and the deployment states `MCX_FOREIGN_INITIATOR=refuse` (PLT-IDM-008; PLT-VP-R1 RES-OP-11). Checked before step 0, so no hook runs; SIP 404 with warning `141 user unknown to the participating function`, as TS 24.379 answers a caller the participating function has no MCPTT ID for (10.1.1.3.1.1 step 2a, 11.1.1.3.1.1 step 4). Not applied to a request a gateway relays through the IF-IWF API (§7.2); a gateway's INVITE over SIP is subject to it. Since v0.23 |
 
 `hook-contract-violation` is distinguished from `hook-error` deliberately: the
 first indicates a profile defect and should be alertable, the second may be an
@@ -805,6 +808,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.23 | 2026-10-17 | §9: core code `initiator-not-served` (PLT-VP-R1 RES-OP-11, owner ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required). A minor change: no hook or parameter object changes. |
 | 0.22 | 2026-10-16 | Owner ruling: two decisions become profile settings, required with no default. §2.7 and ICD-LIM-001..003: `group_over_limit` per call type (`truncate`, TS 24.379 6.3.5.5, or `refuse`); §5.3 POST-5: `preemption_at_full_queue` on `FloorPolicy` (`insert`, TS 24.380 6.3.4.4.7 item 2e, or `deny`), checked by the core. A deviation is reported at startup. A signature change: `FloorPolicy` gains a required field; the in-tree profiles state the previous behaviour, so none changes. |
 | 0.21 | 2026-09-29 | §5.2: the core checks and applies the session decision (PLT-VP-R1 RES-OP-12). The participant limit is the decision's, and a group call over it is truncated with warning 122 instead of refused (TS 24.379 6.3.5.5, 10.1.1.4.1); the in-tree admission no longer refuses on it. A session over the limit that is not a truncatable group call is refused with the new core code `participant-limit-exceeded` (§9). POST-1 read as equality, POST-2 states what is counted. ICD-OP-15 opened. A minor change: signatures unchanged; a group call the in-tree profiles used to refuse is now established with fewer participants. |
 | 0.20 | 2026-09-29 | ICD-GEN-041 made true (PLT-VP-R1 RES-OP-02): every invocation records what the hook returned, in full, and a value the audit cannot record exactly is refused. IF-ICX `map_outbound` and IF-PRI `compare` now go through the invocation boundary; `map_outbound` runs before QoS is reserved. IF-ICX gets the 20 ms deadline ICD-GEN-010 always gave it. §4.2 POST-6. A minor change: signatures unchanged; what is newly refused is a value holding a type the ICD's own value types do not declare. |

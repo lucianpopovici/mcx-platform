@@ -29,7 +29,7 @@ import threading
 import uuid
 import weakref
 
-from core.errors import IDENTITY_NOT_AUTHENTICATED, NOT_AUTHORISED
+from core.errors import IDENTITY_NOT_AUTHENTICATED, INITIATOR_NOT_SERVED, NOT_AUTHORISED
 from core.hooks import MediaKind
 from core.invoke import Invoker
 from core.session import Session, Signal, SignalType
@@ -553,6 +553,13 @@ class SipCore:
             # Checked before anything is established or anyone invited: the
             # initiator's identity decides priority, roles and admission.
             return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        if self.rt.config.foreign_initiator == "refuse" and identity.outside(
+                [sr.initiator], self.rt.loaded.profile.identity.domains):
+            # RES-OP-11: the participating function's check (TS 24.379
+            # 17.3.2.1.1 step 3, 10.1.1.3.1.1 step 2a) comes before the
+            # controlling function's (17.4.2.2 step 3A) and the session timer.
+            # The core makes it again for callers that do not come over SIP.
+            return self._reject(txn, INITIATOR_NOT_SERVED)
         if sr.request_id in self._dialogs or sr.request_id in self.calls:
             # A new INVITE reusing a live call's Call-ID would replace that
             # call in every table keyed by it: its BYE would then end the

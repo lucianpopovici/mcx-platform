@@ -43,6 +43,7 @@ from .errors import (
     NO_LOCATION_BINDING,
     PARTNER_NOT_PERMITTED,
     PARTICIPANT_LIMIT_EXCEEDED,
+    INITIATOR_NOT_SERVED,
     PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
@@ -131,8 +132,20 @@ class Session:
 
 # RES-OP-14: what a floor transition the audit store cannot take does.
 FLOOR_UNRECORDED = ("deny", "allow")
+# RES-OP-11: what a caller outside the profile's declared domains gets.
+FOREIGN_INITIATOR = ("refuse", "allow")
 
 
+
+
+INITIATOR_RECORDED_MAX = 256
+
+
+def _bounded(text: str) -> str:
+    """At most INITIATOR_RECORDED_MAX characters, with the full length."""
+    if len(text) <= INITIATOR_RECORDED_MAX:
+        return text
+    return f"{text[:INITIATOR_RECORDED_MAX]}... ({len(text)} characters)"
 
 class _CountingAuditor:
     """MCX_FLOOR_UNRECORDED=allow: the floor's records, written or counted
@@ -170,7 +183,8 @@ class SessionManager:
                  defer_floor_start: bool = False,
                  adhoc_list_max: Optional[int] = None,
                  cells: Optional[Mapping[str, Mapping[str, str]]] = None,
-                 floor_unrecorded: str = "deny") -> None:
+                 floor_unrecorded: str = "deny",
+                 foreign_initiator: str = "refuse") -> None:
         self._loaded = loaded
         self._hooks = loaded.hooks
         self._profile = loaded.profile
@@ -204,6 +218,15 @@ class SessionManager:
             raise ValueError(f"floor_unrecorded {floor_unrecorded!r} is not one of "
                              f"{', '.join(FLOOR_UNRECORDED)}")
         self._floor_unrecorded = floor_unrecorded
+        # RES-OP-11 (owner ruling 2026-10-17, MCX_FOREIGN_INITIATOR, required
+        # in the service): a caller outside the profile's declared domains is
+        # "refuse"d, 404 + 141 (PLT-IDM-008), or "allow"ed, a deviation the
+        # service reports. A request a gateway relays (receive_inbound) is
+        # foreign by nature and not subject to it.
+        if foreign_initiator not in FOREIGN_INITIATOR:
+            raise ValueError(f"foreign_initiator {foreign_initiator!r} is not one of "
+                             f"{', '.join(FOREIGN_INITIATOR)}")
+        self._foreign_initiator = foreign_initiator
 
     # -- observation ----------------------------------------------------
 
@@ -223,7 +246,19 @@ class SessionManager:
 
         Exactly one of `session` and `refusal` is non-None.
         """
+        return self._establish(request, relayed=False)
+
+    def _establish(self, request: SessionRequest, relayed: bool) -> Tuple[
+            Optional[Session], Tuple[Signal, ...], Optional[Refusal]]:
         cid = request.request_id
+        if not relayed and self._foreign_initiator == "refuse" and \
+                identity.outside([request.initiator], self._profile.identity.domains):
+            # Before anything else: a caller this deployment does not serve
+            # learns nothing about the target, the roles or the call types
+            # (PLT-IDM-008; RES-OP-11).
+            return self._refuse(cid, request, INITIATOR_NOT_SERVED,
+                                "initiator is outside the profile's declared domains",
+                                step="initiator")
         invoker = Invoker(self._auditor, cid)
         signals: List[Signal] = []
         request = self._located(request)
@@ -512,6 +547,9 @@ class SessionManager:
         receives NO privilege from having arrived through a gateway: it is
         resolved, prioritised and admitted exactly like a local request.
         Priority the foreign system asserted is advisory; IF-PRI decides.
+        One check is skipped: MCX_FOREIGN_INITIATOR, since a relayed caller
+        is foreign by nature (RES-OP-11). This is the IF-IWF API path only; a
+        gateway's INVITE over SIP is an ordinary request and subject to it.
         """
         # A read-only copy: the gateway must not change what the core reads
         # back below, nor the caller's own mapping (RES-OP-06).
@@ -533,7 +571,7 @@ class SessionManager:
                            inbound_from=str(foreign.get("system") or ""),
                            mapped_call_type=request.call_type,
                            asserted_priority=str(foreign.get("priority") or ""))
-        return self.establish(request)
+        return self._establish(request, relayed=True)
 
     # -- release ---------------------------------------------------------
 
@@ -1110,7 +1148,9 @@ class SessionManager:
         # PLT-HOK-033: nothing is established, no invitation is sent.
         self._auditor.emit(RecordType.SESSION_REFUSED, cid,
                            call_type=request.call_type,
-                           initiator=request.initiator,
+                           # An asserted identity is the peer's text: bounded
+                           # (RES-OP-11 review; RES-OP-15 bounds the Call-ID).
+                           initiator=_bounded(request.initiator),
                            reason_code=reason_code, detail=detail)
         return None, (Signal(SignalType.RESPONSE_REJECT,
                              target=request.initiator,

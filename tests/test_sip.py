@@ -586,6 +586,9 @@ def test_every_specification_warning_code_is_in_the_specification_table():
             (189, "maximum number of allowed adhoc group participants exceeded"),
         # V17.15.0 and later; 10.1.2 answers a full call 486 with it.
         "participant-limit-exceeded": (122, "too many participants"),
+        # RES-OP-11: the participating function has no MCPTT ID for the
+        # caller (10.1.1.3.1.1 step 2a and the other participating procedures).
+        "initiator-not-served": (141, "user unknown to the participating function"),
     }
 
 
