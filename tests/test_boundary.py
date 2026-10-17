@@ -46,21 +46,24 @@ def test_every_plan_case_has_a_check():
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.vp("VP1-BND-001")
 def test_forbidden_term_check_detects_an_injected_violation(tmp_path):
     _stage(tmp_path, core_extra="# a railway-specific note\n")
     violations = gate.check_forbidden_terms(tmp_path)
     assert violations and "railway" in violations[0]
 
 
+@pytest.mark.vp("VP1-BND-002")
 def test_import_check_detects_an_injected_violation(tmp_path):
     _stage(tmp_path, core_extra="from profiles.mcx import hooks\n")
     violations = gate.check_imports(tmp_path)
     assert violations and "profiles.mcx" in violations[0]
 
 
+@pytest.mark.vp("VP1-BND-003")
 def test_hook_call_site_check_detects_an_undeclared_method(tmp_path):
-    _stage(tmp_path,
-           core_extra="def f(h):\n    return h.priority_policy.recalculate()\n")
+    _tree(tmp_path, {"core/sample.py":
+                     "def f(h):\n    return h.priority_policy.recalculate()\n"})
     violations = gate.check_hook_call_sites(tmp_path)
     assert violations and "recalculate" in violations[0]
 
@@ -615,3 +618,525 @@ def test_a_config_file_without_a_pytest_section_is_not_refused(tmp_path, name, t
     assert _matrix_tree(tmp_path) == []
     (tmp_path / name).write_text(text, encoding="utf-8")
     assert gate.check_conformance_matrix(tmp_path) == []
+
+
+# --------------------------------------------------------------------------
+# RES-OP-09 — the variants the TS-BND review got past each gate (batch A:
+# VP1-BND-001, 002, 003, 005)
+# --------------------------------------------------------------------------
+
+
+def _tree(tmp_path, files):
+    """The real core/hooks.py, core/errors.py and profile.yaml files, plus
+    `files` ({relative path: text})."""
+    for rel in ("core/hooks.py", "core/errors.py", "core/validation.py", "core/loader.py",
+                *[str(p.relative_to(ROOT)) for p in (ROOT / "profiles").glob("*/profile.yaml")]):
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text((ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    for rel, text in files.items():
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text,term", [
+    ("class RailwayProfile:\n    pass\n", "railway"),
+    ("TRAINS = 3\n", "train"),
+    ("# for dispatchers\n", "dispatcher"),
+    ("# GSM-R only\n", "gsmr"),
+    ("gsm_r = 1\n", "gsmr"),
+    ("track_section = 'a'\n", "track section"),
+    ("def trackSection(): pass\n", "track section"),
+    ("# P25 interworking\n", "p25"),
+    ("MODE = 'utility'\n", "utility"),          # an in-tree profile's name
+    ("# frmcs\n", "frmcs"),
+], ids=["camel", "plural-upper", "plural", "hyphen", "underscore-join", "snake-phrase",
+        "camel-phrase", "p25", "profile-name", "fixed-term"])
+def test_bnd_001_catches_the_variants(tmp_path, text, term):
+    _tree(tmp_path, {"core/sample.py": text})
+    violations = gate.check_forbidden_terms(tmp_path)
+    assert any(f"forbidden term {term!r}" in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-001")
+def test_bnd_001_reads_every_file_under_core(tmp_path):
+    _tree(tmp_path, {"core/NOTES.md": "railway notes\n", "core/x.yaml": "k: tetra\n"})
+    v = gate.check_forbidden_terms(tmp_path)
+    assert any("NOTES.md" in x and "railway" in x for x in v)
+    assert any("x.yaml" in x and "tetra" in x for x in v)
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text", [
+    "initiator = 1\n", "# trailing text\n", "MCX_RELEASE = 1\n",
+    "log = 'mcx.session'\n", "imminent_peril = True\n", "atomic = 1\n",
+    "TRAINING = 1\n",
+])
+def test_bnd_001_leaves_the_platforms_own_words_alone(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_forbidden_terms(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text,expect", [
+    ("from .. import profiles\n", "core imports 'profiles'"),
+    ("from ..profiles import mcx\n", "core imports 'profiles"),
+    ("import importlib\nm = importlib.import_module('profiles.mcx.hooks')\n", "dynamic import"),
+    ("m = __import__('profiles')\n", "dynamic import"),
+    ("from importlib import import_module\nm = import_module(name)\n", "dynamic import"),
+    ("P = 'profiles/mcx/hooks.py'\n", "names the profiles package"),
+    ("P = 'profiles.mcx'\n", "names the profiles package"),
+], ids=["relative", "relative-module", "import_module", "__import__", "bare-import_module",
+        "path-string", "module-string"])
+def test_bnd_002_catches_the_variants(tmp_path, text, expect):
+    _tree(tmp_path, {"core/sample.py": text})
+    violations = gate.check_imports(tmp_path)
+    assert any(expect in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-002")
+def test_bnd_002_permits_only_the_loaders_configuration_driven_import(tmp_path):
+    loader = ("import importlib\n\ndef _import_symbol(spec):\n"
+              "    return importlib.import_module(spec)\n")
+    _tree(tmp_path, {"core/loader.py": loader})
+    assert gate.check_imports(tmp_path) == []
+    # the same call anywhere else, or in a method of that name, is not sanctioned
+    _tree(tmp_path, {"core/loader.py": loader.replace("_import_symbol", "elsewhere")})
+    assert any("dynamic import" in v for v in gate.check_imports(tmp_path))
+    _tree(tmp_path, {"core/loader.py": "import importlib\n\nclass X:\n"
+                     "    def _import_symbol(self, n):\n        return importlib.import_module(n)\n"})
+    assert any("dynamic import" in v for v in gate.check_imports(tmp_path))
+    _tree(tmp_path, {"core/loader.py": loader.replace(
+        "importlib.import_module(spec)", "importlib.import_module('profiles.x')")})
+    assert any("names the profiles package" in v for v in gate.check_imports(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text", [
+    "from importlib import import_module as im\nm = im(n)\n",
+    "import importlib\nim = importlib.import_module\nm = im(n)\n",
+    "import importlib\nf = getattr(importlib, 'import_module')\n",
+    "exec('import profiles')\n",
+    "exec('import ' + 'prof' + 'iles')\n",
+    "x = eval(s)\n",
+    "import importlib.util\n",
+    "import runpy\nrunpy.run_module(n)\n",
+    "import pkgutil\npkgutil.resolve_name(spec)\n",
+    "import sys\nm = sys.modules[n]\n",
+    "f = __builtins__['__import__']\n",
+    "import requests\n",
+], ids=["alias", "assigned", "getattr", "exec", "exec-concat", "eval", "importlib.util",
+        "runpy", "pkgutil", "sys.modules", "builtins", "third-party"])
+def test_bnd_002_catches_the_reviews_second_round(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_imports(tmp_path), text
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text", [
+    "P = f'{root}/profiles/mcx'\n", "P = '/srv/app/profiles/mcx'\n", "P = b'profiles.mcx'\n",
+], ids=["f-string", "absolute-path", "bytes"])
+def test_bnd_002_finds_profiles_anywhere_in_a_string(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any("names the profiles package" in v for v in gate.check_imports(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text", [
+    "import re\nx = re.compile('a')\n", "# profiles. are loaded at startup\n",
+    "D = 'profiles. are loaded at startup'\n", "import yaml, json, typing\n",
+])
+def test_bnd_002_leaves_ordinary_code_alone(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_imports(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-003")
+@pytest.mark.parametrize("text,expect", [
+    ("def f(self):\n    p = self._hooks.session_policy\n    return p.poke()\n",
+     "session_policy.poke"),
+    ("def f(self):\n    return getattr(self._hooks.session_policy, 'poke')()\n", "getattr"),
+    ("def f(self):\n    p = self._hooks.priority_policy\n    return getattr(p, 'x')\n", "getattr"),
+    ("def f(h):\n    return h.bearer_selector.reserve()\n", "reserve"),
+], ids=["alias", "getattr", "getattr-alias", "undeclared"])
+def test_bnd_003_catches_the_variants(tmp_path, text, expect):
+    _tree(tmp_path, {"core/sample.py": text})
+    violations = gate.check_hook_call_sites(tmp_path)
+    assert any(expect in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_bnd_003_reads_the_methods_from_the_protocols():
+    methods = gate.hook_methods(ROOT)
+    assert methods["session_policy"] == {"authorise", "admit", "decide", "floor_policy"}
+    assert methods["priority_policy"] == {"evaluate", "compare"}
+    assert "determine_participants" in methods["identity_resolver"]
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_bnd_003_passes_an_alias_used_for_its_declared_methods(tmp_path):
+    _tree(tmp_path, {"core/sample.py":
+                     "def f(self):\n    p = self._hooks.priority_policy\n"
+                     "    return p.evaluate(1), p.compare(1, 2)\n"})
+    assert gate.check_hook_call_sites(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-005")
+@pytest.mark.parametrize("text,expect", [
+    ("from core import session\n", "core internals 'core'"),
+    ("from core import model\n", "core internals 'core'"),          # a module object
+    ("import core\n", "core module 'core'"),
+    ("import core.hooks as h\n", "core module 'core.hooks'"),
+    ("import importlib\nm = importlib.import_module('core.session')\n", "dynamic import"),
+    ("import importlib\nm = importlib.import_module('.session', 'core')\n", "dynamic import"),
+    ("from importlib import import_module as im\nm = im('core.session')\n", "dynamic import"),
+    ("import sys\nm = sys.modules['core'].session\n", "dynamic import"),
+    ("exec('from core import session')\n", "dynamic import"),
+    ("from core.model import Network\n", "core.model.Network"),
+    ("from core.errors import StartupRefused\n", "core.errors.StartupRefused"),
+    ("from core.invoke import Invoker\n", "core.invoke"),
+    ("S = 'core.loader:startup'\n", "names a core module"),
+    ("S = 'core/loader.py'\n", "names a core module"),
+], ids=["from-core-module", "from-core-model", "import-core", "import-as", "import_module",
+        "import_module-package", "import_module-alias", "sys.modules", "exec", "model-name",
+        "error-class", "internal-module", "spec-string", "path-string"])
+def test_bnd_005_permits_named_interface_symbols_only(tmp_path, text, expect):
+    _tree(tmp_path, {"profiles/mcx/hooks.py": text})
+    violations = gate.check_profile_callbacks(tmp_path)
+    assert any(expect in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_a_profile_module_cannot_launder_a_core_module(tmp_path):
+    """The review's blocking finding: `tables.model` was core.model itself.
+    A profile now binds no core module, so there is none to re-export."""
+    tables = (ROOT / "profiles/common/tables.py").read_text(encoding="utf-8")
+    _tree(tmp_path, {"profiles/common/tables.py": tables,
+                     "profiles/mcx/hooks.py":
+                     "from profiles.common import tables\nx = tables.model.Network\n"})
+    assert gate.check_profile_callbacks(tmp_path) == []        # nothing to reach through
+    assert "from core import model" not in tables
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_core_attribute_keys_are_not_modules(tmp_path):
+    _tree(tmp_path, {"profiles/mcx/hooks.py": "K = 'core.active_sessions'\n"})
+    assert gate.check_profile_callbacks(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_a_hook_spec_must_name_the_profiles_own_package(tmp_path):
+    yaml_text = (ROOT / "profiles/mcx/profile.yaml").read_text(encoding="utf-8")
+    import re
+    planted = re.sub(r"(\n\s+session_policy:\s*)\S+", r"\1core.session:SessionManager",
+                     yaml_text, count=1)
+    assert planted != yaml_text
+    _tree(tmp_path, {"profiles/mcx/profile.yaml": planted})
+    assert any("hook session_policy names 'core.session:SessionManager'" in v
+               for v in gate.check_profile_callbacks(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-005")
+@pytest.mark.parametrize("name", ["profiles/mcx/x.cpython-311-x86_64-linux-gnu.so",
+                                  "profiles/mcx/x.pyc"])
+def test_bnd_005_refuses_a_compiled_module(tmp_path, name):
+    _tree(tmp_path, {name: ""})
+    assert any("compiled module" in v for v in gate.check_profile_callbacks(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_reports_a_file_it_cannot_parse(tmp_path):
+    _tree(tmp_path, {"profiles/mcx/hooks.py": "def (:\n"})
+    assert any("does not parse" in v for v in gate.check_profile_callbacks(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_permits_what_the_in_tree_tables_use(tmp_path):
+    _tree(tmp_path, {"profiles/common/tables.py":
+                     (ROOT / "profiles/common/tables.py").read_text(encoding="utf-8")})
+    assert gate.check_profile_callbacks(tmp_path) == []
+    permitted = gate.profile_permitted(ROOT)
+    assert permitted["core.model"] == {"Profile", "CallType", "FunctionalIdentity",
+                                       "BearerDecisionSpec"}
+    assert {"HookContractViolation", "PlatformError", "UNKNOWN_TARGET"} <= \
+        permitted["core.errors"]
+    assert {"FloorPolicy", "SessionRequest", "MediaKind"} <= permitted["core.hooks"]
+
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text,term", [
+    ("railwayprofile = 1\n", "railway"), ("RAILWAYPROFILE = 1\n", "railway"),
+    ("frmcsmode = 1\n", "frmcs"), ("tracksection = 1\n", "track section"),
+    ("publicsafety = 1\n", "public safety"), ("# utilities\n", "utility"),
+    ("\uff52ailway = 1\n", "railway"),           # fullwidth r: NFKC reads it as "railway"
+], ids=["lower-compound", "upper-compound", "profile-compound", "phrase-joined",
+        "phrase-joined-2", "ies-plural", "fullwidth"])
+def test_bnd_001_second_round_variants(tmp_path, text, term):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any(f"forbidden term {term!r}" in v for v in gate.check_forbidden_terms(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("rel,term", [("core/railway_rules.py", "railway"),
+                                      ("core/frmcs/__init__.py", "frmcs")])
+def test_bnd_001_reads_file_and_package_names(tmp_path, rel, term):
+    _tree(tmp_path, {rel: "x = 1\n"})
+    assert any("in the file's name" in v and term in v
+               for v in gate.check_forbidden_terms(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("content", [b"\x00\x01", "railway".encode("utf-16-le"), b"\xff\xfe"],
+                         ids=["nul", "utf16", "not-utf8"])
+def test_bnd_001_refuses_a_file_that_is_not_text(tmp_path, content):
+    _tree(tmp_path, {})
+    (tmp_path / "core" / "blob.dat").write_bytes(content)
+    assert any("blob.dat" in v and "not text" in v for v in gate.check_forbidden_terms(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-001")
+def test_bnd_001_refuses_a_non_ascii_identifier(tmp_path):
+    _tree(tmp_path, {"core/sample.py": "r\u0430ilway = 1\n"})     # Cyrillic a
+    assert any("non-ASCII identifier" in v for v in gate.check_forbidden_terms(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text", [
+    "x = a.to_bytes(2, 'big')\n", "# map a to b\n", "def a_to_b(x): pass\n",
+    "s = 'From A To B'\n", "# Tr Ains\n", "# et cs\n", "# a constraint\n",
+    "# a guardrail\n",
+])
+def test_bnd_001_does_not_join_words_across_spaces_or_dots(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_forbidden_terms(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-001")
+def test_bnd_001_skips_caches_and_dotfiles(tmp_path):
+    _tree(tmp_path, {})
+    for rel in ("core/.mypy_cache/x.json", "core/.sample.py.swp", "core/__pycache__/a.pyc"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"\x00railway")
+    assert gate.check_forbidden_terms(tmp_path) == []
+
+
+H = "self._hooks.session_policy"
+
+
+@pytest.mark.vp("VP1-BND-003")
+@pytest.mark.parametrize("text,expect", [
+    (f"def f(self):\n    p, q = {H}, 1\n    return p.poke()\n", "session_policy.poke"),
+    (f"def f(self):\n    (p,) = ({H},)\n    return p.poke()\n", "session_policy.poke"),
+    (f"def f(self):\n    p = {H}\n    q = p\n    return q.poke()\n", "session_policy.poke"),
+    (f"class C:\n    def __init__(self):\n        self._sp = {H}\n"
+     "    def g(self):\n        return self._sp.poke()\n", "session_policy.poke"),
+    (f"def f(self):\n    for p in ({H},):\n        p.poke()\n", "session_policy.poke"),
+    (f"def f(self):\n    return [p.poke() for p in ({H},)]\n", "session_policy.poke"),
+    (f"def f(self):\n    g = lambda p={H}: p.poke()\n", "session_policy.poke"),
+    ("def f(self):\n    return getattr(self._hooks, 'session_policy').poke()\n",
+     "the hook bundle"),
+    ("def f(self):\n    return vars(self._hooks)['session_policy']\n", "the hook bundle"),
+], ids=["tuple", "tuple-paren", "alias-of-alias", "self-attribute", "for", "comprehension",
+        "lambda-default", "getattr-bundle", "vars-bundle"])
+def test_bnd_003_second_round_variants(tmp_path, text, expect):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any(expect in v for v in gate.check_hook_call_sites(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_bnd_003_an_alias_is_scoped_to_its_function(tmp_path):
+    """No false positive: a name bound to a hook in one method and to
+    something else in another."""
+    _tree(tmp_path, {"core/sample.py":
+                     f"class C:\n    def a(self):\n        policy = {H}\n"
+                     "        return policy.decide(1)\n"
+                     "    def b(self, policy):\n        return policy.max_queue_depth\n"})
+    assert gate.check_hook_call_sites(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_bnd_003_the_loader_table_must_match_the_protocols(tmp_path):
+    loader = (ROOT / "core/loader.py").read_text(encoding="utf-8")
+    assert '("evaluate", "compare")' in loader
+    _tree(tmp_path, {"core/loader.py": loader.replace('("evaluate", "compare")',
+                                                      '("evaluate",)')})
+    assert any("HOOK_INTERFACES" in v for v in gate.check_hook_call_sites(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_bnd_003_fails_closed_without_the_hook_definitions(tmp_path):
+    _stage(tmp_path)
+    assert any("could not be read" in v for v in gate.check_hook_call_sites(tmp_path))
+
+
+# -- third round (review of batch A, round 2)
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text,term", [
+    ("TRAINID = 1\n", "train"), ("traindriver = 1\n", "train"), ("railnet = 1\n", "rail"),
+    ("# ra­ilway\n", "railway"), ("# railwaý\n", "railway"),
+], ids=["trainid", "traindriver", "railnet", "soft-hyphen", "combining-accent"])
+def test_bnd_001_third_round_variants(tmp_path, text, term):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any(f"forbidden term {term!r}" in v for v in gate.check_forbidden_terms(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text", ["# rаilway\n", "X = 'rаilway'\n"],
+                         ids=["comment", "string"])
+def test_bnd_001_refuses_a_word_mixing_scripts(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any("mixes ASCII and other letters" in v for v in gate.check_forbidden_terms(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-001")
+def test_bnd_001_reads_dotfiles_and_refuses_non_ascii_names(tmp_path):
+    _tree(tmp_path, {"core/.railway.py": "x = 1\n", "core/rаil.py": "x = 1\n"})
+    v = gate.check_forbidden_terms(tmp_path)
+    assert any(".railway.py" in x and "railway" in x for x in v)
+    assert any("non-ASCII file name" in x for x in v)
+
+
+@pytest.mark.vp("VP1-BND-001")
+@pytest.mark.parametrize("text", ["# a strained link\n", "# trailing\n", "# constraint\n",
+                                  "# training data\n", "x = handrail\n"])
+def test_bnd_001_inside_word_exceptions(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_forbidden_terms(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text", [
+    "from sys import modules\nm = modules[n]\n", "import sys as s\nm = s.modules[n]\n",
+    "import builtins\nf = getattr(builtins, '__import__')\n", "import pydoc\nx = pydoc.locate(n)\n",
+    "import pickle\n", "import logging.config\n", "x = __spec__.loader\n",
+    "x = f.__globals__\n", "x = h.authorise.__self__\n", "g = globals()\n",
+], ids=["from-sys", "sys-as", "builtins", "pydoc", "pickle", "logging.config", "__spec__",
+        "__globals__", "__self__", "globals"])
+def test_bnd_002_third_round_variants(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_imports(tmp_path), text
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text", ["P = '../profiles'\n", "P = '/srv/profiles'\n",
+                                  "P = 'profiles\\\\mcx'\n", "P = 'Profiles/mcx'\n"])
+def test_bnd_002_path_strings_ending_in_profiles(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any("names the profiles package" in v for v in gate.check_imports(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-003")
+@pytest.mark.parametrize("text", [
+    f"def f(self, x):\n    p = {H} if x else None\n    return p\n",
+    f"def f(self, d):\n    p = {H} or d\n",
+    f"def f(self):\n    ps = [{H}]\n    return ps[0].poke()\n",
+    f"def f(self):\n    return ({H},)[0]\n",
+    "def f(self):\n    h = self._hooks\n    return getattr(h, 'session_policy').poke()\n",
+    "def f(self):\n    return self._hooks.__dict__['session_policy']\n",
+    f"def f(self):\n    g = getattr\n    return g({H}, 'poke')\n",
+    f"def f(self, other):\n    return other(self._hooks.session_policy)\n",
+], ids=["ifexp", "or", "list", "tuple-subscript", "bundle-alias", "bundle-dict",
+        "getattr-alias", "passed-as-argument"])
+def test_bnd_003_only_known_shapes_pass(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert gate.check_hook_call_sites(tmp_path), text
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_the_core_sees_a_hook_through_its_protocol_only():
+    """VP1-BND-003 at run time: whatever route core code takes, an undeclared
+    method of a hook is not there; the declared ones are the hook's own."""
+    from core import loader
+    from core.audit import Auditor, MemorySink
+    from core.session import SessionManager
+    loaded = loader.load(ROOT / "profiles" / "mcx")
+    raw = loaded.hooks.identity_resolver
+    assert hasattr(raw, "register_group")                    # provisioning, not IF-IDR
+    mgr = SessionManager(loaded, Auditor(MemorySink(), "p"))
+    view = mgr._hooks.identity_resolver
+    with pytest.raises(AttributeError, match="declares no 'register_group'"):
+        view.register_group
+    # nothing on the view, nor a method's __self__, is the hook itself
+    for route in (lambda: view._target, lambda: getattr(view, "_target"),
+                  lambda: view.resolve.__self__):
+        with pytest.raises(AttributeError):
+            route()
+    with pytest.raises(AttributeError):
+        view.resolve = None
+    assert sorted(dir(view)) == sorted(gate.hook_methods(ROOT)["identity_resolver"])
+
+
+@pytest.mark.vp("VP1-BND-005")
+@pytest.mark.parametrize("text,expect", [
+    ("from service.config import Release\n", "service.config"),
+    ("import service.config as sc\n", "service.config"),
+    ("from tools import check_boundary\n", "'tools'"),
+    ("from sys import modules\n", "'sys'"),
+    ("import inspect\n", "'inspect'"),
+    ("from core.hooks import freeze\nx = freeze.__globals__\n", "__globals__"),
+    ("from core.hooks import SessionRequest\nm = SessionRequest.__module__\n", "__module__"),
+], ids=["service-config", "service-as", "tools", "sys", "inspect", "__globals__", "__module__"])
+def test_bnd_005_third_round_variants(tmp_path, text, expect):
+    _tree(tmp_path, {"profiles/mcx/hooks.py": text})
+    assert any(expect in v for v in gate.check_profile_callbacks(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_super_init_is_fine(tmp_path):
+    _tree(tmp_path, {"profiles/mcx/hooks.py":
+                     "class A(object):\n    def __init__(self):\n        super().__init__()\n"})
+    assert gate.check_profile_callbacks(tmp_path) == []
+
+
+@pytest.mark.vp("VP1-BND-005")
+def test_bnd_005_the_main_module_guard_is_fine(tmp_path):
+    _tree(tmp_path, {"profiles/mcx/hooks.py":
+                     "if __name__ == '__main__':\n    pass\n"})
+    assert gate.check_profile_callbacks(tmp_path) == []
+    _tree(tmp_path, {"profiles/mcx/hooks.py": "x = f.__name__\nimport __main__\n"})
+    assert gate.check_profile_callbacks(tmp_path) == [
+        "profiles/mcx/hooks.py:1: profile uses __name__; interpreter internals reach past "
+        "the named imports",
+        "profiles/mcx/hooks.py:2: profile imports '__main__'; a profile imports the standard "
+        "library, profiles and named core symbols only"]
+
+
+
+@pytest.mark.vp("VP1-BND-002")
+@pytest.mark.parametrize("text", [
+    "def f(self):\n    m = self._hooks.session_policy.authorise\n"
+    "    return getattr(m, '__self__').poke()\n",
+    "import operator\nx = operator.attrgetter('__globals__')\n",
+], ids=["getattr-self-string", "attrgetter-string"])
+def test_bnd_002_refused_names_as_strings(tmp_path, text):
+    _tree(tmp_path, {"core/sample.py": text})
+    assert any("as a string" in v for v in gate.check_imports(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-005")
+@pytest.mark.parametrize("text,expect", [
+    ("from core.hooks import freeze\nx = getattr(freeze, '__globals__')\n", "__globals__"),
+    ("import operator\nx = operator.attrgetter('__globals__')\n", "__globals__"),
+    ("from core.model import Profile\nx = vars(Profile)\n", "vars()"),
+], ids=["getattr-string", "attrgetter", "vars"])
+def test_bnd_005_refused_names_as_strings(tmp_path, text, expect):
+    _tree(tmp_path, {"profiles/mcx/hooks.py": text})
+    assert any(expect in v for v in gate.check_profile_callbacks(tmp_path))
+
+
+@pytest.mark.vp("VP1-BND-003")
+def test_a_hook_patched_after_the_view_was_made_is_the_one_called(monkeypatch):
+    from core import loader
+    from core.audit import Auditor, MemorySink
+    from core.session import SessionManager
+    loaded = loader.load(ROOT / "profiles" / "mcx")
+    mgr = SessionManager(loaded, Auditor(MemorySink(), "p"))
+    monkeypatch.setattr(loaded.hooks.priority_policy, "compare", lambda a, b: 42)
+    assert mgr._hooks.priority_policy.compare(1, 2) == 42
+    assert mgr._hooks.priority_policy.compare.__name__ == "compare"

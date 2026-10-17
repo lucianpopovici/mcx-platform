@@ -282,45 +282,85 @@ VP1-LOAD-042:
     reason call-type-not-permitted (or the declared undeclared-type code), that no session exists in the
     manager or store, and that the audit record shows a refusal.
 VP1-BND-001:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-17'
   evidence:
-  - gate:VP1-BND-001
-  gap: 'Tokenised word match over core/*.py with a fixed 15-term list. Probed misses: CamelCase identifier
-    `class RailwayProfile` (token ''railwayprofile''), plurals (''trains'', ''dispatchers''), ''GSM-R''
-    (splits to gsm/r), identifier `track_section` (multiword match needs a space), in-tree profile name
-    ''utility'' (not in list), non-.py files under core/ (e.g. core/PROFILE_BOUNDARY.md, any yaml). Close
-    with: split identifiers on case and ''_'' boundaries, match stems/plurals and hyphen/underscore variants,
-    derive profile names from profiles/*/profile.yaml, scan every file under core/.'
-  note: Identifiers, literals and comments are all on the scanned lines, but only for exact whole-token
-    forms of a hand-kept list.
+    - gate:VP1-BND-001
+    - tests/test_boundary.py::test_bnd_001_catches_the_variants
+    - tests/test_boundary.py::test_bnd_001_does_not_join_words_across_spaces_or_dots
+    - tests/test_boundary.py::test_bnd_001_inside_word_exceptions
+    - tests/test_boundary.py::test_bnd_001_leaves_the_platforms_own_words_alone
+    - tests/test_boundary.py::test_bnd_001_reads_dotfiles_and_refuses_non_ascii_names
+    - tests/test_boundary.py::test_bnd_001_reads_every_file_under_core
+    - tests/test_boundary.py::test_bnd_001_reads_file_and_package_names
+    - tests/test_boundary.py::test_bnd_001_refuses_a_file_that_is_not_text
+    - tests/test_boundary.py::test_bnd_001_refuses_a_non_ascii_identifier
+    - tests/test_boundary.py::test_bnd_001_refuses_a_word_mixing_scripts
+    - tests/test_boundary.py::test_bnd_001_second_round_variants
+    - tests/test_boundary.py::test_bnd_001_skips_caches_and_dotfiles
+    - tests/test_boundary.py::test_bnd_001_third_round_variants
+    - tests/test_boundary.py::test_forbidden_term_check_detects_an_injected_violation
+  note: >-
+    Re-reviewed after RES-OP-09 (batch A, four rounds). Every file under core/ is read, its name
+    included; identifiers split on case, digits, `_` and `-`, words joined only within a compound;
+    plurals; NFKC, format characters and combining marks removed; words mixing ASCII and other
+    letters, non-ASCII identifiers and file names refused; control characters are not text; profile
+    names come from profiles/. Distinctive terms also match inside a word (railwayprofile, TRAINID)
+    but for an exception list (trail, constrain, strain, guardrail, handrail, training); `ato` is
+    whole-word only. "imminent peril" left the list: a TS 24.379 element the core must handle.
+    Accepted: string concatenation, escapes, a term spaced or dotted out or split across lines,
+    `atoctl`; false positives tetrahedron, p250, EventDispatcher, "device driver", "a utility
+    function", Zürich.
 VP1-BND-002:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-17'
   evidence:
-  - gate:VP1-BND-002
-  gap: 'Only ast.Import/ImportFrom with module ''profiles[.x]''. Probed misses: `importlib.import_module(''profiles.mcx.hooks'')`,
-    `__import__(''profiles'')`, and `from .. import profiles` (ImportFrom with module=None is skipped).
-    Close with: resolve relative imports (level + names), flag string literals starting ''profiles.''
-    / ''profiles/'' passed to importlib/__import__/Path in core/, and state explicitly that core/loader.py''s
-    config-driven import_module is the one sanctioned dynamic edge.'
-  note: Plain static imports are caught; dynamic and relative-name forms are not.
+    - gate:VP1-BND-002
+    - tests/test_boundary.py::test_bnd_002_catches_the_reviews_second_round
+    - tests/test_boundary.py::test_bnd_002_catches_the_variants
+    - tests/test_boundary.py::test_bnd_002_finds_profiles_anywhere_in_a_string
+    - tests/test_boundary.py::test_bnd_002_leaves_ordinary_code_alone
+    - tests/test_boundary.py::test_bnd_002_path_strings_ending_in_profiles
+    - tests/test_boundary.py::test_bnd_002_permits_only_the_loaders_configuration_driven_import
+    - tests/test_boundary.py::test_bnd_002_refused_names_as_strings
+    - tests/test_boundary.py::test_bnd_002_third_round_variants
+    - tests/test_boundary.py::test_import_check_detects_an_injected_violation
+  note: >-
+    Re-reviewed after RES-OP-09 (batch A, four rounds). Static imports absolute and relative; an
+    import allowlist (standard library, yaml, core); dynamic importers and the standard modules that
+    resolve or run code by name refused; any reference to import_module, __import__, exec, eval,
+    compile, runpy, pkgutil, sys.modules, __builtins__ and interpreter internals (__self__,
+    __globals__, __closure__ ...) as names, attributes, import aliases or strings, outside the
+    loader's top-level _import_symbol and _declared; profiles named in any str, bytes or f-string
+    part. Accepted: types.FunctionType, a concatenated path string, subprocess.
 VP1-BND-003:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-17'
   evidence:
-  - gate:VP1-BND-003
-  gap: 'Only matches the literal shape `<x>.<hook_field>.<method>`. Probed misses: aliasing (`p = self._hooks.session_policy;
-    p.poke()` — the pattern core/session.py:494 already uses), `getattr(self._hooks.session_policy, ''poke'')()`,
-    and aliasing in another module. It also does not detect core calling profile code by any route other
-    than the six hook fields, and HOOK_METHODS is a hand copy not checked against the Protocols in core/hooks.py.
-    Close with: derive allowed methods from the hooks.py Protocols, track names bound to hook objects
-    (dataflow within function scope), and flag getattr on hook objects; or wrap hooks in a runtime proxy
-    that rejects undeclared attributes and test that.'
-  note: Direct-shape calls to undeclared methods are caught (control probe).
+    - gate:VP1-BND-003
+    - tests/test_boundary.py::test_a_hook_patched_after_the_view_was_made_is_the_one_called
+    - tests/test_boundary.py::test_bnd_003_an_alias_is_scoped_to_its_function
+    - tests/test_boundary.py::test_bnd_003_catches_the_variants
+    - tests/test_boundary.py::test_bnd_003_fails_closed_without_the_hook_definitions
+    - tests/test_boundary.py::test_bnd_003_only_known_shapes_pass
+    - tests/test_boundary.py::test_bnd_003_passes_an_alias_used_for_its_declared_methods
+    - tests/test_boundary.py::test_bnd_003_reads_the_methods_from_the_protocols
+    - tests/test_boundary.py::test_bnd_003_second_round_variants
+    - tests/test_boundary.py::test_bnd_003_the_loader_table_must_match_the_protocols
+    - tests/test_boundary.py::test_hook_call_site_check_detects_an_undeclared_method
+    - tests/test_boundary.py::test_the_core_sees_a_hook_through_its_protocol_only
+  note: >-
+    Re-reviewed after RES-OP-09 (batch A, four rounds). Methods read from the Protocols, fields from
+    validation.HOOK_FIELDS, the loader table checked against both; only known shapes of use pass
+    (`._hooks.<field>.<declared method>`, or a plain alias used the same way); getattr/vars on
+    hooks, aliases or the bundle refused. What no static rule follows is closed at run time: the
+    core holds each hook through core/loader.py's declared-method view, which reaches the hook
+    neither by attribute nor through __self__; its closure is refused by gate:VP1-BND-002
+    (__closure__, __self__ as attributes or strings), so the two gates together close the case.
+    Accepted: names built by string concatenation.
 VP1-BND-004:
   verdict: pass
   by: independent review (agent)
@@ -350,20 +390,32 @@ VP1-BND-004:
     mutable at any depth, by runtime value; the gate''s static and runtime halves fail on every evasion
     the reviews found.'
 VP1-BND-005:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-17'
   evidence:
-  - gate:VP1-BND-005
-  gap: 'Whitelist {core, core.hooks, core.errors, core.model} on the imported module name only. Probed
-    misses: `from core import session` (module ''core'' is whitelisted, the imported name is not checked),
-    `import core` + `getattr(core, ''session'')`, `importlib.import_module(''core.session'')`. Also the
-    criterion says ''other than the hook types'', yet the gate permits core.model and core.errors wholesale
-    (profiles/common/tables.py imports core.model), which needs either a ruling that these count as interface
-    types or a narrower whitelist of names. Close with: check ImportFrom names against a symbol whitelist
-    taken from core.hooks.__all__ (plus explicitly ruled error/model symbols), flag attribute access on
-    the `core` package and dynamic imports of ''core.*''.'
-  note: Direct `from core.<internal> import` is caught.
+    - gate:VP1-BND-005
+    - tests/test_boundary.py::test_bnd_005_a_hook_spec_must_name_the_profiles_own_package
+    - tests/test_boundary.py::test_bnd_005_a_profile_module_cannot_launder_a_core_module
+    - tests/test_boundary.py::test_bnd_005_core_attribute_keys_are_not_modules
+    - tests/test_boundary.py::test_bnd_005_permits_named_interface_symbols_only
+    - tests/test_boundary.py::test_bnd_005_permits_what_the_in_tree_tables_use
+    - tests/test_boundary.py::test_bnd_005_refused_names_as_strings
+    - tests/test_boundary.py::test_bnd_005_refuses_a_compiled_module
+    - tests/test_boundary.py::test_bnd_005_reports_a_file_it_cannot_parse
+    - tests/test_boundary.py::test_bnd_005_super_init_is_fine
+    - tests/test_boundary.py::test_bnd_005_the_main_module_guard_is_fine
+    - tests/test_boundary.py::test_bnd_005_third_round_variants
+  note: >-
+    Re-reviewed after RES-OP-09 (batch A, four rounds), on the owner's ruling of 2026-10-17 (named
+    symbols only). A profile imports the standard library (not the name resolvers), profiles.*, and
+    named core symbols: the public names of core/hooks.py, the reason codes and two error classes of
+    core/errors.py, and Profile, CallType, FunctionalIdentity, BearerDecisionSpec of core/model.py,
+    never a core module object; no dynamic import, no other first-party package (service re-exports
+    core), no dunder but __init__ (attribute or string; the __main__ guard passes), no vars(), no string naming a core module;
+    compiled modules and unparseable files reported. In-tree profile.yaml hook specs must name
+    profiles.<own> or profiles.common: checked by the gate only, not the loader (a runtime check
+    would refuse test hooks and deployments whose profiles root has another name).
 VP1-BND-006:
   verdict: partial
   by: independent review (agent)

@@ -120,7 +120,7 @@ def test_a_relayed_request_is_not_subject_to_the_setting(mcx, monkeypatch):
     mgr = _altered(mcx, MemorySink(), foreign_initiator="refuse")
     relayed = SessionRequest(request_id="iw1", initiator="tetra:1234", target="grp:alpha",
                              call_type="prearranged-group", media=(MediaKind.VOICE,))
-    monkeypatch.setattr(mgr._hooks.interworking_gateway, "map_inbound",
+    monkeypatch.setattr(mcx.hooks.interworking_gateway, "map_inbound",
                         lambda foreign: relayed, raising=False)
     _, _, refusal = mgr.receive_inbound({"request_id": "iw1", "system": "tetra"})
     assert refusal is None or refusal.reason_code != INITIATOR_NOT_SERVED

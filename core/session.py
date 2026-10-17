@@ -65,6 +65,7 @@ from .hooks import (
 )
 from .invoke import HookFailure, Invoker
 from .loader import LoadedProfile
+from .loader import declared_view
 from .validation import FLOOR_TIMERS, PREEMPTION_AT_FULL_QUEUE, REDUNDANCY, TRANSPORTS
 
 log = logging.getLogger("mcx.session")
@@ -186,7 +187,12 @@ class SessionManager:
                  floor_unrecorded: str = "deny",
                  foreign_initiator: str = "refuse") -> None:
         self._loaded = loaded
-        self._hooks = loaded.hooks
+        # The core holds each hook through a view that exposes only the
+        # methods its Protocol declares (VP1-BND-003; review of RES-OP-09):
+        # whatever route core code takes to a hook -- an alias passed on, a
+        # global, getattr -- an undeclared capability is not there to reach.
+        # The service and the tests keep the objects themselves.
+        self._hooks = declared_view(loaded.hooks)
         self._profile = loaded.profile
         self._auditor = auditor
         self._platform = platform or Platform()
@@ -1013,7 +1019,7 @@ class SessionManager:
 
     def _located(self, request: SessionRequest) -> SessionRequest:
         """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains
-        the location attributes it stands for (e.g. track_section), which
+        the location attributes it stands for (e.g. an area the profile names), which
         is what functional identities are keyed on. Attributes the request
         already carries are kept: the map fills in, it does not overrule.
         An unmapped cell leaves the request as it is."""

@@ -46,7 +46,7 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (1969 tests)
+python3 -m pytest tests/ -q                   # must stay green (2126 tests)
 python3 tools/check_boundary.py --root .      # must stay 21/21
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
@@ -220,7 +220,7 @@ suppressed or raised.
 | `docs/PLT-ICD-001.md` | The six hook contracts: PRE/POST/INV, §8.1 sequence, reason codes |
 | `docs/PLT-VP-R1.md` | R1 verification plan: 99 cases with exact pass criteria |
 | `docs/PLT-ANL-R1.md` | The three analyses and the gate-failure procedure |
-| `core/PROFILE_BOUNDARY.md` | Why the boundary sits where it does, and why one image per profile |
+| `docs/PROFILE_BOUNDARY.md` | Why the boundary sits where it does, and why one image per profile |
 
 ## Status and honesty
 

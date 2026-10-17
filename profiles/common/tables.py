@@ -13,7 +13,7 @@ import re
 
 from typing import Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from core import model
+from core.model import BearerDecisionSpec, CallType, FunctionalIdentity, Profile
 from core.errors import (
     ADHOC_PARTICIPANTS_UNDETERMINED,
     CALL_TYPE_NOT_PERMITTED,
@@ -72,7 +72,7 @@ class TablePriorityPolicy:
     fails to produce a decision.
     """
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         self._profile = profile
 
     def evaluate(self, request: SessionRequest,
@@ -129,7 +129,7 @@ ACTIVE_BY_URGENCY_PREFIX = "core.active_sessions."
 class TableSessionPolicy:
     """Admission and session shape derived from the profile's call type table."""
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         self._profile = profile
 
     # -- admission ------------------------------------------------------
@@ -176,13 +176,13 @@ class TableSessionPolicy:
         return Admission(permitted=False, reason_code=code)
 
     def _initiator_permitted(self, request: SessionRequest,
-                             declared: model.CallType) -> bool:
+                             declared: CallType) -> bool:
         held = request.attributes.get("initiator.roles", "")
         roles = {r for r in (s.strip() for s in held.split(",")) if r}
         return bool(roles & set(declared.initiator_roles))
 
     def _capacity_check(self, request: SessionRequest,
-                        declared: model.CallType) -> Optional[str]:
+                        declared: CallType) -> Optional[str]:
         adm = self._profile.admission
         active = _int_attr(request.attributes, ACTIVE_SESSIONS_KEY)
         if active is None:
@@ -259,7 +259,7 @@ class TableBearerSelector:
     Totality is guaranteed by validation (PLT-PRF-006).
     """
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         self._profile = profile
 
     def select(self, request: SessionRequest, priority: PriorityDecision,
@@ -275,7 +275,7 @@ class TableBearerSelector:
             f"bearer table is not total: no rule matches "
             f"({request.call_type!r}, {primary_media!r})")
 
-    def _build(self, spec: model.BearerDecisionSpec,
+    def _build(self, spec: BearerDecisionSpec,
                priority: PriorityDecision) -> BearerDecision:
         # PLT-ICD-001 §6.1 POST-5: ARP pre-emption may not exceed what the
         # priority decision authorises.
@@ -327,7 +327,7 @@ class DirectoryResolver:
     once PLT-GRP-001 is implemented against a store.
     """
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         self._profile = profile
         self._users: Dict[MCServiceId, None] = {}
         self._groups: Dict[str, Tuple[MCServiceId, ...]] = {}
@@ -460,7 +460,7 @@ class FunctionalResolver(DirectoryResolver):
     failure of the two, but this is a provisional choice.
     """
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         super().__init__(profile)
         # identity id -> {location key value or "": (service_id, ...)}
         self._bindings: Dict[str, Dict[str, Tuple[MCServiceId, ...]]] = {}
@@ -561,7 +561,7 @@ class FunctionalResolver(DirectoryResolver):
         return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
                           group_id=None, resolved_from=f"criteria:{criteria}")
 
-    def _location_slot(self, declared: model.FunctionalIdentity,
+    def _location_slot(self, declared: FunctionalIdentity,
                        location: Optional[LocationContext],
                        for_binding: bool) -> str:
         if not declared.location_dependent:
@@ -585,7 +585,7 @@ class PrefixInterworkingGateway:
     """Prefix-matched routing to a legacy system. A profile with no
     interworking block routes nothing and remains valid (PLT-HOK-052)."""
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         self._profile = profile
 
     def route(self, request: SessionRequest,
@@ -641,7 +641,7 @@ class TableInterconnectionGateway:
     would silently hand a partner whatever authority its own numbering implies.
     """
 
-    def __init__(self, profile: model.Profile) -> None:
+    def __init__(self, profile: Profile) -> None:
         self._profile = profile
 
     # -- routing ---------------------------------------------------------

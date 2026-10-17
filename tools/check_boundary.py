@@ -27,6 +27,7 @@ import io
 import re
 import sys
 import tokenize
+import unicodedata
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
@@ -39,43 +40,192 @@ TESTS = "tests"
 # --------------------------------------------------------------------------
 
 # Matching is on word boundaries, not substrings: "ato" must not fire inside
-# "initiator", and "rail" must not fire inside "trailing".
+# "initiator", and "rail" must not fire inside "trailing". Since RES-OP-09
+# identifiers are split on case and `_` too (`RailwayProfile` is two words),
+# a plural matches its term (`trains`), adjacent words are also read joined
+# (`GSM-R`, `gsm_r` are `gsmr`), and every file under core/ is read, not only
+# Python. The in-tree profile names join the list, read from profiles/; "mcx"
+# is exempt, being the platform's own name (MCX_* settings, the mcx.* loggers).
 FORBIDDEN_TERMS = (
     "frmcs", "railway", "rail", "tetra", "p25", "gsmr", "etcs", "ato",
     "shunting", "train", "driver", "dispatcher", "track section",
-    "public safety", "imminent peril",
+    "public safety",
 )
+# "imminent peril" left the list with RES-OP-09: it is a TS 24.379 element
+# (<imminentperil-ind>) the core must parse and render, not a
+# profile's word. Read as identifiers, every hit in core was that element.
+PLATFORM_NAMES = frozenset({"mcx"})
+# Terms common enough to occur inside an ordinary word ("ato" in "a_to_b",
+# "train" in "constraint", "rail" in "guardrail") match only as a whole word;
+# the others also match inside one (`railwayprofile`, `FRMCSMODE`), and two-
+# word terms match written as one (`tracksection`). Review of RES-OP-09.
+WHOLE_WORD_ONLY = frozenset({"ato"})
+# "train", "rail" and "driver" match inside a word too (`TRAINID`,
+# `railnet`), but not inside these ordinary ones. Accepted false positives,
+# to rename if they ever occur: tetrahedron (tetra), p250 (p25),
+# EventDispatcher (dispatcher), "device driver", "a utility function".
+INSIDE_WORD_EXCEPTIONS = ("trail", "constrain", "strain", "guardrail", "handrail",
+                          "training")
 
-_WORD = re.compile(r"[a-z0-9]+")
+_PART = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+_COMPOUND = re.compile(r"[A-Za-z0-9_-]+")
+_SUBCHUNK = re.compile(r"[A-Za-z0-9]+")
+
+
+def _normal(text: str) -> str:
+    """As Python reads identifiers (NFKC: a fullwidth letter is its ASCII
+    one), then without format characters (a soft hyphen) or combining marks
+    (an accent), so neither hides a term."""
+    text = "".join(c for c in unicodedata.normalize("NFKC", text)
+                   if unicodedata.category(c) != "Cf")
+    return "".join(c for c in unicodedata.normalize("NFKD", text)
+                   if not unicodedata.combining(c))
+
+
+def _compounds(line: str) -> List[List[str]]:
+    """Each run of word characters, `-` and `_`, as its words: split on those
+    two, on case and on digits, lower-cased."""
+    return [[w.lower() for chunk in _SUBCHUNK.findall(c) for w in _PART.findall(chunk)]
+            for c in _COMPOUND.findall(_normal(line))]
+
+
+def _words(line: str) -> List[str]:
+    return [w for c in _compounds(line) for w in c]
+
+
+def _singular(word: str) -> set:
+    forms = {word}
+    if word.endswith("ies") and len(word) > 4:
+        forms.add(word[:-3] + "y")
+    if word.endswith("es") and len(word) > 3:
+        forms.add(word[:-2])
+    if word.endswith("s") and len(word) > 2:
+        forms.add(word[:-1])
+    return forms
 
 
 def _tokens(line: str) -> set:
-    return set(_WORD.findall(line.lower()))
+    """Each word and its singular; and, within one compound only (`GSM-R`,
+    `gsm_r`), adjacent words joined. Words are never joined across a space
+    or a dot, so "a to" or `a.to_bytes` do not read as one word."""
+    out: set = set()
+    for words in _compounds(line):
+        for w in words:
+            out |= _singular(w)
+        for x, y in zip(words, words[1:]):
+            out |= {f"\x00{j}" for j in _singular(x + y)}       # joined forms, marked
+    return out
+
+
+def _phrases(line: str) -> set:
+    """Adjacent word pairs, as 'a b', the second word also singular."""
+    words = _words(line)
+    return {f"{a} {s}" for a, b in zip(words, words[1:]) for s in _singular(b)}
+
+
+def _term_hits(line: str, terms: List[str]) -> List[str]:
+    tokens, phrases = _tokens(line), _phrases(line)
+    plain = {t for t in tokens if not t.startswith("\x00")}
+    joined = {t[1:] for t in tokens if t.startswith("\x00")}
+    hits = []
+    for term in terms:
+        squashed = term.replace(" ", "")
+        if " " in term and term in phrases:
+            hits.append(term)
+        elif squashed in plain:
+            hits.append(term)
+        elif term not in WHOLE_WORD_ONLY and (
+                squashed in joined or any(
+                    squashed in w and not any(x in w for x in INSIDE_WORD_EXCEPTIONS)
+                    for w in plain | joined)):
+            hits.append(term)
+    return hits
+
+
+_MIXED = re.compile(r"\w+")
+
+
+def _mixed_script(line: str) -> List[str]:
+    """Words mixing ASCII letters with other letters: a homoglyph hides a
+    term from every word match (`rаilway` with a Cyrillic а)."""
+    out = []
+    for w in _MIXED.findall(line):
+        letters = [c for c in w if c.isalpha()]
+        if any(c.isascii() for c in letters) and any(not c.isascii() for c in letters):
+            out.append(w)
+    return out
 
 
 def _iter_python(root: Path, package: str):
     yield from sorted((root / package).rglob("*.py"))
 
 
+def _iter_files(root: Path, package: str):
+    for path in sorted((root / package).rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            yield path
+
+
 def _parse(path: Path):
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def _profile_names(root: Path) -> List[str]:
+    return sorted(p.parent.name for p in (root / PROFILES).glob("*/profile.yaml"))
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
+
+
+CACHE_DIRS = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache"})
+
+
+def _core_files(root: Path):
+    """Every file under core/ but the named caches and editor swap files."""
+    for path in sorted((root / CORE).rglob("*")):
+        parts = path.relative_to(root / CORE).parts
+        if not path.is_file() or any(p in CACHE_DIRS for p in parts) or \
+                path.name.endswith((".swp", ".swo")):
+            continue
+        yield path
 
 
 def check_forbidden_terms(root: Path) -> List[str]:
     """VP1-BND-001 / PLT-GEN-006 / PLT-VER-004."""
     violations: List[str] = []
-    multiword = [t for t in FORBIDDEN_TERMS if " " in t]
-    single = [t for t in FORBIDDEN_TERMS if " " not in t]
-    for path in _iter_python(root, CORE):
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            lowered = line.lower()
-            present = _tokens(line)
-            hits = [t for t in single if t in present]
-            hits += [t for t in multiword if t in lowered]
-            for term in hits:
+    terms = list(FORBIDDEN_TERMS) + [n for n in _profile_names(root)
+                                     if n not in PLATFORM_NAMES and n not in FORBIDDEN_TERMS]
+    for path in _core_files(root):
+        rel = path.relative_to(root)
+        if not str(path.relative_to(root / CORE)).isascii():
+            violations.append(f"{rel}: non-ASCII file name; core file names are ASCII")
+        # A module or package name is an identifier too (`import core.railway`).
+        for term in _term_hits(" ".join(path.relative_to(root / CORE).with_suffix("").parts),
+                               terms):
+            violations.append(f"{rel}: forbidden term {term!r} in the file's name")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            violations.append(f"{rel}: not text; core holds code only")
+            continue
+        if _CONTROL.search(text):
+            violations.append(f"{rel}: not text (control characters); core holds code only")
+            continue
+        if path.suffix == ".py":
+            try:
+                for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+                    if tok.type == tokenize.NAME and not tok.string.isascii():
+                        violations.append(f"{rel}:{tok.start[0]}: non-ASCII identifier "
+                                          f"{tok.string!r}; core identifiers are ASCII")
+            except (tokenize.TokenError, IndentationError, SyntaxError):
+                violations.append(f"{rel}: does not tokenise")
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for word in _mixed_script(line):
+                violations.append(f"{rel}:{lineno}: word {word!r} mixes ASCII and other "
+                                  "letters")
+            for term in _term_hits(line, terms):
                 violations.append(
-                    f"{path.relative_to(root)}:{lineno}: forbidden term {term!r}: "
-                    f"{line.strip()[:90]}")
+                    f"{rel}:{lineno}: forbidden term {term!r}: {line.strip()[:90]}")
     return violations
 
 
@@ -83,81 +233,512 @@ def check_forbidden_terms(root: Path) -> List[str]:
 # VP1-BND-002 / 003 / 005 — import and call-site structure
 # --------------------------------------------------------------------------
 
+# The one dynamic import edge from core: the loader imports the hook classes
+# a profile's configuration names (PLT-ICD-001 2.1), in its top-level
+# function `_import_symbol`. Anywhere else in core, any reference to a way of
+# importing or running code by name is a violation, whatever it is called
+# through (review of RES-OP-09: an alias, getattr, exec, importlib.util).
+SANCTIONED_DYNAMIC_IMPORT = ("core/loader.py", "_import_symbol")
+_DYNAMIC_NAMES = {"import_module", "__import__", "exec", "eval", "compile",
+                  "run_module", "run_path", "resolve_name", "spec_from_file_location",
+                  "module_from_spec", "find_spec", "exec_module", "__builtins__",
+                  "modules", "import_string"}
+_DYNAMIC_MODULES = {"importlib", "runpy", "pkgutil", "imp", "zipimport"}
+# Standard modules that reach modules or run code by name, or hand out the
+# interpreter's import machinery (sys.modules, builtins.__import__). Core
+# imports none of them; a profile may not either (review of RES-OP-09).
+_NAME_RESOLVERS = {"sys", "builtins", "pydoc", "pickle", "marshal", "code", "codeop",
+                   "ctypes", "unittest", "logging.config", "inspect", "gc", "shelve",
+                   "copyreg"}
+_DYNAMIC_NAMES_EXTRA = {"__loader__", "__spec__", "__self__", "__func__", "__globals__",
+                        "__dict__", "__getattribute__", "__subclasses__", "__closure__",
+                        "__code__", "__wrapped__", "globals", "locals"}
+# What core may import at all: the standard library, the YAML parser the
+# loader reads profiles with, and itself. Nothing else can carry a profile in.
+CORE_THIRD_PARTY = frozenset({"yaml"})
+_PROFILES_STRING = re.compile(r"(?i:(?:^|[/\\.])profiles(?:[/\\.][A-Za-z_]|$))")
+
+
+def _imported_modules(node, path: Path, root: Path, package: str) -> List[str]:
+    """Absolute module names an import statement reaches, relative ones
+    resolved against the file's package."""
+    if isinstance(node, ast.Import):
+        return [a.name for a in node.names]
+    if not isinstance(node, ast.ImportFrom):
+        return []
+    if node.level:
+        parts = list(path.relative_to(root).with_suffix("").parts)[:-1]
+        if path.name == "__init__.py":
+            parts = list(path.relative_to(root).parts)[:-1]
+        base = parts[:len(parts) - (node.level - 1)] if node.level - 1 <= len(parts) else []
+        prefix = ".".join(base + ([node.module] if node.module else []))
+    else:
+        prefix = node.module or ""
+    if node.module:
+        return [prefix] + [f"{prefix}.{a.name}" for a in node.names]
+    return [f"{prefix}.{a.name}" if prefix else a.name for a in node.names]
+
+
+def _string_arg(call: ast.Call):
+    if call.args and isinstance(call.args[0], ast.Constant) and \
+            isinstance(call.args[0].value, str):
+        return call.args[0].value
+    return None
+
+
+def _strings(tree):
+    """Every str and bytes constant, f-string parts included."""
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, (str, bytes)):
+            v = n.value.decode("latin-1") if isinstance(n.value, bytes) else n.value
+            yield n.lineno, v
+
+
+# The loader's view of a hook (core/loader.py _Declared) reads its own slots
+# with object.__getattribute__, which is the one other use of interpreter
+# machinery core needs; and the loader alone checks hook classes against
+# their Protocols with `inspect`.
+SANCTIONED_CLASSES = ("core/loader.py", "_declared")
+LOADER_ONLY_IMPORTS = frozenset({"inspect"})
+
+
+def _sanctioned_lines(tree, rel: str) -> set:
+    lines: set = set()
+    for node in tree.body:                       # top level only
+        if rel == SANCTIONED_DYNAMIC_IMPORT[0] and isinstance(node, ast.FunctionDef) and \
+                node.name == SANCTIONED_DYNAMIC_IMPORT[1]:
+            lines |= set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+        if rel == SANCTIONED_CLASSES[0] and isinstance(node, (ast.ClassDef, ast.FunctionDef)) \
+                and node.name == SANCTIONED_CLASSES[1]:
+            lines |= set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return lines
+
+
+def _dynamic_references(tree, rel: str, sanctioned: set) -> List[str]:
+    out = []
+    for n in ast.walk(tree):
+        name = n.id if isinstance(n, ast.Name) else \
+            n.attr if isinstance(n, ast.Attribute) else None
+        if name is None and isinstance(n, ast.alias):
+            name = n.name.split(".")[-1]          # what is imported, whatever it is called
+        if name is None:
+            continue
+        if name == "modules" and not (isinstance(n, ast.Attribute) and
+                                      isinstance(n.value, ast.Name) and n.value.id == "sys"):
+            continue
+        if name == "compile" and isinstance(n, ast.Attribute):
+            continue                              # re.compile and the like
+        if (name in _DYNAMIC_NAMES or name in _DYNAMIC_NAMES_EXTRA) and \
+                getattr(n, "lineno", 0) not in sanctioned:
+            out.append(f"{rel}:{getattr(n, 'lineno', 0)}: dynamic import or execution "
+                       f"({name}); only the loader's configuration-driven import is permitted")
+    # The same names written as strings reach the same place through
+    # getattr or operator.attrgetter (review of RES-OP-09, round 3).
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and \
+                n.value in (_DYNAMIC_NAMES_EXTRA | {"__import__", "__builtins__"}) and \
+                n.lineno not in sanctioned:
+            out.append(f"{rel}:{n.lineno}: the name {n.value!r} as a string reaches "
+                       "interpreter internals")
+    return out
+
 
 def check_imports(root: Path) -> List[str]:
-    """VP1-BND-002 / PLT-GEN-007 — no import edge from core to profiles."""
+    """VP1-BND-002 / PLT-GEN-007 — no import edge from core to profiles.
+
+    Static imports, absolute or relative; any import of a module outside the
+    standard library, `yaml` and core itself; any reference to a dynamic
+    import or to running code by name but the loader's one call; and any
+    string naming the profiles package as a module or a path."""
+    stdlib = set(sys.stdlib_module_names)
     violations: List[str] = []
     for path in _iter_python(root, CORE):
-        for node in ast.walk(_parse(path)):
-            names: List[str] = []
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                names = [node.module]
-            for name in names:
+        rel = path.relative_to(root).as_posix()
+        try:
+            tree = _parse(path)
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            violations.append(f"{rel}: does not parse ({type(exc).__name__})")
+            continue
+        sanctioned = _sanctioned_lines(tree, rel)
+        for node in ast.walk(tree):
+            reached = _imported_modules(node, path, root, CORE)
+            for name in reached:
                 if name == PROFILES or name.startswith(PROFILES + "."):
-                    violations.append(
-                        f"{path.relative_to(root)}:{node.lineno}: core imports {name!r}")
-    return violations
+                    violations.append(f"{rel}:{node.lineno}: core imports {name!r}")
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and reached and \
+                    not getattr(node, "level", 0):
+                top = reached[0].split(".")[0]
+                if any(m == x or m.startswith(x + ".") for m in reached for x in _NAME_RESOLVERS) \
+                        and not (rel == SANCTIONED_DYNAMIC_IMPORT[0] and top in LOADER_ONLY_IMPORTS):
+                    violations.append(f"{rel}:{node.lineno}: core imports {reached[0]!r}, "
+                                      "which reaches modules or runs code by name")
+                elif top in _DYNAMIC_MODULES and rel != SANCTIONED_DYNAMIC_IMPORT[0]:
+                    violations.append(f"{rel}:{node.lineno}: core imports {reached[0]!r}, "
+                                      "a dynamic importer")
+                elif top not in stdlib and top not in CORE_THIRD_PARTY and top != CORE:
+                    violations.append(f"{rel}:{node.lineno}: core imports {reached[0]!r}, "
+                                      "neither the standard library, yaml nor core")
+        violations += _dynamic_references(tree, rel, sanctioned)
+        for lineno, v in _strings(tree):
+            if _PROFILES_STRING.search(v):
+                violations.append(f"{rel}:{lineno}: core names the profiles package: "
+                                  f"{v[:60]!r}")
+    return sorted(set(violations))
 
 
-# The methods each hook interface declares. A call on a hook object outside
-# this set means the core is using an undeclared capability.
-HOOK_METHODS = {
-    # determine_participants: PLT-ICD-001 0.7 section 3.5 (ad hoc criteria).
-    "identity_resolver": {"resolve", "bind", "unbind", "identities_of",
-                          "determine_participants"},
-    "priority_policy": {"evaluate", "compare"},
-    # authorise: PLT-ICD-001 0.13 section 5.0 (ICD-OP-09).
-    "session_policy": {"authorise", "admit", "decide", "floor_policy"},
-    "bearer_selector": {"select", "on_path_event"},
-    "interworking_gateway": {"route", "map_inbound"},
-    "interconnection_gateway": {"route", "rights", "map_inbound_priority",
-                                "map_outbound"},
-}
+# The methods each hook interface declares, read from the Protocols in
+# core/hooks.py; the hook fields, from core/validation.py HOOK_FIELDS; and
+# the loader's own table checked against both (RES-OP-09: these were hand
+# copies, so a seventh hook would have gone unchecked). A call on a hook
+# object outside its set means the core is using an undeclared capability.
+def _hook_fields(root: Path) -> Dict[str, str]:
+    try:
+        tree = _parse(root / CORE / "validation.py")
+    except (OSError, SyntaxError):
+        return {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and any(_target_name(t) == "HOOK_FIELDS"
+                                             for t in n.targets):
+            fields = ast.literal_eval(n.value)
+            return {f: "".join(part.capitalize() for part in f.split("_")) for f in fields}
+    return {}
+
+
+def hook_methods(root: Path) -> Dict[str, set]:
+    try:
+        tree = _parse(root / CORE / "hooks.py")
+    except (OSError, SyntaxError):
+        return {}
+    protocols = {}
+    for c in tree.body:
+        if isinstance(c, ast.ClassDef):
+            protocols[c.name] = {f.name for f in c.body
+                                 if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                 and not f.name.startswith("_")}
+    return {field: protocols.get(cls, set()) for field, cls in _hook_fields(root).items()}
+
+
+def _loader_table(root: Path) -> Dict[str, set]:
+    try:
+        tree = _parse(root / CORE / "loader.py")
+    except (OSError, SyntaxError):
+        return {}
+    for n in tree.body:
+        target = n.target if isinstance(n, ast.AnnAssign) else \
+            (n.targets[0] if isinstance(n, ast.Assign) else None)
+        if target is not None and _target_name(target) == "HOOK_INTERFACES" and \
+                isinstance(n.value, ast.Dict):
+            return {ast.literal_eval(k): set(ast.literal_eval(v.elts[1]))
+                    for k, v in zip(n.value.keys, n.value.values)}
+    return {}
+
+
+def _hook_field(node, fields) -> str:
+    """The hook field an expression names (`<x>.session_policy`), or ''."""
+    if isinstance(node, ast.Attribute) and node.attr in fields:
+        return node.attr
+    return ""
+
+
+# The loaded hook bundle as core holds it (SessionManager._hooks). Not the
+# module core.hooks, nor the profile's hook specifications (model.HookPaths).
+_BUNDLE_NAMES = {"_hooks"}
 
 
 def check_hook_call_sites(root: Path) -> List[str]:
     """VP1-BND-003 / PLT-GEN-007 — hook interfaces are the only crossing.
 
-    Finds every `<anything>.<hook_field>.<method>` in core and checks the method
-    against that interface's declared set.
-    """
+    Every `<x>.<hook_field>.<method>` in core, and every use of an alias bound
+    to a hook object -- by assignment, tuple unpacking, alias of an alias, a
+    for/with/comprehension target, a default argument, or `self.<x> = ...`
+    in any method of the class -- names a method its Protocol declares.
+    `getattr`/`vars` on a hook object, an alias of one, or the hook bundle is
+    refused outright, and only known shapes of use pass (`_hook_shapes`).
+    What no static rule can follow -- a bundle held under another name than
+    `_hooks`, an alias passed on or held in a global -- is closed at run time:
+    the core holds each hook through core/loader.py's declared-method view,
+    which neither by attribute nor through a method's __self__ reaches the
+    hook itself (review of RES-OP-09)."""
+    methods = hook_methods(root)
+    fields = set(methods)
     violations: List[str] = []
+    if not fields or not all(methods.values()):
+        return ["core/validation.py HOOK_FIELDS or the Protocols in core/hooks.py could "
+                "not be read; the gate cannot tell which methods are declared"]
+    table = _loader_table(root)
+    if table and table != methods:
+        violations.append("core/loader.py HOOK_INTERFACES does not list exactly the "
+                          "methods the Protocols in core/hooks.py declare")
     for path in _iter_python(root, CORE):
-        for node in ast.walk(_parse(path)):
-            if not isinstance(node, ast.Attribute):
-                continue
-            inner = node.value
-            if not isinstance(inner, ast.Attribute):
-                continue
-            field = inner.attr
-            if field not in HOOK_METHODS:
-                continue
-            if node.attr not in HOOK_METHODS[field]:
-                violations.append(
-                    f"{path.relative_to(root)}:{node.lineno}: core calls "
-                    f"{field}.{node.attr}, which {field} does not declare")
-    return violations
+        rel = path.relative_to(root)
+        tree = _parse(path)
+
+        def hook_of(expr, aliases):
+            if isinstance(expr, ast.Name) and expr.id in aliases:
+                return aliases[expr.id]
+            if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and \
+                    expr.value.id == "self" and f"self.{expr.attr}" in aliases:
+                return aliases[f"self.{expr.attr}"]
+            return _hook_field(expr, fields)
+
+        def bind(target, value, aliases):
+            if isinstance(target, (ast.Tuple, ast.List)) and \
+                    isinstance(value, (ast.Tuple, ast.List)):
+                for t, v in zip(target.elts, value.elts):
+                    bind(t, v, aliases)
+                return
+            field = hook_of(value, aliases)
+            if not field:
+                return
+            if isinstance(target, ast.Name):
+                aliases[target.id] = field
+            elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) \
+                    and target.value.id == "self":
+                aliases[f"self.{target.attr}"] = field
+
+        def collect(scope, aliases):
+            # Twice, so an alias of an alias bound later in the text is seen.
+            for _ in range(2):
+                for n in ast.walk(scope):
+                    if isinstance(n, ast.Assign):
+                        for t in n.targets:
+                            bind(t, n.value, aliases)
+                    elif isinstance(n, (ast.AnnAssign, ast.NamedExpr)) and n.value:
+                        bind(n.target, n.value, aliases)
+                    elif isinstance(n, (ast.For, ast.comprehension)):
+                        it = n.iter
+                        for elt in (it.elts if isinstance(it, (ast.Tuple, ast.List)) else [it]):
+                            bind(n.target, elt, aliases)
+                    elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                        call = n.context_expr
+                        inner = call.args[0] if isinstance(call, ast.Call) and call.args \
+                            else call
+                        bind(n.optional_vars, inner, aliases)
+                    elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        args = n.args
+                        positional = args.posonlyargs + args.args
+                        for arg, default in zip(positional[len(positional) - len(args.defaults):],
+                                                args.defaults):
+                            bind(ast.Name(id=arg.arg), default, aliases)
+                        for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+                            if default is not None:
+                                bind(ast.Name(id=arg.arg), default, aliases)
+            return aliases
+
+        # A name is an alias in the function that binds it (nested functions
+        # included); `self.<x>` in every method of the class that binds it.
+        functions = [n for n in ast.walk(tree)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))]
+        classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+        scoped = []
+        for c in classes:
+            attrs = {k: v for k, v in collect(c, {}).items() if k.startswith("self.")}
+            if attrs:
+                scoped.append((c, attrs))
+        for fn in functions:
+            names = {k: v for k, v in collect(fn, {}).items() if not k.startswith("self.")}
+            if names:
+                scoped.append((fn, names))
+        module_names = {}
+        for n in tree.body:
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                collect(n, module_names)
+        scoped.append((tree, {k: v for k, v in module_names.items() if not k.startswith("self.")}))
+        for scope, aliases in scoped:
+            for n in ast.walk(scope):
+                if isinstance(n, ast.Attribute):
+                    field = hook_of(n.value, aliases)
+                    if field and n.attr not in methods[field]:
+                        violations.append(f"{rel}:{n.lineno}: core calls {field}.{n.attr}, "
+                                          f"which {field} does not declare")
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and \
+                        n.func.id in ("getattr", "setattr", "hasattr", "vars", "delattr") \
+                        and n.args:
+                    first = n.args[0]
+                    field = hook_of(first, aliases)
+                    bundle = (isinstance(first, ast.Name) and first.id in _BUNDLE_NAMES) or \
+                        (isinstance(first, ast.Attribute) and first.attr in _BUNDLE_NAMES)
+                    if field or bundle:
+                        what = field or "the hook bundle"
+                        violations.append(f"{rel}:{n.lineno}: {n.func.id} on {what}; "
+                                          "call its declared methods")
+        violations += _hook_shapes(tree, rel, methods, scoped)
+    return sorted(set(violations))
+
+
+def _hook_shapes(tree, rel, methods, scoped) -> List[str]:
+    """Known shapes only (review of RES-OP-09): the bundle `_hooks` appears
+    only as `._hooks.<field>` (or as an assignment target); `._hooks.<field>`
+    only as `._hooks.<field>.<declared method>` or as the whole right-hand
+    side of `name = ...` / `self.x = ...`; an alias only as
+    `alias.<declared method>` or the whole right-hand side of another such
+    assignment. Anything else -- a conditional, a container, a call taking
+    it, a subscript -- is a route the alias tracking cannot follow."""
+    parents = {}
+    for p in ast.walk(tree):
+        for c in ast.iter_child_nodes(p):
+            parents[c] = p
+    out = []
+
+    def plain_assignment_value(node) -> bool:
+        p = parents.get(node)
+        return isinstance(p, ast.Assign) and p.value is node and len(p.targets) == 1 and \
+            (isinstance(p.targets[0], ast.Name) or
+             (isinstance(p.targets[0], ast.Attribute) and
+              isinstance(p.targets[0].value, ast.Name) and p.targets[0].value.id == "self"))
+
+    def declared_call(node, field) -> bool:
+        p = parents.get(node)
+        return isinstance(p, ast.Attribute) and p.value is node and p.attr in methods[field]
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr in _BUNDLE_NAMES and \
+                isinstance(n.ctx, ast.Load):
+            p = parents.get(n)
+            if not (isinstance(p, ast.Attribute) and p.value is n and p.attr in methods):
+                out.append(f"{rel}:{n.lineno}: the hook bundle used other than as "
+                           "._hooks.<field>")
+        if isinstance(n, ast.Attribute) and n.attr in methods and \
+                isinstance(n.value, ast.Attribute) and n.value.attr in _BUNDLE_NAMES:
+            if not (declared_call(n, n.attr) or plain_assignment_value(n)):
+                out.append(f"{rel}:{n.lineno}: {n.attr} used other than to call a declared "
+                           "method or to be named by a plain assignment")
+    for scope, aliases in scoped:
+        for n in ast.walk(scope):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in aliases:
+                field = aliases[n.id]
+                if not (declared_call(n, field) or plain_assignment_value(n)):
+                    out.append(f"{rel}:{n.lineno}: alias {n.id!r} of {field} used other "
+                               "than to call a declared method")
+    return out
+
+
+# VP1-BND-005 as ruled (RES-OP-09, owner ruling 2026-10-17: named symbols
+# only). A profile may take, from core, the hook interface types (every public
+# name core/hooks.py defines), the reason codes and the two error classes of
+# core/errors.py, and the model classes the in-tree tables read -- each by
+# `from core.<module> import <Name>`. It may not bind a core module object
+# (`from core import model`, `import core.x`), which would let anyone who
+# imports the profile module reach the rest of that module through it; nor
+# reach core dynamically; nor name a core module in a string; and its
+# profile.yaml hook specifications must name its own package or the common
+# one (review of RES-OP-09).
+PROFILE_MODEL_NAMES = frozenset({"Profile", "CallType", "FunctionalIdentity",
+                                 "BearerDecisionSpec"})
+PROFILE_ERROR_CLASSES = frozenset({"HookContractViolation", "PlatformError"})
+
+
+def profile_permitted(root: Path) -> Dict[str, frozenset]:
+    hooks = _parse(root / CORE / "hooks.py")
+    public = set()
+    for n in hooks.body:
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef)):
+            public.add(n.name)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                if isinstance(t, ast.Name):
+                    public.add(t.id)
+    errors = _parse(root / CORE / "errors.py")
+    codes = {t.id for n in errors.body if isinstance(n, ast.Assign)
+             and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+             for t in n.targets if isinstance(t, ast.Name) and t.id.isupper()}
+    return {"core.hooks": frozenset(x for x in public if not x.startswith("_")),
+            "core.errors": frozenset(codes | PROFILE_ERROR_CLASSES),
+            "core.model": PROFILE_MODEL_NAMES}
+
+
+def _names_a_core_module(text: str, root: Path) -> bool:
+    """`core`, or `core.<m>`/`core/<m>`/`core:<m>...` where <m> is a module
+    of core. Attribute keys the core defines (`core.active_sessions`) are
+    not modules, and pass."""
+    m = re.fullmatch(r"core(?:[./:]([A-Za-z_][A-Za-z0-9_]*)(?:[./:].*)?)?", text)
+    if not m:
+        return False
+    return m.group(1) is None or (root / CORE / f"{m.group(1)}.py").is_file() or \
+        (root / CORE / m.group(1)).is_dir()
 
 
 def check_profile_callbacks(root: Path) -> List[str]:
     """VP1-BND-005 — profiles reach the core only for the interface types."""
-    permitted = {"core.hooks", "core.errors", "core.model", "core"}
+    permitted = profile_permitted(root)
     violations: List[str] = []
+    for path in sorted((root / PROFILES).rglob("*")):
+        rel = path.relative_to(root)
+        if "__pycache__" in rel.parts or not path.is_file():
+            continue
+        if path.suffix in (".so", ".pyd", ".pyc"):
+            violations.append(f"{rel}: compiled module in a profile; profiles are "
+                              "source, which this gate reads")
     for path in _iter_python(root, PROFILES):
-        for node in ast.walk(_parse(path)):
-            modules: List[str] = []
-            if isinstance(node, ast.ImportFrom) and node.module:
-                modules = [node.module]
-            elif isinstance(node, ast.Import):
-                modules = [a.name for a in node.names]
-            for module in modules:
-                if module.startswith("core") and module not in permitted:
-                    violations.append(
-                        f"{path.relative_to(root)}:{node.lineno}: profile imports "
-                        f"core internals {module!r}")
-    return violations
+        rel = path.relative_to(root)
+        try:
+            tree = _parse(path)
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            violations.append(f"{rel}: does not parse ({type(exc).__name__})")
+            continue
+        stdlib = set(sys.stdlib_module_names)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and not getattr(node, "level", 0):
+                mods = [a.name for a in node.names] if isinstance(node, ast.Import) \
+                    else [node.module or ""]
+                for m in mods:
+                    top = m.split(".")[0]
+                    if top in _DYNAMIC_MODULES or any(m == x or m.startswith(x + ".")
+                                                      for x in _NAME_RESOLVERS):
+                        violations.append(f"{rel}:{node.lineno}: profile imports {m!r}, "
+                                          "which reaches modules or runs code by name")
+                    elif top not in stdlib and top not in (CORE, PROFILES):
+                        # Another first-party package re-exports core
+                        # (service.config holds core.release.Release).
+                        violations.append(f"{rel}:{node.lineno}: profile imports {m!r}; a "
+                                          "profile imports the standard library, profiles "
+                                          "and named core symbols only")
+            dunder = node.attr if isinstance(node, ast.Attribute) else \
+                node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                else None
+            if dunder and re.fullmatch(r"__\w+__", dunder) and \
+                    dunder not in ("__init__", "__main__"):
+                violations.append(f"{rel}:{node.lineno}: profile uses {dunder}; "
+                                  "interpreter internals reach past the named imports")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and \
+                    node.func.id == "vars":
+                violations.append(f"{rel}:{node.lineno}: profile uses vars(); name what it uses")
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name == "core" or a.name.startswith("core."):
+                        violations.append(f"{rel}:{node.lineno}: profile imports core module "
+                                          f"{a.name!r}; import names, not modules")
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module and \
+                    (node.module == "core" or node.module.startswith("core.")):
+                if node.module == "core" or node.module not in permitted:
+                    violations.append(f"{rel}:{node.lineno}: profile imports core internals "
+                                      f"{node.module!r} ({', '.join(a.name for a in node.names)})")
+                    continue
+                for a in node.names:
+                    if a.name not in permitted[node.module]:
+                        violations.append(f"{rel}:{node.lineno}: profile imports "
+                                          f"{node.module}.{a.name}, not an interface name")
+        violations += [v.replace("only the loader's configuration-driven import is permitted",
+                                 "a profile reaches core by named imports only")
+                       for v in _dynamic_references(tree, rel.as_posix(), set())]
+        for lineno, v in _strings(tree):
+            if _names_a_core_module(v, root):
+                violations.append(f"{rel}:{lineno}: profile names a core module: {v[:60]!r}")
+    import yaml
+    for spec_file in sorted((root / PROFILES).glob("*/profile.yaml")):
+        own = spec_file.parent.name
+        try:
+            doc = yaml.safe_load(spec_file.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            continue                     # the loader refuses it
+        meta = doc.get("profile") if isinstance(doc, dict) else None
+        hooks = meta.get("hooks") if isinstance(meta, dict) else None
+        for field, spec in (hooks.items() if isinstance(hooks, dict) else ()):
+            module = str(spec).partition(":")[0]
+            if not module.startswith((f"{PROFILES}.{own}.", f"{PROFILES}.common.")):
+                violations.append(f"{spec_file.relative_to(root)}: hook {field} names "
+                                  f"{spec!r}, outside profiles.{own} and profiles.common")
+    return sorted(set(violations))
 
 
 # --------------------------------------------------------------------------
