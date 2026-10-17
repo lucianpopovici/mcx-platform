@@ -127,14 +127,14 @@ def parse_session_expires(value: Optional[str]) -> Optional[SessionExpires]:
         return None
     head, *params = [p.strip() for p in value.split(";")]
     if not head.isdigit() or len(head) > 10:
-        raise SipError(f"Session-Expires {value!r}")
+        raise SipError(f"Session-Expires {clip(value)}")
     refresher = None
     for p in params:
         name, _, v = p.partition("=")
         if name.strip().lower() == "refresher":
             refresher = v.strip().lower()
             if refresher not in ("uac", "uas"):
-                raise SipError(f"Session-Expires refresher {v!r}")
+                raise SipError(f"Session-Expires refresher {clip(v)}")
     return SessionExpires(int(head), refresher)
 
 
@@ -143,7 +143,7 @@ def parse_min_se(value: Optional[str]) -> Optional[int]:
         return None
     head = value.split(";", 1)[0].strip()
     if not head.isdigit() or len(head) > 10:
-        raise SipError(f"Min-SE {value!r}")
+        raise SipError(f"Min-SE {clip(value)}")
     return int(head)
 
 
@@ -590,13 +590,13 @@ def split_frame(data: bytes) -> Optional[Tuple[bytes, int]]:
     length = 0
     for line in head.decode("utf-8", "replace").split("\r\n")[1:]:
         name, _, value = line.partition(":")
-        if _COMPACT.get(name.strip().lower(), name.strip()).lower() == "content-length":
-            try:
-                length = int(value.strip())
-            except ValueError:
+        name = name.strip(" \t")
+        if _COMPACT.get(name.lower(), name).lower() == "content-length":
+            value = value.strip(" \t")
+            # ASCII digits only: int() would also take Unicode digits and "_".
+            if not (value.isascii() and value.isdigit()):
                 raise SipError("malformed Content-Length")
-            if length < 0:
-                raise SipError("negative Content-Length")
+            length = int(value)
     total = end + 4 + length
     return (head, total) if len(data) >= total else None
 
@@ -620,17 +620,20 @@ def parse_message(data: bytes):
     lines: List[str] = []
     for raw in head.split("\r\n"):
         if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += " " + raw.strip()
+            lines[-1] += " " + raw.strip(" \t")
         else:
             lines.append(raw)
     start, header_lines = lines[0], lines[1:]
     headers = Headers()
     for line in header_lines:
         name, sep, value = line.partition(":")
-        if not sep or not name.strip():
-            raise SipError(f"malformed header line {line!r}")
-        name = name.strip()
-        headers.add(_COMPACT.get(name.lower(), name), value.strip())
+        if not sep or not name.strip(" \t"):
+            # Clipped: the line is the sender's, and the error is logged.
+            raise SipError(f"malformed header line {clip(line)}")
+        name = name.strip(" \t")
+        # RFC 3261 LWS is spaces and tabs; str.strip() would also take
+        # Unicode whitespace (U+0085, U+00A0) off a value.
+        headers.add(_COMPACT.get(name.lower(), name), value.strip(" \t"))
     headers = Headers([(n, v) for n, v in headers.items()
                        if n.lower() != "content-length"])
     m = _STATUS_LINE.match(start)
@@ -639,7 +642,7 @@ def parse_message(data: bytes):
     m = _REQUEST_LINE.match(start)
     if m:
         return Request(m.group(1), m.group(2), headers, body)
-    raise SipError(f"malformed start line {start!r}")
+    raise SipError(f"malformed start line {clip(start)}")
 
 
 # --------------------------------------------------------------------------
@@ -702,6 +705,30 @@ _REQUIRED_HEADERS = ("Via", "From", "To", "Call-ID", "CSeq")
 _CSEQ = re.compile(r"^\d+\s+[A-Z]+$")
 
 
+# RES-OP-15: a new INVITE's Call-ID becomes its session's correlation id in
+# the audit trail and in every log line about it. RFC 3261 sets no length, so
+# the guard does: a Call-ID longer than this, or not of RFC 3261 25.1's
+# `callid = word [ "@" word ]`, is answered 400 before anything uses it.
+# Clients use a random part and a host (a UUID@host is under 100 bytes).
+CALL_ID_MAX = 256
+_WORD = r"[A-Za-z0-9\-.!%*_+`'~()<>:\\\"/\[\]?{}]+"
+_CALL_ID = re.compile(rf"{_WORD}(?:@{_WORD})?")
+
+
+def clip(text: str, limit: int = 80) -> str:
+    """A peer's text for an error message or a log line: its repr, cut to
+    `limit` characters, with its length when cut (RES-OP-15 review). Error
+    messages built from what a peer sent end up in the log and the audit."""
+    shown = repr(text[:limit])
+    return shown if len(text) <= limit else f"{shown}... ({len(text)} characters)"
+
+
+def valid_call_id(value: Optional[str]) -> bool:
+    """RFC 3261 25.1 `callid`, at most CALL_ID_MAX characters."""
+    return value is not None and len(value) <= CALL_ID_MAX and \
+        _CALL_ID.fullmatch(value) is not None
+
+
 class InboundGuard:
     """Rejects malformed, replayed and unknown-session requests.
 
@@ -747,6 +774,15 @@ class InboundGuard:
         cseq = request.headers.get("CSeq") or ""
         if not _CSEQ.match(cseq.strip()):
             return "malformed CSeq"
+        if len(request.headers.get_all("Call-ID")) != 1:
+            # Single-valued (RFC 3261 20.8): two would let two readers see two
+            # calls, and the second would sit unchecked in transaction memory.
+            return "Call-ID header not exactly once"
+        call_id = request.headers.get("Call-ID")
+        if call_id is not None and len(call_id) > CALL_ID_MAX:
+            return f"Call-ID longer than {CALL_ID_MAX} characters"
+        if not valid_call_id(call_id):
+            return "malformed Call-ID"
         if request.body and not request.headers.has("Content-Type"):
             return "body present without Content-Type"
         return None
@@ -1273,7 +1309,7 @@ def parse_sdp(body: str) -> SdpInfo:
     _check_media_address(address)
     if not 0 < audio[0] <= 65535:
         # Port 0 declines the stream (RFC 3264 6); nothing to relay to.
-        raise SipError(f"SDP audio port {audio[0]} is not usable")
+        raise SipError(f"SDP audio port {clip(str(audio[0]), 12)} is not usable")
     if floor_port is not None and not 0 < floor_port <= 65535:
         floor_port = None                     # the floor stream declined
     return SdpInfo(address, audio[0], audio[1], floor_port)
@@ -1292,7 +1328,7 @@ def _check_media_address(address: str) -> None:
         return
     if ip.is_unspecified or ip.is_multicast or \
             ip == ipaddress.ip_address("255.255.255.255"):
-        raise SipError(f"SDP connection address {address} is not a unicast peer")
+        raise SipError(f"SDP connection address {clip(address, 64)} is not a unicast peer")
 
 
 def build_sdp(address: str, audio_port: int, floor_port: Optional[int],

@@ -38,7 +38,7 @@ from core.sip import (
     RegistrationStore, Response, SipError, Status, build_sdp, canonical_uri,
     parse_message, parse_sdp,
     OPTION_TIMER, SUPPORTED_ON_ANSWER, SUPPORTED_ON_PROVISIONAL, allows,
-    parse_min_se, uac_session_timer, uas_session_timer,
+    parse_min_se, uac_session_timer, uas_session_timer, valid_call_id,
 )
 
 from core import codec as codec_mod
@@ -354,7 +354,7 @@ class SipCore:
                 # _on_request guards most of its work; what escapes it would
                 # end this connection's reader with a traceback that is not
                 # JSON and names no session (RES-OP-04 review).
-                log.exception("fault handling a %s request", message.method)
+                log.exception("fault handling a %s request", message.method[:32])
 
     def _cid_of(self, call_id: Optional[str]) -> Optional[str]:
         """The correlation id of the session a Call-ID belongs to: the
@@ -369,8 +369,12 @@ class SipCore:
         call_id = message.headers.get("Call-ID")
         cid = self._cid_of(call_id)
         if cid is None and isinstance(message, Request) and \
-                message.method == "INVITE" and not _tag_of(message.headers.get("To")):
-            cid = call_id or None
+                message.method == "INVITE" and not _tag_of(message.headers.get("To")) \
+                and valid_call_id(call_id):
+            # Only a Call-ID the guard will accept names a session; a longer
+            # or malformed one is refused 400 and no log line carries it
+            # (RES-OP-15).
+            cid = call_id
         return cid
 
     def on_flow_closed(self, flow: Any) -> None:
@@ -380,6 +384,14 @@ class SipCore:
     def _on_request(self, req: Request, flow: Any) -> None:
         # 1 — retransmission?
         if req.method == "ACK":
+            # An ACK never reaches the guard, so its Call-ID is checked here,
+            # before anything logs or matches it (review of RES-OP-15).
+            ids = req.headers.get_all("Call-ID")
+            if len(ids) != 1 or not valid_call_id(ids[0]):
+                self.counters["dropped_malformed"] += 1
+                log.info("ACK with a malformed Call-ID dropped (%d header(s), %d "
+                         "characters)", len(ids), sum(len(i) for i in ids))
+                return
             acked = self.server.absorb_ack(req, flow)
             if acked is None:
                 log.info("stray ACK dropped call-id=%s",
@@ -622,7 +634,8 @@ class SipCore:
             offer = _offer_of(call.invite)
             info = parse_sdp(offer)
         except SipError as exc:
-            call.media_error = f"unusable SDP offer: {exc}"
+            # Bounded where it becomes an audit detail and a log line (RES-OP-15).
+            call.media_error = f"unusable SDP offer: {exc}"[:200]
             return
         choice = codec_mod.choose(offer, self._preference)
         if choice is None:
@@ -983,7 +996,9 @@ class SipCore:
             ("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};"
                     # Fixed per dialog, so a re-sent ACK is identical; the
                     # '.' keeps (call-id, tag) pairs from running together.
-                    f"branch=z9hG4bKmcxack{leg.call_id}.{to_tag}"),
+                    # The tag is the callee's: hashed, so its length is ours.
+                    f"branch=z9hG4bKmcxack{leg.call_id}."
+                    f"{hashlib.sha256(to_tag.encode()).hexdigest()[:16]}"),
             ("From", f"<{self.local_uri}>;tag={leg.call_id}-l"),
             ("To", f"<{leg.uri}>;tag={to_tag}"),
             ("Call-ID", leg.call_id), ("CSeq", f"{leg.invite_cseq} ACK"),

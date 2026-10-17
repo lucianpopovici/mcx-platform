@@ -120,6 +120,10 @@ class ServerTransactions:
         cseq, _ = cseq_of(request.headers)
         call_id = request.headers.get("Call-ID") or ""
         txn = self._txns.get((top_branch(request.headers), "INVITE"))
+        if txn is not None and txn.call_id != call_id:
+            # The branch names the transaction; its ACK also carries its
+            # Call-ID (RFC 3261 17.1.1.3), or it is not this transaction's.
+            txn = None
         if txn is None:
             for t in self._txns.values():
                 if t.request.method == "INVITE" and t.state == ACCEPTED \
