@@ -910,3 +910,99 @@ def test_a_connection_with_no_deadline_is_closed_and_its_slot_returned(tmp_path,
     finally:
         s.server_close()
         r.close()
+
+
+# ===================================== durations in seconds (owner ruling 2026-10-18)
+
+
+def _seconds_deployment(tmp_path, pki, ms, s, ring_ms, ring_s, timers=None):
+    """A SIP deployment whose session interval and first mcx call type's
+    ring limit are stated as given (None: not stated); `timers`, (old, new),
+    replaces the first floor timer map of the profile."""
+    import shutil
+    shutil.copytree(PROFILES, tmp_path / "profiles", ignore=shutil.ignore_patterns("__pycache__"))
+    p = tmp_path / "profiles" / "mcx" / "profile.yaml"
+    old = "    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)\n"
+    new = "".join(f"    {k}: {v}\n" for k, v in (("no_answer_ms", ring_ms), ("no_answer_s", ring_s))
+                  if v is not None)
+    text = p.read_text(encoding="utf-8").replace(old, new, 1)
+    if timers:
+        assert timers[0] in text
+        text = text.replace(timers[0], timers[1], 1)
+    p.write_text(text, encoding="utf-8")
+    env = sip_env(tmp_path, pki, MCX_PROFILES_ROOT=str(tmp_path / "profiles"))
+    env.pop("MCX_SESSION_EXPIRES_MS")
+    for k, v in (("MCX_SESSION_EXPIRES_MS", ms), ("MCX_SESSION_EXPIRES", s)):
+        if v is not None:
+            env[k] = v
+    return env
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_disagreeing_forms_use_the_milliseconds_and_warn(tmp_path, pki, caplog):
+    """PLT-GEN-011 as amended 2026-10-18: either form is standard; with both,
+    the milliseconds apply and a disagreement is warned of."""
+    env = _seconds_deployment(tmp_path, pki, "600000", "1800", 45000, 32,
+                              timers=("      timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}\n",
+                                      "      timers_ms: {T2: 1000, T8: 1000, T3: 3000}\n"
+                                      "      timers_s: {T2: 3, T20: 1}\n"))
+    with caplog.at_level(logging.WARNING, logger="mcx.service"):
+        r = build_runtime(env, Clock())
+    try:
+        assert r.config.sip.session_expires_ms == 600_000
+        first = r.loaded.profile.call_types[0]
+        assert first.no_answer_ms == 45_000
+        snap = r.health.snapshot()
+        assert not [d for d in snap["deviations"] if "no_answer" in d["setting"]
+                    or "SESSION_EXPIRES" in d["setting"] or "timers" in d["setting"]]
+        ct_with_timers = next(ct for ct in r.loaded.profile.call_types if ct.floor.timers_s)
+        assert dict(ct_with_timers.floor.timers_ms)["T2"] == 1000
+        assert dict(ct_with_timers.floor.timers_ms)["T20"] == 1000
+        assert snap["warnings"] == [
+            {"setting": "MCX_SESSION_EXPIRES_MS",
+             "message": "MCX_SESSION_EXPIRES=1800 s (1800000 ms) and "
+                        "MCX_SESSION_EXPIRES_MS=600000 disagree; MCX_SESSION_EXPIRES_MS=600000 "
+                        "is used"},
+            {"setting": "call_types[private].no_answer_ms",
+             "message": "call_types[private]: no_answer_s=32 s (32000 ms) and "
+                        "no_answer_ms=45000 disagree; no_answer_ms=45000 is used"},
+            {"setting": f"call_types[{ct_with_timers.id}].floor.timers_ms.T2",
+             "message": f"call_types[{ct_with_timers.id}].floor: timers_s.T2=3 s (3000 ms) "
+                        "and timers_ms.T2=1000 disagree; timers_ms.T2=1000 is used"}]
+        detail = _started(r)
+        assert detail["warnings"] == snap["warnings"]
+        assert detail["deviations"] == snap["deviations"]
+        assert [m for m in caplog.messages if m.startswith("setting: ")] == [
+            "setting: " + w["message"] for w in snap["warnings"]]
+    finally:
+        r.close()
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("ms, s, ring_ms, ring_s", [
+    ("1800000", "1800", 32000, 32),     # both forms, agreeing
+    (None, "1800", None, 32),           # seconds alone
+    ("1800000", None, 32000, None),     # milliseconds alone
+])
+def test_agreeing_or_single_forms_are_neither_deviation_nor_warning(
+        tmp_path, pki, ms, s, ring_ms, ring_s):
+    r = build_runtime(_seconds_deployment(tmp_path, pki, ms, s, ring_ms, ring_s), Clock())
+    try:
+        assert r.config.sip.session_expires_ms == 1_800_000
+        assert r.loaded.profile.call_types[0].no_answer_ms == 32_000
+        snap = r.health.snapshot()
+        assert not [d for d in snap["deviations"] if "no_answer" in d["setting"]
+                    or "SESSION_EXPIRES" in d["setting"]]
+        assert snap["warnings"] == [] and _started(r)["warnings"] == []
+    finally:
+        r.close()
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_the_seconds_pairs_are_the_ones_handled():
+    """A pair added to SECONDS_FORMS fails here until it is read, given
+    priority and warned of like these three, and tested so."""
+    from core import validation
+    from service import config
+    assert config.SECONDS_FORMS == {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}
+    assert validation.SECONDS_FORMS == {"no_answer_s": "no_answer_ms", "timers_s": "timers_ms"}

@@ -72,6 +72,7 @@ class Health:
         self._call_types: dict = {}
         self._settings: dict = {}
         self._deviations: list = []
+        self._warnings: list = []
         self._audit: Callable[[], dict] = lambda: {}
 
     def set_audit(self, fn: Callable[[], dict]) -> None:
@@ -80,6 +81,10 @@ class Health:
     def set_deviations(self, settings: dict, deviations: list) -> None:
         with self._lock:
             self._settings, self._deviations = settings, deviations
+
+    def set_warnings(self, warnings: list) -> None:
+        with self._lock:
+            self._warnings = warnings
 
     def set_call_types(self, report: dict) -> None:
         with self._lock:
@@ -127,6 +132,7 @@ class Health:
                     "call_types": self._call_types,
                     "settings": self._settings,
                     "deviations": self._deviations,
+                    "warnings": self._warnings,
                     "audit": self._audit(),
                     **self._extra()}
 
@@ -319,6 +325,41 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
     return settings, deviations
 
 
+def setting_warnings(config: Config, loaded: LoadedProfile) -> list:
+    """A duration stated both in milliseconds and in seconds, with values
+    that disagree (PLT-GEN-011 as amended 2026-10-18): the milliseconds are
+    used, and the disagreement is reported in the log, the health document
+    and the startup audit record."""
+    warnings: list = []
+    sip = config.sip
+    if sip is not None and sip.session_expires_s is not None and \
+            sip.session_expires_ms != sip.session_expires_s * 1000:
+        warnings.append({
+            "setting": "MCX_SESSION_EXPIRES_MS",
+            "message": f"MCX_SESSION_EXPIRES={sip.session_expires_s} s "
+                       f"({sip.session_expires_s * 1000} ms) and "
+                       f"MCX_SESSION_EXPIRES_MS={sip.session_expires_ms} disagree; "
+                       f"MCX_SESSION_EXPIRES_MS={sip.session_expires_ms} is used"})
+    for ct in loaded.profile.call_types:
+        if ct.no_answer_s is not None and ct.no_answer_ms != ct.no_answer_s * 1000:
+            warnings.append({
+                "setting": f"call_types[{ct.id}].no_answer_ms",
+                "message": f"call_types[{ct.id}]: no_answer_s={ct.no_answer_s} s "
+                           f"({ct.no_answer_s * 1000} ms) and "
+                           f"no_answer_ms={ct.no_answer_ms} disagree; "
+                           f"no_answer_ms={ct.no_answer_ms} is used"})
+        for name, s in sorted(ct.floor.timers_s.items()):
+            ms = ct.floor.timers_ms[name]
+            if ms != s * 1000:
+                warnings.append({
+                    "setting": f"call_types[{ct.id}].floor.timers_ms.{name}",
+                    "message": f"call_types[{ct.id}].floor: timers_s.{name}={s} s "
+                               f"({s * 1000} ms) and "
+                               f"timers_ms.{name}={ms} disagree; timers_ms.{name}={ms} "
+                               "is used"})
+    return warnings
+
+
 def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                   platform: Optional[Platform] = None,
                   store: Optional[SessionStore] = None) -> Runtime:
@@ -427,9 +468,13 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
         # allowed, and said so -- in the log, the health document and the audit.
         health.set_audit(manager.floor_audit_state)
         settings, deviations = behaviour_settings(config, loaded)
+        warnings = setting_warnings(config, loaded)
         health.set_deviations(settings, deviations)
+        health.set_warnings(warnings)
         auditor.emit(RecordType.CONFIGURATION_ACCEPTED, STARTUP_CORRELATION_ID,
-                     settings=settings, deviations=deviations)
+                     settings=settings, deviations=deviations, warnings=warnings)
+        for w in warnings:
+            log.warning("setting: %s", w["message"])
         for d in deviations:
             log.warning("deviation: %s=%s departs from %s (%s): %s", d["setting"],
                         d["value"], d["departs_from"], d["ref"], d["consequence"])

@@ -32,7 +32,7 @@ call_types:
     label: Private call
     # TS 24.379 11.1.1.2.1.1: <session-type> private.
     mc_signature: {session_type: private}
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
@@ -54,7 +54,7 @@ call_types:
     label: Prearranged group call
     # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
     mc_signature: {session_type: prearranged}
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
@@ -76,7 +76,7 @@ call_types:
     label: Emergency group call
     # TS 24.379 6.2.8.1.1 item 1: prearranged, with <emergency-ind> true.
     mc_signature: {session_type: prearranged, emergency: true}
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
@@ -102,7 +102,7 @@ call_types:
     label: Imminent peril group call
     # TS 24.379 6.2.8.1.9: prearranged, with <imminentperil-ind> true.
     mc_signature: {session_type: prearranged, imminent_peril: true}
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
@@ -128,7 +128,7 @@ call_types:
     label: Short data service
     # MCData (TS 24.282), not an MCPTT session: no MCPTT signature.
     mc_signature: null
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [data]
     session_model: on-demand
@@ -153,7 +153,7 @@ call_types:
     # to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
     # request it.
     mc_signature: null
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand

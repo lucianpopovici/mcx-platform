@@ -72,7 +72,13 @@ DIALOG_TAKEOVER_VALUES = ("same-party", "never")
 LOCATION_REPORT_VALUES = ("read", "ignore")
 # RES-OP-05: HTTPS on the HTTP interface (HTTP-1, PLT-SRS 3.1), or plain HTTP.
 HTTP_TLS_VALUES = ("on", "off")
-SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS")
+# PLT-GEN-011 as amended 2026-10-18: every duration setting may be stated in
+# seconds or in milliseconds. Each seconds setting and its millisecond
+# setting; at least one is set; with both, the milliseconds apply and a
+# disagreement is reported at startup (service/runtime.py).
+SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}
+SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS",
+            "MCX_SESSION_EXPIRES_MS", "MCX_SESSION_EXPIRES")
 HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
 # RES-OP-14 (owner ruling 2026-10-16): a floor transition the audit store
 # cannot take is undone and not sent ("deny", PLT-FC-011 kept: the floor
@@ -157,6 +163,41 @@ def is_fqdn(name: str) -> bool:
             and all(_LABEL.fullmatch(label) for label in labels))
 
 
+def _session_interval(env: Mapping[str, str]) -> Tuple[int, Optional[int]]:
+    """SIP-OP-17, PLT-GEN-011 as amended 2026-10-18: the RFC 4028 session interval as
+    MCX_SESSION_EXPIRES_MS (milliseconds, a whole number of seconds, at
+    least 90000) or MCX_SESSION_EXPIRES (seconds, at least 90), or both; at
+    least one. Every value set must be valid. Returns (the interval in ms,
+    the seconds as stated or None); the milliseconds take priority."""
+    raw_ms = (env.get("MCX_SESSION_EXPIRES_MS") or "").strip()
+    raw_s = (env.get("MCX_SESSION_EXPIRES") or "").strip()
+    if not raw_ms and not raw_s:
+        raise StartupRefused(
+            "MCX_SESSION_EXPIRES_MS is not set (nor MCX_SESSION_EXPIRES, in "
+            "seconds): SIP is enabled and requires the RFC 4028 session "
+            "interval; there is no default")
+    ms = s = None
+    if raw_ms:
+        if not (raw_ms.isascii() and raw_ms.isdigit()) or len(raw_ms) > 9 or \
+                int(raw_ms) < MIN_SE_S * 1000 or int(raw_ms) % 1000:
+            raise StartupRefused(
+                f"MCX_SESSION_EXPIRES_MS={raw_ms[:32]!r}: give the RFC 4028 "
+                "session interval in milliseconds, a whole number of seconds "
+                f"(RFC 4028 counts in seconds), at least {MIN_SE_S * 1000}. It "
+                "bounds how long a call whose far end vanished without a BYE "
+                "stays up")
+        ms = int(raw_ms)
+    if raw_s:
+        if not (raw_s.isascii() and raw_s.isdigit()) or len(raw_s) > 6 or \
+                int(raw_s) < MIN_SE_S:
+            raise StartupRefused(
+                f"MCX_SESSION_EXPIRES={raw_s[:32]!r}: give the RFC 4028 session "
+                f"interval in whole seconds, at least {MIN_SE_S}. It bounds how "
+                "long a call whose far end vanished without a BYE stays up")
+        s = int(raw_s)
+    return (ms if ms is not None else s * 1000), s
+
+
 @dataclass(frozen=True)
 class SipConfig:
     host: str
@@ -170,10 +211,16 @@ class SipConfig:
     # The trusted SIP cores and their CA (ICD-OP-08, ICD-OP-10) are network
     # data: see service/network.py.
     # SIP-OP-17 / CA-20b (decided 2026-09-25): the RFC 4028 session interval
-    # the platform asks for and caps a longer request to, in seconds. It is
-    # how long a call whose far end vanished without a BYE can outlive it.
-    # Required, no default; at least 90 (RFC 4028's smallest Min-SE).
-    session_expires: int = 0
+    # the platform asks for and caps a longer request to. It is how long a
+    # call whose far end vanished without a BYE can outlive it. Required, no
+    # default; in milliseconds (PLT-GEN-011), a whole number of seconds since
+    # RFC 4028 counts in seconds, at least 90 s (RFC 4028's smallest Min-SE).
+    # PLT-GEN-011 as amended 2026-10-18: MCX_SESSION_EXPIRES_MS, or
+    # MCX_SESSION_EXPIRES in seconds, or both, the milliseconds applying.
+    session_expires_ms: int = 0
+    # MCX_SESSION_EXPIRES as stated, in seconds, or None: checked against
+    # session_expires_ms at startup when both are set.
+    session_expires_s: Optional[int] = None
     # Owner ruling 2026-10-16 (see SERVICE_REFUSAL_STATUSES and the rest).
     service_refusal_status: int = 503
     dialog_takeover: str = "same-party"
@@ -241,12 +288,7 @@ class SipConfig:
             raise StartupRefused(
                 "MCX_SIP_ROLES=participating alone is not supported: the "
                 "controlling function is not reachable remotely (SIP-OP-03)")
-        raw_se = need("MCX_SESSION_EXPIRES")
-        if not raw_se.isdigit() or len(raw_se) > 6 or int(raw_se) < MIN_SE_S:
-            raise StartupRefused(
-                f"MCX_SESSION_EXPIRES={raw_se!r}: give the RFC 4028 session "
-                f"interval in whole seconds, at least {MIN_SE_S}. It bounds how "
-                "long a call whose far end vanished without a BYE stays up")
+        expires_ms, expires_s = _session_interval(env)
         status = _choice(env, "MCX_SERVICE_REFUSAL_STATUS", SERVICE_REFUSAL_STATUSES,
                          "state the SIP status of a refusal for a service condition "
                          "such as capacity (PLT-VP-R1 SIP-OP-10)")
@@ -257,7 +299,8 @@ class SipConfig:
                            "state whether the client's location report is read "
                            "(ADHOC-OP-03)")
         return SipConfig(host, port, uri, cert, key, ca, auth, roles,
-                         session_expires=int(raw_se),
+                         session_expires_ms=expires_ms,
+                         session_expires_s=expires_s,
                          service_refusal_status=int(status),
                          dialog_takeover=takeover, location_reports=location)
 
@@ -397,7 +440,7 @@ class Config:
                 "caller's participant list may hold (a positive integer); there "
                 "is no default, because an unbounded list is unbounded work "
                 "before any participant is resolved")
-        if not raw_max.isdigit() or int(raw_max) < 1:
+        if not (raw_max.isascii() and raw_max.isdigit()) or int(raw_max) < 1:
             raise StartupRefused(
                 f"MCX_ADHOC_LIST_MAX={raw_max!r} must be a whole number of at least 1")
 

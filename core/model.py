@@ -10,7 +10,7 @@ them (PLT-PRF-020).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
@@ -47,6 +47,11 @@ class FloorConfig:
     # 24.380 6.3.4.4.7 item 2e orders, one entry beyond the declared depth;
     # or "deny" it queue-full, a recorded deviation. Required.
     preemption_at_full_queue: str = "deny"
+    # The timers the profile stated in seconds (`timers_s`), as stated:
+    # timers_ms holds every timer in milliseconds, a timer stated in both
+    # forms taking its milliseconds, and a disagreement is reported at
+    # startup (PLT-GEN-011 as amended 2026-10-18).
+    timers_s: Mapping[str, int] = field(default_factory=lambda: freeze_map({}))
 
 
 @dataclass(frozen=True)
@@ -69,10 +74,15 @@ class CallType:
     # Declared, never inferred (PLT-ICD-001 section 2.6).
     mc_signature: Optional[Signature] = None
     # How long an invited member may ring (the leg's INVITE is in
-    # 'Proceeding') before the core CANCELs it, in seconds. Service policy,
-    # declared per call type (PLT-VP-R1 SIP-OP-15, PLT-ICD-001 2.7). The
-    # loader requires it; None only in a CallType built by hand, and then
-    # the transaction layer's Timer B is the only limit.
+    # 'Proceeding') before the core CANCELs it, in milliseconds. Service
+    # policy, declared per call type (PLT-VP-R1 SIP-OP-15, PLT-ICD-001 2.7).
+    # The loader requires it, from no_answer_ms or no_answer_s; None only in
+    # a CallType built by hand, and then the transaction layer's Timer B is
+    # the only limit.
+    no_answer_ms: Optional[int] = None
+    # The limit as the profile stated it in seconds (`no_answer_s`), or None:
+    # checked at startup against no_answer_ms, which takes priority
+    # (PLT-GEN-011 as amended 2026-10-18).
     no_answer_s: Optional[int] = None
     # A group call whose session decision allows fewer participants than the
     # group has (RES-OP-12 ruling 1, a profile setting since 2026-10-16):

@@ -22,9 +22,17 @@ sys.path.insert(0, str(ROOT))
 
 from core import rtcp                                        # noqa: E402
 from core.errors import StartupRefused                       # noqa: E402
-from core.release import Release, parse, subtype_name        # noqa: E402
+from core.release import SUPPORTED, Release, parse, subtype_name  # noqa: E402
 
 RELEASES = tuple(range(13, 21))
+
+
+@pytest.mark.vp("VP1-BND-023")
+def test_the_suite_covers_every_supported_release():
+    """RELEASES is written out, not read from core/release.py; this keeps it
+    honest. A release added to the platform fails here until the suite's
+    expectations for it are written."""
+    assert tuple(int(r) for r in SUPPORTED) == RELEASES == (13, 14, 15, 16, 17, 18, 19, 20)
 
 
 # -- the parameter itself ------------------------------------------------------

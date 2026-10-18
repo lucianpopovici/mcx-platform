@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core import loader, model  # noqa: E402
+from core import validation as validation_mod  # noqa: E402
 from core.errors import (  # noqa: E402
     HookContractViolation,
     ProfileLoadError,
@@ -267,6 +268,7 @@ def test_vp1_load_020_missing_hook_rejected(mutate):
                    path_contains="profile.hooks.bearer_selector")
 
 
+@pytest.mark.vp("VP1-BND-007")   # PLT-PRF-012: no hook substituted
 def test_vp1_load_021_hook_not_implementing_interface(mutate, tmp_path):
     raw = mutate()
     raw["profile"]["hooks"]["priority_policy"] = "tests.test_loader:BadPolicy"
@@ -277,6 +279,7 @@ def test_vp1_load_021_hook_not_implementing_interface(mutate, tmp_path):
     assert "compare" in str(exc.value)
 
 
+@pytest.mark.vp("VP1-BND-007")   # PLT-PRF-012: no hook substituted
 def test_vp1_load_021_unimportable_hook_module(mutate):
     raw = mutate()
     raw["profile"]["hooks"]["session_policy"] = "no.such.module:Thing"
@@ -293,6 +296,7 @@ def test_vp1_load_021_bad_hook_specification(mutate):
                    path_contains="profile.hooks.session_policy")
 
 
+@pytest.mark.vp("VP1-BND-007")   # PLT-PRF-012: no hook substituted
 @pytest.mark.parametrize("field", [
     "identity_resolver", "priority_policy", "session_policy",
     "bearer_selector", "interworking_gateway",
@@ -886,7 +890,7 @@ def test_a_malformed_signature_is_refused(mutate, sig, path):
 
 
 # --------------------------------------------------------------------------
-# no_answer_s (PLT-ICD-001 2.7, PLT-VP-R1 SIP-OP-15)
+# no_answer_ms (PLT-ICD-001 2.7, PLT-VP-R1 SIP-OP-15; ms per PLT-GEN-011)
 # --------------------------------------------------------------------------
 
 
@@ -894,32 +898,88 @@ def test_every_call_type_must_state_how_long_a_member_may_ring(mutate):
     """Required, no default: the 32 s it used to be was Timer B, a transport
     constant nobody chose for any call type."""
     raw = mutate()
-    del raw["call_types"][0]["no_answer_s"]
-    expect_defects(raw, codes=["missing-key"], path_contains="call_types[0].no_answer_s")
+    del raw["call_types"][0]["no_answer_ms"]
+    expect_defects(raw, codes=["missing-key"], path_contains="call_types[0].no_answer_ms")
+    raw["call_types"][0]["no_answer_s"] = 32
+    assert build(raw, "test-hash").call_types[0].no_answer_ms == 32_000
 
 
 @pytest.mark.parametrize("value, code", [
-    (0, "bad-value"), (-5, "bad-value"), (True, "bad-type"), ("30", "bad-type"),
-    (12.5, "bad-type"), (None, "bad-type"),
+    (0, "bad-value"), (-5, "bad-value"), (999, "bad-value"), (True, "bad-type"),
+    ("30000", "bad-type"), (12.5, "bad-type"), (None, "bad-type"),
 ])
 def test_a_bad_ring_limit_is_refused(mutate, value, code):
     raw = mutate()
+    raw["call_types"][0]["no_answer_ms"] = value
+    expect_defects(raw, codes=[code], path_contains="call_types[0].no_answer_ms")
+
+
+def _defects(raw):
+    with pytest.raises(ProfileValidationError) as exc:
+        build(raw, "test-hash")
+    return [(d.path, d.code, d.message) for d in exc.value.defects]
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_neither_ring_limit_form_is_refused(mutate):
+    """Owner ruling 2026-10-18: no_answer_ms or no_answer_s, at least one."""
+    raw = mutate()
+    del raw["call_types"][0]["no_answer_ms"]
+    assert _defects(raw) == [("call_types[0].no_answer_ms", "missing-key",
+                              "required key absent (or no_answer_s, in seconds)")]
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("ms, s, effective", [
+    (None, 32, (32_000, 32)),           # seconds alone: converted, and kept as stated
+    (32_000, None, (32_000, None)),     # milliseconds alone
+    (32_000, 32, (32_000, 32)),         # both, agreeing
+    (45_500, 32, (45_500, 32)),         # both, disagreeing: the milliseconds win
+    (1000, 1, (1000, 1)),               # the least of each
+])
+def test_the_ring_limit_in_either_form(mutate, ms, s, effective):
+    raw = mutate()
+    del raw["call_types"][0]["no_answer_ms"]
+    if ms is not None:
+        raw["call_types"][0]["no_answer_ms"] = ms
+    if s is not None:
+        raw["call_types"][0]["no_answer_s"] = s
+    ct = build(raw, "test-hash").call_types[0]
+    assert (ct.no_answer_ms, ct.no_answer_s) == effective
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("value, code, message", [
+    (0, "bad-value", "must be at least 1 s"), (-5, "bad-value", "must be at least 1 s"),
+    (True, "bad-type", "expected an integer (seconds)"),
+    ("30", "bad-type", "expected an integer (seconds)"),
+    (1.5, "bad-type", "expected an integer (seconds)"),
+    (None, "bad-type", "expected an integer (seconds)"),
+])
+@pytest.mark.parametrize("with_ms", [False, True], ids=["alone", "beside-ms"])
+def test_a_bad_ring_limit_in_seconds_is_refused(mutate, value, code, message, with_ms):
+    """Every form stated must be valid, even beside a valid no_answer_ms."""
+    raw = mutate()
+    if not with_ms:
+        del raw["call_types"][0]["no_answer_ms"]
     raw["call_types"][0]["no_answer_s"] = value
-    expect_defects(raw, codes=[code], path_contains="call_types[0].no_answer_s")
+    assert _defects(raw) == [("call_types[0].no_answer_s", code, message)]
 
 
 def test_the_declared_ring_limit_reaches_the_model(mutate):
     raw = mutate()
-    raw["call_types"][0]["no_answer_s"] = 75
+    raw["call_types"][0]["no_answer_ms"] = 1000
     prof = build(raw, "test-hash")
-    assert prof.call_types[0].no_answer_s == 75
+    assert prof.call_types[0].no_answer_ms == 1000
+    raw["call_types"][0]["no_answer_ms"] = 75_500
+    assert build(raw, "test-hash").call_types[0].no_answer_ms == 75_500
 
 
 @pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
 def test_every_in_tree_call_type_declares_a_ring_limit(name):
     loaded = loader.load(PROFILES / name)
-    assert all(isinstance(ct.no_answer_s, int) and ct.no_answer_s >= 1
-               for ct in loaded.profile.call_types)
+    assert all(isinstance(ct.no_answer_ms, int) and ct.no_answer_ms == 32_000
+               and ct.no_answer_s is None for ct in loaded.profile.call_types)
 
 
 @pytest.mark.parametrize("name", ["mcx", "frmcs", "utility"])
@@ -939,3 +999,61 @@ def test_r1_profiles_require_no_acknowledgement_r1_cannot_carry_out(name):
     does (PLT-RAIL-008, R3), rather than require what would not happen."""
     lp = loader.load(PROFILES / name)
     assert not any(ct.acknowledgement_required for ct in lp.profile.call_types)
+
+
+# --------------------------------------------------------------------------
+# Floor timers in seconds (PLT-GEN-011 as amended 2026-10-18)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("ms, s, effective", [
+    ({"T2": 4000}, None, {"T2": 4000}),
+    (None, {"T2": 4, "T20": 1}, {"T2": 4000, "T20": 1000}),
+    ({"T2": 2500}, {"T2": 4, "T8": 1}, {"T2": 2500, "T8": 1000}),   # the milliseconds win
+])
+def test_floor_timers_in_either_form(mutate, ms, s, effective):
+    raw = mutate()
+    floor = raw["call_types"][0]["floor"]
+    floor.pop("timers_ms", None)
+    if ms is not None:
+        floor["timers_ms"] = ms
+    if s is not None:
+        floor["timers_s"] = s
+    f = build(raw, "test-hash").call_types[0].floor
+    assert dict(f.timers_ms) == effective and dict(f.timers_s) == (s or {})
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("value, code, message", [
+    (0, "bad-value", "must be greater than zero"),
+    (True, "bad-type", "expected an integer in seconds, found bool"),
+    (1.5, "bad-type", "expected an integer in seconds, found float"),
+])
+def test_a_bad_floor_timer_in_seconds_is_refused(mutate, value, code, message):
+    raw = mutate()
+    raw["call_types"][0]["floor"]["timers_s"] = {"T2": value, "T999": 1}
+    assert _defects(raw) == [
+        ("call_types[0].floor.timers_s.T2", code, message),
+        ("call_types[0].floor.timers_s.T999", "unknown-key",
+         "not a TS 24.380 timer (known: " + ", ".join(validation_mod.FLOOR_TIMERS) + ")")]
+
+
+def test_a_floor_config_built_without_seconds_holds_an_immutable_map():
+    f = model.FloorConfig(False, False, False, 0, model.freeze_map({}))
+    assert dict(f.timers_s) == {}
+    with pytest.raises(TypeError):
+        f.timers_s["T2"] = 1
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("key", ["timers_ms", "timers_s"])
+@pytest.mark.parametrize("value", [0, False, [], ""])
+def test_a_falsy_timer_map_is_refused_not_read_as_none(mutate, key, value):
+    """Every value stated must be valid: `timers_ms: 0` is not "no timers"."""
+    raw = mutate()
+    raw["call_types"][0]["floor"][key] = value
+    assert _defects(raw) == [(f"call_types[0].floor.{key}", "bad-type",
+                              f"expected a mapping, found {type(value).__name__}"
+                              if not isinstance(value, bool) else
+                              f"expected a mapping, found bool")]

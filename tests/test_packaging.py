@@ -118,3 +118,22 @@ def test_the_containerfile_is_the_same_for_every_image_and_names_no_profile(imag
     assert "MCX_PROFILE=" not in text and "ENV MCX_" not in text
     for name in PROFILES:
         assert f"profiles/{name}" not in text
+
+
+@pytest.mark.vp("VP1-BND-007")
+@pytest.mark.parametrize("name", PROFILES)
+def test_an_image_with_one_profile_still_needs_it_named(images, name):
+    """PLT-GEN-004: an image carries exactly one profile, and still does not
+    start on it unless the deployment names it. Nothing infers the profile
+    from what the image holds."""
+    image = images[name]
+    code = ("from pathlib import Path; from core import loader\n"
+            "loader.startup([], Path('profiles'), {})\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
+    env["PYTHONPATH"] = str(image)
+    r = subprocess.run([sys.executable, "-c", code], cwd=image, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1
+    assert r.stderr.strip().splitlines()[-1] == (
+        "core.errors.StartupRefused: no profile configured: exactly one profile must be "
+        "named at deployment; the platform provides no default")

@@ -435,32 +435,66 @@ VP1-BND-006:
   note: Image count/hash invariants are exact for staged images; the naming rules are heuristic by the
     gate's own admission.
 VP1-BND-007:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-18'
   evidence:
-  - gate:VP1-BND-007
-  gap: 'Scans core/ only, and the regex requires `profile...:<type> = ''<lit>''` (annotation then default).
-    Probed misses: `def f(profile=''mcx'')` (no annotation), `os.environ.get(''MCX_PROFILE'', ''mcx'')`
-    in core, and a default placed where configuration is actually read — changing service/config.py to
-    `env.get("MCX_PROFILE", "mcx")` passes. The criterion covers code AND config, every path. Close with:
-    scan service/ (config.py) and any config files/defaults, flag any default on MCX_PROFILE reads (env.get
-    with 2nd arg, `or` fallback, getenv default), match unannotated keyword defaults; pair with the runtime
-    tests VP1-LOAD-002/022 as named evidence.'
-  note: The gate docstring itself says it cannot prove absence; the evidence list relies on the gate alone.
+    - gate:VP1-BND-007
+    - tests/test_boundary.py::test_batch_b_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_007_023_deployment_file_forms
+    - tests/test_boundary.py::test_bnd_007_catches_the_variants
+    - tests/test_boundary.py::test_bnd_007_leaves_ci_comments_and_empty_values_alone
+    - tests/test_boundary.py::test_bnd_007_leaves_stated_reads_alone
+    - tests/test_boundary.py::test_bnd_007_reads_every_deployment_file
+    - tests/test_loader.py::test_vp1_load_021_hook_not_implementing_interface
+    - tests/test_loader.py::test_vp1_load_021_unimportable_hook_module
+    - tests/test_loader.py::test_vp1_load_022_no_default_hook_substituted
+    - tests/test_packaging.py::test_an_image_with_one_profile_still_needs_it_named
+    - tests/test_service.py::test_a_profiles_root_holding_one_profile_still_needs_it_named
+    - tests/test_service.py::test_no_profile_stated_no_process
+  note: >-
+    Re-reviewed after RES-OP-09 (batch B, four rounds). Over core/ and service/: MCX_PROFILE is read
+    in service/config.py and nowhere read with a fallback (default argument, `or`, conditional, a
+    holder defaulted later), given a value (setdefault, putenv, environ[K]=, update(K=), a mapping
+    literal) or reached through a name bound to the key; no parameter or dataclass field carrying a
+    profile or hooks has a default but None or empty; no default, field value or fallback is an
+    in-tree profile's name. No deployment file outside docs/, tests/, .github/ (CI states each test
+    run's profile) and kb/ sets MCX_PROFILE: Containerfile/Dockerfile (any suffix), .env (any
+    suffix), compose and k8s manifests (name/value either way round), JSON, units, shell. At run
+    time: no process without a stated profile, also from a root or packaged image holding exactly
+    one profile (nothing infers it), and no hook substituted (VP1-LOAD-021/022 tests). Accepted
+    residue: a profile name inside a collection default of a parameter not named for a profile, a
+    module FALLBACK constant, getattr(env,'get'), a value built at run time, a manifest pair with
+    another field between, non-standard env-file names (env.prod, .envrc), templates and *.tf;
+    fail-closed false positives in description strings and JSON schemas.
 VP1-BND-008:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-18'
   evidence:
-  - gate:VP1-BND-008
-  gap: 'Substring markers in core/ only. Probed misses: `loop.add_signal_handler(signal.SIGUSR1, cb)`,
-    an mtime poll via `os.stat(p).st_mtime`, and a SIGUSR1 handler added in service/__main__.py (service/
-    is where signal handlers live and is not scanned). Close with: scan core/ and service/ (the whole
-    runtime), flag any signal handler registration other than the SIGTERM/SIGINT stop handler, add_signal_handler,
-    st_mtime/stat polling, threading timers around the loader, and any second call path into core.loader
-    after startup (call-graph check that the loader is invoked once from startup).'
-  note: SIGHUP/signal.signal/importlib.reload in core are caught.
+    - gate:VP1-BND-008
+    - tests/test_boundary.py::test_batch_b_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_008_catches_the_variants
+    - tests/test_boundary.py::test_bnd_008_leaves_the_stop_and_plain_stat_alone
+    - tests/test_boundary.py::test_bnd_008_review_probes
+    - tests/test_boundary.py::test_bnd_008_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_008_review_probes_round_3
+    - tests/test_service.py::test_the_profile_is_read_once_at_start
+  note: >-
+    Re-reviewed after RES-OP-09 (batch B, four rounds). Over core/ and service/, module aliases and
+    relative imports followed: of the loader only names that read no profile (LOADER_PUBLIC) and one
+    loader.startup call in build_runtime, outside loops and nested functions; build_runtime imported
+    by service/__main__.py alone, under its name, called once by main; the profile reported once
+    (Health.set_profile, by build_runtime); validation.build only in the loader; no
+    object.__setattr__ outside core/hooks.py, no dataclasses.replace on the profile or setting a
+    holder, holders set only on self in __init__ or that report, never by name (setattr, __dict__,
+    vars); no os.exec*/spawn*/fork; the one signal handler is the SIGTERM/SIGINT stop in
+    service/__main__.py (no other registration, signal name or from-signal import); no watcher or
+    reloader imported; no file modification time read. At run time a profile changed on disk is not
+    picked up. Accepted residue: getattr or sys.modules access to the loader or runtime, setattr
+    with a name in a variable, a module-aliased dataclasses.replace, os.stat()[8], a thread hashing
+    the file, a watcher through ctypes, private validation helpers, os.kill, a second process
+    started with subprocess, a holder under another name, a Runtime rebuilt from another's __dict__.
 VP1-BND-009:
   verdict: pass
   by: independent review (agent)
@@ -553,20 +587,68 @@ VP1-BND-015:
     clock) as listed evidence.'
   note: Only one of two clauses covered, and that one by leaf-name match.
 VP1-BND-016:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-18'
   evidence:
-  - gate:VP1-BND-016
-  gap: 'Substring markers on core/ .py and five exact parameter names. Criterion covers configuration,
-    logs and audit records; service/logs.py and service/config.py are not scanned (probe: time.localtime/strftime
-    in service/logs.py missed). Probed misses in core: `datetime.fromtimestamp(x)` (local time), a `timeout_s:
-    float` parameter (seconds, not ms). Nothing checks emitted timestamps are UTC or that configuration
-    durations are in ms. Close with: scan core/ and service/; flag fromtimestamp without tz, naive datetime
-    construction, ctime/asctime/strftime; require duration names to end in _ms (flag _s/_sec/seconds);
-    add a test that parses emitted log and audit records and asserts a UTC offset/Z and ms units, and
-    validate config duration keys.'
-  note: Covers one of three named artefact kinds, heuristically.
+    - gate:VP1-BND-016
+    - tests/test_boundary.py::test_batch_b_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_016_a_new_duration_needs_both_forms
+    - tests/test_boundary.py::test_bnd_016_a_paired_field_must_hold_a_declared_form
+    - tests/test_boundary.py::test_bnd_016_a_seconds_field_needs_its_milliseconds_sibling_in_configuration
+    - tests/test_boundary.py::test_bnd_016_a_seconds_form_is_exempt_only_where_it_is_declared
+    - tests/test_boundary.py::test_bnd_016_catches_the_variants
+    - tests/test_boundary.py::test_bnd_016_leaves_utc_and_ms_alone
+    - tests/test_boundary.py::test_bnd_016_plural_trailing_duration_words
+    - tests/test_boundary.py::test_bnd_016_review_probes
+    - tests/test_boundary.py::test_bnd_016_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_016_schema_keys_read_with_get_and_subscript
+    - tests/test_boundary.py::test_bnd_016_seconds_are_the_named_wire_values_only
+    - tests/test_boundary.py::test_bnd_016_the_profile_seconds_forms_are_exempt_only_while_declared
+    - tests/test_boundary.py::test_bnd_016_the_session_seconds_form_is_exempt_only_while_declared
+    - tests/test_boundary.py::test_bnd_016_utc_named_any_way_is_utc
+    - tests/test_boundary.py::test_bnd_016_what_a_seconds_pair_is
+    - tests/test_loader.py::test_a_bad_floor_timer_in_seconds_is_refused
+    - tests/test_loader.py::test_a_bad_ring_limit_in_seconds_is_refused
+    - tests/test_loader.py::test_a_falsy_timer_map_is_refused_not_read_as_none
+    - tests/test_loader.py::test_floor_timers_in_either_form
+    - tests/test_loader.py::test_neither_ring_limit_form_is_refused
+    - tests/test_loader.py::test_the_ring_limit_in_either_form
+    - tests/test_logs.py::test_a_log_line_is_stamped_in_utc_milliseconds_only
+    - tests/test_media_e2e.py::test_every_audit_record_of_a_call_carries_utc_milliseconds_only
+    - tests/test_session_timer.py::test_a_bad_session_interval_in_seconds_is_refused
+    - tests/test_session_timer.py::test_the_session_interval_in_either_form
+    - tests/test_session_timer.py::test_the_session_interval_in_seconds_without_sip_is_refused_not_ignored
+    - tests/test_settings.py::test_agreeing_or_single_forms_are_neither_deviation_nor_warning
+    - tests/test_settings.py::test_disagreeing_forms_use_the_milliseconds_and_warn
+    - tests/test_settings.py::test_the_seconds_pairs_are_the_ones_handled
+  note: >-
+    Re-reviewed after RES-OP-09 (batch B, six rounds), against PLT-GEN-011 as amended by the owner
+    on 2026-10-18 (PLT-SRS 0.5: every configured duration in milliseconds or seconds, the
+    milliseconds applying when both are stated and a disagreement reported; logs and audit records
+    in milliseconds). Over core/ and service/: no local time read or rendered (localtime, ctime,
+    strftime, strptime, mktime, utcnow, today, formatdate, fromisoformat, fromordinal,
+    time.timezone/tzname, asctime or datefmt in a log format, localtime=), no time rendered as text
+    (isoformat); now, fromtimestamp, astimezone, combine, datetime() and replace(tzinfo=) only with
+    the UTC zone, aliases followed; the wall clock read in service/clock.py alone; seconds only in
+    the named RFC/TS wire fields (WIRE_SECONDS) and in the fields holding a declared seconds form;
+    every MCX_* setting, schema key (keys(), .get, subscript) and configuration field that is a
+    duration is named _ms, or _s (MCX_X) when a configuration module's SECONDS_FORMS declares it
+    beside its _ms form (exempt only in that module), and every MCX_*_MS setting and *_ms schema key
+    has its seconds form declared; audit emission keys that are durations or instants end in _ms.
+    Both forms of the ring limit (no_answer_ms/no_answer_s), session interval
+    (MCX_SESSION_EXPIRES_MS/MCX_SESSION_EXPIRES) and floor timers (timers_ms/timers_s) are accepted,
+    each value validated, the milliseconds applying, a disagreement warned of (log, health warnings,
+    startup audit record, with the milliseconds stated); the declared pairs are pinned to these
+    three. At run time a log line carries only at_ms and every audit record of a call is stamped
+    at_ms from the UTC ms clock with every time or duration named _ms. Accepted residue: duration
+    words the gate does not list (MCX_HOLD, MCX_RING_LIMIT, MCX_HEARTBEAT), audit keys stating no
+    unit, a detail built elsewhere and passed whole, setting names built by concatenation, converter
+    = time.localtime, text forms already UTC, a .utc attribute holding a local zone, naive
+    datetime.min and time(), internal protocol state and seconds constants for stdlib calls,
+    contrived pairs whose ms name is not a duration (MCX_PORT_MS), unchecked log dict keys,
+    timers_s/timers_ms: null read as no timers, schema keys read outside the configuration modules
+    unchecked; fail-closed strftime(gmtime()) and timezone(timedelta(0)).
 VP1-BND-020:
   verdict: partial
   by: independent review (agent)
@@ -596,34 +678,56 @@ VP1-BND-021:
     the VP1-BND-006 image core hash.'
   note: Existence + string presence only.
 VP1-BND-022:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-18'
   evidence:
-  - gate:VP1-BND-022
-  gap: 'Regex for `release|rel <op> 13..20` over core/, service/, tools/ with strings blanked. Scope:
-    the criterion says every module, but profiles/ and tests/ are skipped (probe in profiles/common/tables.py
-    missed). Probed misses: `cfg.release.number >= 19`, `release >= 21` (only 13-20 recognised, so the
-    first Rel-21 comparison passes), `release in (17, 18)`, `release == ''19''` (string literals are blanked,
-    so the literal disappears). Other names (`r`, `ver`, `mcx_rel_num`) also escape. Close with: AST check
-    over all packages (tests exempt only tests/test_release.py) for any Compare/`in` where one side mentions
-    a release-typed name/attribute and the other is a numeric or numeric-string literal, any release number
-    (not a fixed 13-20 range).'
-  note: Catches the canonical inline form only.
+    - gate:VP1-BND-022
+    - tests/test_boundary.py::test_bnd_022_a_named_table_read_with_get
+    - tests/test_boundary.py::test_bnd_022_catches_the_variants
+    - tests/test_boundary.py::test_bnd_022_constants_reached_as_attributes
+    - tests/test_boundary.py::test_bnd_022_leaves_counts_and_non_release_numbers_alone
+    - tests/test_boundary.py::test_bnd_022_leaves_counts_messages_and_other_words_alone
+    - tests/test_boundary.py::test_bnd_022_reads_tests_but_lets_them_name_a_release
+    - tests/test_boundary.py::test_bnd_022_review_probes
+    - tests/test_boundary.py::test_bnd_022_review_probes_round_2
+  note: >-
+    Re-reviewed after RES-OP-09 (batch B, four rounds). Every Python module but core/release.py and
+    its own tests (test_release.py, the conformance matrix test_conformance.py) is read as a syntax
+    tree. Refused: a comparison, membership, match or table lookup between a release expression (a
+    name or attribute with the word release or rel, a read of MCX_RELEASE) and a number, a release
+    string (19, "Rel-19", REL_19, R19) or a collection or range of them, directly or through a
+    constant or table of any module (imported by name, as a module or class attribute); outside
+    tests, naming one release (Release.REL_19), building one from a literal (Release(19),
+    Release(18+1), parse('19') under any name, Release['REL_19']), or holding a release-range number
+    or table in a release-named name (MIN_REL = 19; all-capitals enum members only with REL, since
+    RELEASE_MULTI_TALKER is a floor message). Accepted residue: a release in a name with neither
+    word or in an all-capitals name, getattr or operator forms (getattr(Release,'REL_19'),
+    _value2member_map_, int('1'+'9')), a match guard, SUPPORTED[i], a release number read from YAML;
+    fail-closed false positives: floor-control names with release, rel as a path or relative.
 VP1-BND-023:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-18'
   evidence:
-  - gate:VP1-BND-023
-  gap: 'Exact substring `env.get("MCX_RELEASE", ` in service/config.py plus existence of tests/test_release.py.
-    Probed misses: `env.get("MCX_RELEASE") or "19"`, `env.get("MCX_RELEASE","19")` (no space), and a fallback
-    via os.getenv of another variable. The ''per-release conformance suite exists'' clause is a file-existence
-    check only. Close with: AST check that every read of MCX_RELEASE has no default argument and no `or`/conditional
-    fallback, plus the runtime test (VP1-REL-001) that startup is refused with MCX_RELEASE unset, listed
-    as evidence; verify test_release.py is parameterised over the supported releases.'
-  note: Current config.py reads MCX_RELEASE with `or ""` and refuses when empty; the gate itself is a
-    string match.
+    - gate:VP1-BND-023
+    - tests/test_boundary.py::test_batch_b_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_007_023_deployment_file_forms
+    - tests/test_boundary.py::test_bnd_023_catches_the_variants
+    - tests/test_boundary.py::test_bnd_023_review_probes
+    - tests/test_release.py::test_the_suite_covers_every_supported_release
+    - tests/test_service.py::test_no_release_stated_no_process
+  note: >-
+    Re-reviewed after RES-OP-09 (batch B, four rounds). service/config.py reads MCX_RELEASE and no
+    module the process runs reads it with a fallback, defaults it later or gives it a value (as
+    MCX_PROFILE, VP1-BND-007); no deployment file outside docs/, tests/, .github/ and kb/ sets it.
+    tests/test_release.py writes RELEASES as literals (PLT-CONF-AUDIT 4.10), asserts them equal to
+    core.release.SUPPORTED inside a test (so a new release fails until its expectations are
+    written), has tests parametrised over them and is not skipped. At run time no process without a
+    stated release. Accepted residue: a fallback passed through another function (the run-time test
+    covers the configuration path); suite vacuity (an empty parametrised body, an early return,
+    pytest.skip in a body, a module-level importorskip); a tests/conftest.py dropping the suite (CI
+    and VP1-REL-002 run it by path); the deployment-file residue of VP1-BND-007.
 VP1-HOOK-001:
   verdict: partial
   by: independent review (agent)

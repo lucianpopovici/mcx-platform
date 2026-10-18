@@ -102,7 +102,7 @@ FEATURE_TAG_ISFOCUS = "isfocus"
 # callees (6.3.3.1.2 items 6-7); `Require: timer` and Session-Expires on the
 # 200 OK to the originator (6.3.3.2.3.2 items 2-3, 6.3.2.1.5.2 items 1-2).
 # The interval the platform asks for is a deployment setting
-# (MCX_SESSION_EXPIRES); 90 s is the smallest RFC 4028 permits (section 4),
+# (MCX_SESSION_EXPIRES_MS); 90 s is the smallest RFC 4028 permits (section 4),
 # and the platform accepts any interval down to it.
 OPTION_TIMER = "timer"
 MIN_SE_S = 90

@@ -11,6 +11,7 @@ that the boundary holds — only evidence that the gate is quiet.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -68,22 +69,10 @@ def test_hook_call_site_check_detects_an_undeclared_method(tmp_path):
     assert violations and "recalculate" in violations[0]
 
 
-def test_hot_reload_check_detects_an_injected_watcher(tmp_path):
-    _stage(tmp_path, core_extra="import signal\nsignal.signal(1, None)\n")
-    violations = gate.check_no_hot_reload(tmp_path)
-    assert violations
-
-
 def test_qos_check_detects_a_literal_in_core(tmp_path):
     _stage(tmp_path, core_extra="qos_identifier = 65\n")
     violations = gate.check_no_qos_mapping_in_core(tmp_path)
     assert violations and "QoS literal" in violations[0]
-
-
-def test_time_discipline_check_detects_a_local_clock(tmp_path):
-    _stage(tmp_path, core_extra="import time\nstamp = time.time()\n")
-    violations = gate.check_time_discipline(tmp_path)
-    assert violations
 
 
 def test_frozen_check_detects_a_mutable_value_object(tmp_path):
@@ -1140,3 +1129,1014 @@ def test_a_hook_patched_after_the_view_was_made_is_the_one_called(monkeypatch):
     monkeypatch.setattr(loaded.hooks.priority_policy, "compare", lambda a, b: 42)
     assert mgr._hooks.priority_policy.compare(1, 2) == 42
     assert mgr._hooks.priority_policy.compare.__name__ == "compare"
+
+
+# --------------------------------------------------------------------------
+# RES-OP-09 batch B: VP1-BND-007, 008, 016, 022, 023 against planted variants
+# --------------------------------------------------------------------------
+
+_RUNTIME_COPY = ("core", "service")
+
+
+def _runtime(tmp_path, files=None, patches=None, drop=()):
+    """A copy of the process (core/, service/), the profile packages'
+    profile.yaml, the release suite and the release image file, with
+    `files` added, `patches` ({path: (old, new)}) applied and `drop` removed."""
+    import shutil
+    for pkg in _RUNTIME_COPY:
+        shutil.copytree(ROOT / pkg, tmp_path / pkg,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    for rel in ("tests/test_release.py", "tools/release.Containerfile",
+                *[str(p.relative_to(ROOT)) for p in (ROOT / "profiles").glob("*/profile.yaml")]):
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text((ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
+    for rel, (old, new) in (patches or {}).items():
+        path = tmp_path / rel
+        text = path.read_text(encoding="utf-8")
+        assert text.count(old) == 1, (rel, old)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+    for rel, text in (files or {}).items():
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(text, encoding="utf-8")
+    for rel in drop:
+        (tmp_path / rel).unlink()
+    return tmp_path
+
+
+@pytest.mark.vp("VP1-BND-007", "VP1-BND-008", "VP1-BND-016", "VP1-BND-023")
+@pytest.mark.parametrize("fn", [gate.check_no_default_profile, gate.check_no_hot_reload,
+                                gate.check_time_discipline,
+                                gate.check_release_knowledge_is_in_one_module,
+                                gate.check_release_is_a_deployment_parameter],
+                         ids=["007", "008", "016", "022", "023"])
+def test_batch_b_gates_pass_the_unchanged_copy(tmp_path, fn):
+    assert fn(_runtime(tmp_path)) == []
+
+
+def _lines(root, expected):
+    """`expected` with each {L:<text>} replaced by the number of the first
+    line of that entry's file containing <text>."""
+    def one(entry):
+        rel = entry.split(":", 1)[0]
+        def num(m):
+            text = (root / rel).read_text(encoding="utf-8").splitlines()
+            return str(next(n for n, l in enumerate(text, 1) if m.group(1) in l))
+        return re.sub(r"\{L:(.+?)\}", num, entry)
+    return [one(e) for e in expected]
+
+
+_ENV_SAMPLE = "import os\nenv = os.environ\nok = True\n"
+
+
+@pytest.mark.vp("VP1-BND-007")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"service/config.py": ('env.get("MCX_PROFILE", "")', 'env.get("MCX_PROFILE", "mcx")')},
+     ["service/config.py:{L:raw_profiles =}: MCX_PROFILE is read with a fallback value; the profile is "
+      "stated or the process does not start",
+      "service/config.py:{L:raw_profiles =}: defaults to the profile 'mcx'"]),
+    ({}, {"service/config.py": ('env.get("MCX_PROFILE", "")', 'env.get("MCX_PROFILE","x")')},
+     ["service/config.py:{L:raw_profiles =}: MCX_PROFILE is read with a fallback value; the profile is "
+      "stated or the process does not start"]),
+    ({"core/sample.py": _ENV_SAMPLE + 'x = os.environ.get("MCX_PROFILE") or "mcx"\n'}, {},
+     ["core/sample.py:4: MCX_PROFILE is read with a fallback value; the profile is stated "
+      "or the process does not start", "core/sample.py:4: defaults to the profile 'mcx'"]),
+    ({"core/sample.py": _ENV_SAMPLE + 'x = os.getenv("MCX_PROFILE", default="x").strip()\n'},
+     {}, ["core/sample.py:4: MCX_PROFILE is read with a fallback value; the profile is "
+          "stated or the process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'KEY = "MCX_PROFILE"\nx = env.get(KEY, "y")\n'}, {},
+     ["service/sample.py:5: MCX_PROFILE is read with a fallback value; the profile is "
+      "stated or the process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'def f():\n    raw = env.get("MCX_PROFILE")\n'
+      '    if not raw:\n        raw = "y"\n    return raw\n'}, {},
+     ["service/sample.py:7: MCX_PROFILE is given a fallback value through 'raw'; the "
+      "profile is stated or the process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'def f():\n    raw = env.get("MCX_PROFILE")\n'
+      '    return raw.strip() or "y"\n'}, {},
+     ["service/sample.py:6: MCX_PROFILE is given a fallback value through 'raw'; the "
+      "profile is stated or the process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'x = env.get("MCX_PROFILE") if ok else "y"\n'}, {},
+     ["service/sample.py:4: MCX_PROFILE is read with a fallback value; the profile is "
+      "stated or the process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'os.environ.setdefault("MCX_PROFILE", "y")\n'}, {},
+     ["service/sample.py:4: MCX_PROFILE is given a value (setdefault); the profile is "
+      "stated or the process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'os.environ["MCX_PROFILE"] = "y"\n'}, {},
+     ["service/sample.py:4: MCX_PROFILE is given a value; the profile is stated or the "
+      "process does not start"]),
+    ({"service/sample.py": _ENV_SAMPLE + 'D = {"MCX_PROFILE": "y"}\nenv.update(MCX_PROFILE="y")\n'},
+     {}, ["service/sample.py:4: MCX_PROFILE is given a value; the profile is stated or "
+          "the process does not start",
+          "service/sample.py:5: MCX_PROFILE is given a value; the profile is stated or "
+          "the process does not start"]),
+    ({"core/sample.py": "def f(profile='x'):\n    pass\n"}, {},
+     ["core/sample.py:1: parameter 'profile' has a default; a profile is never assumed"]),
+    ({"core/sample.py": "def f(*, profile_names=('x',)):\n    pass\n"}, {},
+     ["core/sample.py:1: parameter 'profile_names' has a default; a profile is never "
+      "assumed"]),
+    ({"core/sample.py": "f = lambda hooks='h': hooks\n"}, {},
+     ["core/sample.py:1: parameter 'hooks' has a default; a profile is never assumed"]),
+    ({"service/sample.py": "from dataclasses import dataclass, field\n\n@dataclass\nclass C:\n"
+      "    hooks: str = 'profiles.x.hooks'\n"
+      "    profile_names: tuple = field(default_factory=lambda: ('x',))\n"}, {},
+     ["service/sample.py:5: field 'hooks' has a default; a profile is never assumed",
+      "service/sample.py:6: field 'profile_names' has a default; a profile is never assumed"]),
+    ({"core/sample.py": "def g(name='utility'):\n    return name\n"}, {},
+     ["core/sample.py:1: defaults to the profile 'utility'"]),
+    ({"service/sample.py": "class C:\n    kind = 'frmcs'\n"}, {},
+     ["service/sample.py:2: defaults to the profile 'frmcs'"]),
+    ({"tools/mcx.Containerfile": "FROM x\nENV MCX_PROFILE=mcx\n"}, {},
+     ["tools/mcx.Containerfile:2: sets MCX_PROFILE; a built image or unit must not choose "
+      "the profile"]),
+    ({"deploy/compose.yaml": "services:\n  mcx:\n    environment:\n      MCX_PROFILE: mcx\n"},
+     {}, ["deploy/compose.yaml:4: sets MCX_PROFILE; a built image or unit must not choose "
+          "the profile"]),
+    ({"deploy/mcx.env": "MCX_PROFILE=frmcs\n"}, {},
+     ["deploy/mcx.env:1: sets MCX_PROFILE; a built image or unit must not choose the "
+      "profile"]),
+    ({}, {"service/config.py": ('env.get("MCX_PROFILE", "")', '""')},
+     ["service/config.py: MCX_PROFILE is not read; the profile must be stated by the "
+      "deployment"]),
+    ({"core/sample.py": "def f(:\n"}, {},
+     ["core/sample.py: cannot be parsed, so this gate cannot clear it"]),
+], ids=["config-default", "config-default-no-space", "or-fallback", "getenv-keyword",
+        "bound-key", "holder-reassigned", "holder-or", "conditional", "setdefault",
+        "environ-write", "mapping-and-update", "unannotated-param", "kwonly-param",
+        "lambda-param", "dataclass-fields", "profile-name-default", "profile-name-field",
+        "containerfile", "compose", "env-file", "not-read", "unparseable"])
+def test_bnd_007_catches_the_variants(tmp_path, files, patches, expected):
+    root = _runtime(tmp_path, files, patches)
+    assert gate.check_no_default_profile(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-007")
+def test_bnd_007_leaves_stated_reads_alone(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py": _ENV_SAMPLE + (
+        'a = env.get("MCX_PROFILE", "")\nb = (env.get("MCX_PROFILE") or "").strip()\n'
+        'c = env["MCX_PROFILE"]\nname = "mcx"\n'
+        'def f(profile=None, profiles_root="p", *, hooks=()):\n    return profile\n'
+        'from dataclasses import dataclass, field\n@dataclass\nclass C:\n'
+        '    profile_names: tuple = field(default_factory=tuple)\n    hooks: object = None\n'),
+        "tools/x.Containerfile": "# set MCX_PROFILE when you run it\nFROM x\n",
+        "docs/run.md": "MCX_PROFILE=mcx python -m service\n",
+        "docs/example.env": "MCX_PROFILE=mcx\n", "tests/run.env": "MCX_PROFILE=mcx\n"})
+    assert gate.check_no_default_profile(root) == []
+
+
+@pytest.mark.vp("VP1-BND-008")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({"service/sample.py": "import signal\ndef go(loop, cb):\n"
+      "    loop.add_signal_handler(signal.SIGUSR1, cb)\n"}, {},
+     ["service/sample.py:3: registers a signal handler (add_signal_handler); the only one "
+      "is the SIGTERM/SIGINT stop",
+      "service/sample.py:3: refers to SIGUSR1; the process handles SIGTERM and SIGINT only"]),
+    ({"core/sample.py": "import os\ndef changed(p, t):\n    return os.stat(p).st_mtime > t\n"},
+     {}, ["core/sample.py:3: reads 'st_mtime': polling a file for change"]),
+    ({"core/sample.py": "import os\nm = os.path.getmtime('p')\n"}, {},
+     ["core/sample.py:2: reads 'getmtime': polling a file for change"]),
+    ({}, {"service/__main__.py": ("    for sig in (signal.SIGTERM, signal.SIGINT):\n",
+                                  "    signal.signal(signal.SIGTERM, lambda *_: stop.set())\n"
+                                  "    for sig in (signal.SIGTERM, signal.SIGINT):\n")},
+     ["service/__main__.py:{L:signal.signal(signal.SIGTERM}: registers a signal handler "
+      "(signal); the only one is the SIGTERM/SIGINT stop"]),
+    ({}, {"service/__main__.py": ("    for sig in (signal.SIGTERM, signal.SIGINT):\n"
+                                  "        signal.signal(sig, lambda *_: stop.set())",
+                                  "    for sig in (signal.SIGTERM, signal.SIGINT):\n"
+                                  "        signal.signal(sig, lambda *_: profile.reload())")},
+     ["service/__main__.py:{L:reload()}: registers a signal handler (signal); the only one "
+      "is the SIGTERM/SIGINT stop"]),
+    ({"core/sample.py": "import signal\nsignal.signal(1, None)\n"}, {},
+     ["core/sample.py:2: registers a signal handler (signal); the only one is the "
+      "SIGTERM/SIGINT stop"]),
+    ({"core/sample.py": "import signal, threading\nstop = threading.Event()\n"
+      "for sig in (signal.SIGTERM, signal.SIGINT):\n    signal.signal(sig, lambda *_: stop.set())\n"},
+     {}, ["core/sample.py:4: registers a signal handler (signal); the only one is the "
+          "SIGTERM/SIGINT stop"]),
+    ({}, {"service/__main__.py": ("    for sig in (signal.SIGTERM, signal.SIGINT):\n",
+                                  "    for sig in (signal.SIGTERM, signal.SIGTERM):\n")},
+     ["service/__main__.py:{L:signal.signal(sig}: registers a signal handler (signal); the "
+      "only one is the SIGTERM/SIGINT stop"]),
+    ({}, {"service/__main__.py": ("        signal.signal(sig, lambda *_: stop.set())",
+                                  "        signal.signal(sig, lambda *_: stop.set())\n"
+                                  "        profile_watch()")},
+     ["service/__main__.py:{L:signal.signal(sig}: registers a signal handler (signal); the "
+      "only one is the SIGTERM/SIGINT stop"]),
+    ({"service/sample.py": "SIGUSR2 = 12\n"}, {},
+     ["service/sample.py:1: refers to SIGUSR2; the process handles SIGTERM and SIGINT only"]),
+    ({"service/sample.py": "from signal import signal as s\n"}, {},
+     ["service/sample.py:1: imports from signal; use signal.<name> so the gate can see it"]),
+    ({"service/sample.py": "import signal\nh = getattr(signal, 'SIGHUP')\n"}, {},
+     ["service/sample.py:2: names SIGHUP; the process handles SIGTERM and SIGINT only"]),
+    ({"service/sample.py": "import signal\nsignal.setitimer(signal.ITIMER_REAL, 5)\n"}, {},
+     ["service/sample.py:2: registers a signal handler (setitimer); the only one is the "
+      "SIGTERM/SIGINT stop"]),
+    ({"service/sample.py": "import watchdog.observers\nfrom watchfiles import watch\n"
+      "import importlib\nimportlib.reload(watchdog)\n"}, {},
+     ["service/sample.py:1: imports 'watchdog.observers': a watcher or reloader",
+      "service/sample.py:2: imports 'watchfiles': a watcher or reloader",
+      "service/sample.py:3: imports 'importlib': a watcher or reloader"]),
+    ({"service/sample.py": "import threading\nfrom core import loader\n"
+      "t = threading.Timer(60, loader.startup, ([], None))\n"}, {},
+     ["service/sample.py:3: refers to the loader's 'startup'; only build_runtime starts "
+      "it, once"]),
+    ({"service/sample.py": "from core.loader import startup, load\n"}, {},
+     ["service/sample.py:1: imports the loader's 'startup'; only build_runtime starts it",
+      "service/sample.py:1: imports the loader's 'load'; only build_runtime starts it"]),
+    ({"service/sample.py": "import core.loader\nx = core.loader.load('p')\n"
+      "import core.loader as L\ny = L.read_package('p')\n"}, {},
+     ["service/sample.py:2: refers to the loader's 'load'; only build_runtime starts it, "
+      "once",
+      "service/sample.py:4: refers to the loader's 'read_package'; only build_runtime "
+      "starts it, once"]),
+    ({}, {"service/runtime.py": (
+        "    loaded = loader.startup(config.profile_names, config.profiles_root, env)\n",
+        "    for _ in range(2):\n"
+        "        loaded = loader.startup(config.profile_names, config.profiles_root, env)\n")},
+     ["service/runtime.py:{L:        loaded = loader.startup}: refers to the loader's "
+      "'startup'; only build_runtime starts it, once",
+      "service/runtime.py: build_runtime calls loader.startup 0 times; once, at start"]),
+    ({}, {"service/runtime.py": (
+        "    loaded = loader.startup(config.profile_names, config.profiles_root, env)\n",
+        "    loaded = loader.startup(config.profile_names, config.profiles_root, env)\n"
+        "    loaded = loader.startup(config.profile_names, config.profiles_root, env)\n")},
+     ["service/runtime.py: build_runtime calls loader.startup 2 times; once, at start"]),
+    ({"service/sample.py": "from .runtime import build_runtime\n"
+      "def again(env, clock):\n    return build_runtime(env, clock)\n"}, {},
+     ["service/sample.py:1: imports build_runtime; main imports it, under its name, and "
+      "calls it once, at start",
+      "service/sample.py:3: refers to build_runtime; main calls it once, at start"]),
+    ({}, {"service/__main__.py": ("        runtime = build_runtime(env, utc_ms)\n",
+                                  "        runtime = [build_runtime(env, utc_ms) for _ in "
+                                  "range(2)][-1]\n")},
+     ["service/__main__.py:{L:for _ in range(2)][-1]}: refers to build_runtime; main calls "
+      "it once, at start",
+      "service/__main__.py: main calls build_runtime 0 times; once, at start"]),
+    ({}, {"service/__main__.py": ("        runtime = build_runtime(env, utc_ms)\n",
+                                  "        runtime = build_runtime(env, utc_ms)\n"
+                                  "        runtime = build_runtime(env, utc_ms)\n")},
+     ["service/__main__.py: main calls build_runtime 2 times; once, at start"]),
+], ids=["add-signal-handler", "st-mtime", "getmtime", "second-handler", "handler-not-stop",
+        "core-signal", "stop-in-core", "stop-for-one-signal", "stop-loop-does-more",
+        "signal-name-bare", "from-signal", "signal-name-string", "setitimer", "watchers",
+        "timer-on-loader", "imports-loader", "loader-load", "startup-in-loop",
+        "startup-twice", "build-runtime-elsewhere", "build-runtime-in-comprehension",
+        "build-runtime-twice"])
+def test_bnd_008_catches_the_variants(tmp_path, files, patches, expected):
+    root = _runtime(tmp_path, files, patches)
+    assert gate.check_no_hot_reload(root) == sorted(_lines(root, expected), key=gate._by_line)
+
+
+@pytest.mark.vp("VP1-BND-008")
+def test_bnd_008_leaves_the_stop_and_plain_stat_alone(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "import os, signal\nsize = os.stat('p').st_size\n"
+                               "s = signal.SIGTERM\n"})
+    assert gate.check_no_hot_reload(root) == []
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"service/logs.py": ("import json\n", "import json\nimport time\n"
+                                               "STAMP = time.strftime('%H:%M', time.localtime())\n")},
+     ["service/logs.py:{L:STAMP}: localtime: local or zoneless time",
+      "service/logs.py:{L:STAMP}: strftime: local or zoneless time"]),
+    ({"core/sample.py": "import datetime\nfrom datetime import datetime as dt\n"
+      "a = dt.fromtimestamp(0)\nb = datetime.datetime.now()\nc = dt(2020, 1, 1)\n"
+      "d = a.astimezone()\ne = dt.utcnow()\nf = dt.today()\n"}, {},
+     ["core/sample.py:3: fromtimestamp without a zone is local or zoneless time",
+      "core/sample.py:4: datetime.now() without a zone is local or zoneless "
+      "time",
+      "core/sample.py:5: a datetime without a zone is local or zoneless time",
+      "core/sample.py:6: astimezone() without a zone is local or zoneless time",
+      "core/sample.py:7: utcnow: local or zoneless time",
+      "core/sample.py:8: today: local or zoneless time"]),
+    ({"core/sample.py": "def wait(timeout_s: float, seconds=1):\n    pass\n"}, {},
+     ["core/sample.py:1: parameter 'seconds' counts seconds; durations are in milliseconds",
+      "core/sample.py:1: parameter 'timeout_s' counts seconds; durations are in milliseconds"]),
+    ({"service/sample.py": "class C:\n    delay_s: int = 0\n    hold_secs: int = 0\n"}, {},
+     ["service/sample.py:2: field 'delay_s' counts seconds; durations are in milliseconds",
+      "service/sample.py:3: field 'hold_secs' counts seconds; durations are in milliseconds"]),
+    ({}, {"service/config.py": ("SECONDS_FORMS = {", "IDLE = ('MCX_IDLE_TIMEOUT', "
+                                "'MCX_RETRY_S', 'MCX_HOLD_MIN', 'MCX_CACHE_TTL_MS')\n"
+                                "SECONDS_FORMS = {")},
+     ["service/config.py:{L:MCX_IDLE_TIMEOUT}: setting MCX_CACHE_TTL_MS has no seconds form "
+      "in SECONDS_FORMS (PLT-GEN-011)",
+      "service/config.py:{L:MCX_IDLE_TIMEOUT}: setting MCX_HOLD_MIN counts in a unit other "
+      "than milliseconds (PLT-GEN-011)",
+      "service/config.py:{L:MCX_IDLE_TIMEOUT}: setting MCX_IDLE_TIMEOUT names a duration "
+      "without stating milliseconds (_ms) (PLT-GEN-011)",
+      "service/config.py:{L:MCX_IDLE_TIMEOUT}: setting MCX_RETRY_S counts in a unit other "
+      "than milliseconds (PLT-GEN-011)"]),
+    ({}, {"core/validation.py": ('"no_answer_ms", "no_answer_s", "group_over_limit"),',
+                                 '"no_answer_ms", "no_answer_s", "group_over_limit", "hold_timeout",\n'
+                                 '                "ring_s"),')},
+     ["core/validation.py:{L:\"hold_timeout\"}: schema key 'hold_timeout' names a duration "
+      "without stating milliseconds (_ms) (PLT-GEN-011)",
+      "core/validation.py:{L:\"ring_s\"}: schema key 'ring_s' counts in a unit other than "
+      "milliseconds (PLT-GEN-011)"]),
+    ({}, {"core/model.py": ("    no_answer_ms: Optional[int] = None",
+                            "    no_answer_ms: Optional[int] = None\n"
+                            "    ring_timeout: Optional[int] = None")},
+     ["core/model.py:{L:ring_timeout}: configuration field 'ring_timeout' names a duration "
+      "without stating milliseconds (_ms) (PLT-GEN-011)"]),
+    ({"service/sample.py": "import logging\n"
+      "f = logging.Formatter('%(asctime)s %(message)s', datefmt='%H')\n"}, {},
+     ["service/sample.py:2: a log format with asctime renders local time",
+      "service/sample.py:2: datefmt formats local time"]),
+    ({"core/sample.py": "import time\nstamp = time.time()\n"},
+     {}, ["core/sample.py:2: reads the wall clock; it is read in service/clock.py alone "
+          "(utc_ms)"]),
+    ({"service/sample.py": "from time import time\nimport time as t\nz = t.timezone\n"
+      "w = t.time()\nimport datetime as D\nn = D.datetime.now()\n"
+      "from datetime import datetime as dt\nm = dt.now()\n"}, {},
+     ["service/sample.py:1: imports from time; use time.<name> so the gate can see it",
+      "service/sample.py:3: time.timezone: the local zone",
+      "service/sample.py:4: reads the wall clock; it is read in service/clock.py alone "
+      "(utc_ms)",
+      "service/sample.py:6: datetime.now() without a zone is local or zoneless "
+      "time",
+      "service/sample.py:8: datetime.now() without a zone is local or zoneless "
+      "time"]),
+], ids=["service-logs-local-time", "datetime-forms", "seconds-params", "seconds-fields",
+        "settings-names", "schema-keys", "model-field",
+        "log-format", "wall-clock", "time-imports"])
+def test_bnd_016_catches_the_variants(tmp_path, files, patches, expected):
+    root = _runtime(tmp_path, files, patches)
+    assert gate.check_time_discipline(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_leaves_utc_and_ms_alone(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "import datetime, time\nu = datetime.timezone.utc\n"
+                               "a = datetime.datetime.now(u)\n"
+                               "b = datetime.datetime.fromtimestamp(0, tz=u)\n"
+                               "c = datetime.datetime(2020, 1, 1, tzinfo=u)\n"
+                               "d = a.astimezone(u)\nm = time.monotonic()\n"
+                               "def f(timeout_ms: int, session_expires_ms=0):\n    pass\n"
+                               "class C:\n    timers_ms: dict = None\n"})
+    assert gate.check_time_discipline(root) == []
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_seconds_are_the_named_wire_values_only():
+    assert gate.WIRE_SECONDS == frozenset({
+        ("core/sip.py", "seconds"), ("service/session_timer.py", "seconds"),
+        ("service/sip_core.py", "seconds"), ("core/rtcp.py", "seconds")})
+
+
+@pytest.mark.vp("VP1-BND-022")
+@pytest.mark.parametrize("text,expected", [
+    ("def f(cfg):\n    return cfg.release.number >= 19\n", ["2: release compared to a literal"]),
+    ("def f(release):\n    return release >= 21\n", ["2: release compared to a literal"]),
+    ("def f(release):\n    return release in (17, 18)\n", ["2: release compared to a literal"]),
+    ("def f(release, rel):\n    return release == '19' or rel == b'Rel-19'\n",
+     ["2: release compared to a literal"]),
+    ("def f(mcx_rel_num):\n    return 13 > mcx_rel_num\n", ["2: release compared to a literal"]),
+    ("def f(release):\n    return int(release) != -1\n", ["2: release compared to a literal"]),
+    ("def f(cfgRelease):\n    return cfgRelease in range(17, 19)\n",
+     ["2: release compared to a literal"]),
+    ("def f(release):\n    match release:\n        case 17 | 18:\n            return 1\n",
+     ["2: release matched against a literal"]),
+    ("def f(release):\n    return {17: 'a', 18: 'b'}[release]\n",
+     ["2: a table indexed by release"]),
+    ("def f(self):\n    return {17: 'a'}.get(self.release)\n",
+     ["2: a table indexed by release"]),
+    ("from core.release import Release\nX = Release.REL_19\n",
+     ["2: names one release (REL_19)"]),
+], ids=["attribute", "unlisted-release", "membership", "string-and-bytes", "other-name",
+        "int-cast", "camel-and-range", "match", "table", "table-get", "member"])
+@pytest.mark.parametrize("where", ["profiles/common/tables.py", "service/sample.py",
+                                   "tools/sample.py", "core/sample.py"])
+def test_bnd_022_catches_the_variants(tmp_path, where, text, expected):
+    root = _runtime(tmp_path, {where: text})
+    assert gate.check_release_knowledge_is_in_one_module(root) == [
+        f"{where}:{e} outside core/release.py" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-022")
+def test_bnd_022_reads_tests_but_lets_them_name_a_release(tmp_path):
+    root = _runtime(tmp_path, {"tests/test_other.py":
+                               "from core.release import Release\nR = Release.REL_19\n"
+                               "def test_x(release):\n    assert release == 19\n",
+                               "tests/test_conformance.py": "def f(release):\n"
+                               "    return int(release) < 18\n"})
+    assert gate.check_release_knowledge_is_in_one_module(root) == [
+        "tests/test_other.py:4: release compared to a literal outside core/release.py"]
+
+
+@pytest.mark.vp("VP1-BND-022")
+def test_bnd_022_leaves_counts_messages_and_other_words_alone(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "def f(at_release, msg, MsgType, released, correlation_id):\n"
+                               "    return (len(at_release) == 3, msg == MsgType.RELEASE,\n"
+                               "            released == 1, correlation_id == 'rel1',\n"
+                               "            MsgType.RELEASE == 4)\n"
+                               "# if release >= 19: is how not to write it\n"
+                               "DOC = 'release >= 19'\n"})
+    assert gate.check_release_knowledge_is_in_one_module(root) == []
+
+
+_RELEASE_READ = '(env.get("MCX_RELEASE") or "").strip()'
+
+
+@pytest.mark.vp("VP1-BND-023")
+@pytest.mark.parametrize("patches,files,drop,expected", [
+    ({"service/config.py": (_RELEASE_READ, '(env.get("MCX_RELEASE") or "19").strip()')}, {}, (),
+     ["service/config.py:{L:raw_release = }: MCX_RELEASE is read with a fallback value; a "
+      "guessed release is silent on the wire"]),
+    ({"service/config.py": (_RELEASE_READ, 'env.get("MCX_RELEASE","19").strip()')}, {}, (),
+     ["service/config.py:{L:raw_release = }: MCX_RELEASE is read with a fallback value; a "
+      "guessed release is silent on the wire"]),
+    ({"service/config.py": (_RELEASE_READ, '(os.getenv("MCX_RELEASE") or '
+                                           'os.getenv("MCX_DEFAULT_RELEASE") or "")')}, {}, (),
+     ["service/config.py:{L:raw_release = }: MCX_RELEASE is read with a fallback value; a "
+      "guessed release is silent on the wire"]),
+    ({"service/config.py": ("        if not raw_release:\n",
+                            "        if not raw_release:\n            raw_release = '19'\n"
+                            "        if not raw_release:\n")}, {}, (),
+     ["service/config.py:{L:raw_release = '19'}: MCX_RELEASE is given a fallback value "
+      "through 'raw_release'; a guessed release is silent on the wire"]),
+    ({}, {"core/sample.py": "import os\nos.environ.setdefault('MCX_RELEASE', '19')\n"}, (),
+     ["core/sample.py:2: MCX_RELEASE is given a value (setdefault); a guessed release is "
+      "silent on the wire"]),
+    ({"service/config.py": (_RELEASE_READ, '""')}, {}, (),
+     ["service/config.py: the release is not read from the environment"]),
+    ({"tests/test_release.py": ("RELEASES = tuple(range(13, 21))",
+                                "RELEASES = tuple(int(r) for r in SUPPORTED)")}, {}, (),
+     ["tests/test_release.py: RELEASES is not written out as literals"]),
+    ({"tests/test_release.py": ("    assert tuple(int(r) for r in SUPPORTED) == RELEASES",
+                                "    assert RELEASES")}, {}, (),
+     ["tests/test_release.py: RELEASES is not asserted equal to core.release.SUPPORTED in a "
+      "test; a new release would go untested"]),
+    ({}, {}, ("tests/test_release.py",),
+     ["no per-release conformance suite (tests/test_release.py)"]),
+], ids=["or-fallback", "default-no-space", "another-variable", "reassigned", "setdefault",
+        "not-read", "suite-not-literal", "suite-not-pinned", "no-suite"])
+def test_bnd_023_catches_the_variants(tmp_path, patches, files, drop, expected):
+    root = _runtime(tmp_path, files, patches, drop)
+    assert gate.check_release_is_a_deployment_parameter(root) == _lines(root, expected)
+
+
+# -- batch B, the independent review's probes (round 1) ------------------------
+
+
+_K8S = ("spec:\n  containers:\n    - name: mcx\n      env:\n"
+        "        - name: MCX_PROFILE\n          value: mcx\n")
+
+
+@pytest.mark.vp("VP1-BND-007")
+@pytest.mark.parametrize("files,expected", [
+    ({"deploy/k8s/deployment.yaml": _K8S}, ["deploy/k8s/deployment.yaml:5"]),
+    ({"deploy/defaults.json": '{"MCX_PROFILE": "mcx"}\n'}, ["deploy/defaults.json:1"]),
+    ({"deploy/env.json": '[{"name": "MCX_PROFILE", "value": "mcx"}]\n'}, ["deploy/env.json:1"]),
+    ({"tools/x.Containerfile": "FROM x\nENV A=1 MCX_PROFILE=mcx\nENV MCX_PROFILE mcx\n"},
+     ["tools/x.Containerfile:2", "tools/x.Containerfile:3"]),
+    ({"deploy/mcx.service": "[Service]\nEnvironment=MCX_PROFILE=mcx\n"}, ["deploy/mcx.service:2"]),
+    ({"deploy/run.sh": "export MCX_PROFILE=frmcs\n"}, ["deploy/run.sh:1"]),
+], ids=["k8s-name-value", "json-mapping", "json-name-value", "containerfile-forms",
+        "systemd", "shell"])
+def test_bnd_007_reads_every_deployment_file(tmp_path, files, expected):
+    root = _runtime(tmp_path, files)
+    assert gate.check_no_default_profile(root) == [
+        f"{e}: sets MCX_PROFILE; a built image or unit must not choose the profile"
+        for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-007")
+def test_bnd_007_leaves_ci_comments_and_empty_values_alone(tmp_path):
+    root = _runtime(tmp_path, {
+        ".github/workflows/x.yml": "env:\n  MCX_PROFILE: mcx\n",
+        "deploy/a.yaml": "# MCX_PROFILE: mcx\n- name: MCX_PROFILE\n# value: x\n",
+        "deploy/b.env": "MCX_PROFILE=\n", "deploy/c.json": '{"MCX_PROFILE": ""}\n'})
+    assert gate.check_no_default_profile(root) == []
+
+
+@pytest.mark.vp("VP1-BND-008")
+@pytest.mark.parametrize("files,expected", [
+    ({"service/sample.py": "import os\nfrom service import runtime as R\n"
+      "def reload(rt):\n    return R.build_runtime(os.environ, rt.clock)\n"},
+     ["service/sample.py:4: refers to build_runtime; main calls it once, at start"]),
+    ({"service/sample.py": "from core import validation\n"
+      "def reload(raw):\n    return validation.build(raw, 'x')\n"},
+     ["service/sample.py:3: refers to validation.build; only the loader builds a profile, "
+      "at start"]),
+    ({"service/sample.py": "from core.validation import build as b\n"},
+     ["service/sample.py:1: imports validation.build; only the loader builds a profile, "
+      "at start"]),
+    ({"core/sample.py": "from . import validation as v\nx = v.build({}, 'x')\n"},
+     ["core/sample.py:2: refers to validation.build; only the loader builds a profile, "
+      "at start"]),
+    ({"core/sample.py": "from .loader import load\n"},
+     ["core/sample.py:1: imports the loader's 'load'; only build_runtime starts it"]),
+    ({"service/sample.py": "import signal as sg\ndef go(h):\n    sg.signal(10, h)\n"},
+     ["service/sample.py:3: registers a signal handler (signal); the only one is the "
+      "SIGTERM/SIGINT stop"]),
+], ids=["build-runtime-attribute", "validation-build", "import-build", "relative-build",
+        "relative-loader", "aliased-signal"])
+def test_bnd_008_review_probes(tmp_path, files, expected):
+    assert gate.check_no_hot_reload(_runtime(tmp_path, files)) == sorted(expected,
+                                                                          key=gate._by_line)
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("text,expected", [
+    ("import datetime\nD = datetime.datetime\nu = datetime.timezone.utc\n"
+     "a = D.fromtimestamp(0, None)\nb = D.fromtimestamp(0, tz=None)\nc = D.now(None)\n"
+     "d = D.now(tz=None)\ne = a.astimezone(None)\nf = datetime.datetime(2020, 1, 1, tzinfo=None)\n"
+     "g = datetime.datetime(2020, 1, 1)\nh = a.replace(tzinfo=None)\n"
+     "z = datetime.timezone(datetime.timedelta(hours=1))\ni = D.now(z)\n",
+     ["4: fromtimestamp with a zone other than UTC",
+      "5: fromtimestamp with a zone other than UTC",
+      "6: datetime.now() with a zone other than UTC",
+      "7: datetime.now() with a zone other than UTC",
+      "8: astimezone() with a zone other than UTC",
+      "9: a datetime with a zone other than UTC",
+      "10: a datetime without a zone is local or zoneless time",
+      "11: replace(tzinfo=) with a zone other than UTC",
+      "12: a fixed zone: times are UTC",
+      "13: datetime.now() with a zone other than UTC"]),
+    ("import datetime, logging\nlog = logging.getLogger('x')\n"
+     "log.info('started %s', datetime.datetime.now(datetime.timezone.utc).isoformat())\n",
+     ["3: isoformat: a time rendered as text; times are UTC epoch milliseconds"]),
+    ("import email.utils\ns = email.utils.formatdate(0, localtime=True)\n"
+     "t = email.utils.format_datetime(None)\n",
+     ["2: formatdate: local or zoneless time", "2: localtime= renders local time",
+      "3: format_datetime: a time rendered as text; times are UTC epoch milliseconds"]),
+    ("import os\nk = os.environ.get('MCX_KEEPALIVE_TIMEOUT')\n"
+     "SETTINGS = ('MCX_SIP_KEEPALIVE', 'MCX_RETRY_AFTER', 'MCX_REFRESH', 'MCX_IDLE')\n",
+     ["2: setting MCX_KEEPALIVE_TIMEOUT names a duration without stating milliseconds "
+      "(_ms) (PLT-GEN-011)",
+      "3: setting MCX_IDLE names a duration without stating milliseconds (_ms) (PLT-GEN-011)",
+      "3: setting MCX_REFRESH names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)",
+      "3: setting MCX_RETRY_AFTER names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)",
+      "3: setting MCX_SIP_KEEPALIVE names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)"]),
+    ("def f(auditor, RecordType, t):\n"
+     "    auditor.emit(RecordType.X, 'c', ring=t, elapsed_sec=3, started_at=5,\n"
+     "                 detail={'wait_s': 1, 'inner': {'hold_timeout': 2}, 'gap_ms': 4})\n",
+     ["2: audit detail 'elapsed_sec' counts in a unit other than milliseconds (PLT-GEN-011)",
+      "2: audit detail 'started_at' names a time without stating milliseconds (_ms) "
+      "(PLT-GEN-011)",
+      "3: audit detail 'hold_timeout' names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)",
+      "3: audit detail 'wait_s' counts in a unit other than milliseconds (PLT-GEN-011)"]),
+    ("SECONDS_FORMS = {'MCX_IDLE_TIMEOUT': 'MCX_IDLE_TIMEOUT_MS'}\n",
+     ["1: setting MCX_IDLE_TIMEOUT names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)",
+      "1: setting MCX_IDLE_TIMEOUT_MS has no seconds form in SECONDS_FORMS (PLT-GEN-011)"]),
+], ids=["zones", "isoformat-in-log", "email-dates", "settings-anywhere", "audit-keys",
+        "seconds-form-not-ruled"])
+def test_bnd_016_review_probes(tmp_path, text, expected):
+    root = _runtime(tmp_path, {"service/sample.py": text})
+    assert gate.check_time_discipline(root) == [f"service/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_schema_keys_read_with_get_and_subscript(tmp_path):
+    anchor = '    ms = _whole(c, path, item, "no_answer_ms", NO_ANSWER_MIN_MS, "milliseconds")\n'
+    root = _runtime(tmp_path, patches={"core/validation.py": (
+        anchor, anchor + '    hold = item.get("hold_timeout") or item["ring_s"]\n')})
+    assert gate.check_time_discipline(root) == _lines(root, [
+        "core/validation.py:{L:hold_timeout}: schema key 'hold_timeout' names a duration "
+        "without stating milliseconds (_ms) (PLT-GEN-011)",
+        "core/validation.py:{L:hold_timeout}: schema key 'ring_s' counts in a unit other than "
+        "milliseconds (PLT-GEN-011)"])
+
+
+def _quoting(root, name):
+    """(file, line) of every line under core/ and service/ quoting `name`."""
+    out = []
+    for pkg in ("core", "service"):
+        for path in sorted((root / pkg).rglob("*.py")):
+            for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if f'"{name}"' in line or f"'{name}'" in line:
+                    out.append((path.relative_to(root).as_posix(), n))
+    return out
+
+
+_SESSION_FORM = 'SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}'
+_RING_FORM = 'SECONDS_FORMS = {"no_answer_s": "no_answer_ms", "timers_s": "timers_ms"}'
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("new", [
+    'SECONDS_FORMS = {}',                                              # not declared
+    'SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRY"}',   # beside a bad name
+    'OTHER = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}',       # another mapping
+    'SECONDS_FORMS = {"MCX_SESSION_EXPIRE": "MCX_SESSION_EXPIRES_MS"}',  # not its pair
+], ids=["undeclared", "bad-ms-name", "other-mapping", "not-the-pair"])
+def test_bnd_016_the_session_seconds_form_is_exempt_only_while_declared(tmp_path, new):
+    """PLT-GEN-011 as amended 2026-10-18: MCX_SESSION_EXPIRES (seconds) is
+    allowed beside MCX_SESSION_EXPIRES_MS while service/config.py declares
+    the pair. Undeclared, every use of the seconds name is refused, and the
+    millisecond setting has no seconds form."""
+    root = _runtime(tmp_path, patches={"service/config.py": (_SESSION_FORM, new)})
+    lines = sorted(set(_quoting(root, "MCX_SESSION_EXPIRES")))
+    ms_lines = sorted(set(_quoting(root, "MCX_SESSION_EXPIRES_MS")))
+    assert lines and {f for f, _ in lines} == {"service/config.py"}
+    assert ms_lines
+    want = [f"{f}:{n}: setting MCX_SESSION_EXPIRES names a duration without stating "
+            "milliseconds (_ms) (PLT-GEN-011)" for f, n in lines]
+    want += [f"{f}:{n}: setting MCX_SESSION_EXPIRES_MS has no seconds form in "
+             "SECONDS_FORMS (PLT-GEN-011)" for f, n in ms_lines]
+    # Undeclared, the field holding the stated seconds is no longer exempt.
+    field = next(n for n, l in enumerate((root / "service/config.py").read_text().splitlines(), 1)
+                 if l.strip().startswith("session_expires_s:"))
+    want.append(f"service/config.py:{field}: field 'session_expires_s' counts seconds; "
+                "durations are in milliseconds")
+    if "EXPIRY" in new:
+        want.append(f"service/config.py:{lines[0][1]}: setting MCX_SESSION_EXPIRY names a "
+                    "duration without stating milliseconds (_ms) (PLT-GEN-011)")
+    if "EXPIRE\"" in new:
+        form = next(n for n, l in enumerate((root / "service/config.py").read_text()
+                                             .splitlines(), 1) if l.startswith("SECONDS_FORMS"))
+        want.append(f"service/config.py:{form}: setting MCX_SESSION_EXPIRE names a "
+                    "duration without stating milliseconds (_ms) (PLT-GEN-011)")
+    assert gate.check_time_discipline(root) == sorted(want, key=gate._by_line)
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_the_profile_seconds_forms_are_exempt_only_while_declared(tmp_path):
+    root = _runtime(tmp_path, patches={"core/validation.py": (_RING_FORM, "SECONDS_FORMS = {}")})
+    text = (root / "core/validation.py").read_text().splitlines()
+    ct = next(n for n, l in enumerate(text, 1)
+              if '"no_answer_ms", "no_answer_s", "group_over_limit")' in l)
+    floor = next(n for n, l in enumerate(text, 1) if '"timers_ms", "timers_s"' in l)
+    model_text = (root / "core/model.py").read_text().splitlines()
+    fields = [(next(n for n, l in enumerate(model_text, 1) if l.startswith(f"    {f}:")), f)
+              for f in ("no_answer_s", "timers_s")]
+    assert gate.check_time_discipline(root) == sorted([
+        f"core/model.py:{n}: field {f!r} counts seconds; durations are in milliseconds"
+        for n, f in fields] + [
+        f"core/validation.py:{ct}: schema key 'no_answer_ms' has no seconds form in "
+        "SECONDS_FORMS (PLT-GEN-011)",
+        f"core/validation.py:{ct}: schema key 'no_answer_s' counts in a unit other than "
+        "milliseconds (PLT-GEN-011)",
+        f"core/validation.py:{floor}: schema key 'timers_ms' has no seconds form in "
+        "SECONDS_FORMS (PLT-GEN-011)",
+        f"core/validation.py:{floor}: schema key 'timers_s' counts in a unit other than "
+        "milliseconds (PLT-GEN-011)"], key=gate._by_line)
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_a_new_duration_needs_both_forms(tmp_path):
+    """A duration added to the configuration with its seconds form declared
+    passes; one without, or declared outside a configuration module, or as
+    a pair that is not one, does not."""
+    good = _runtime(tmp_path / "good", patches={"service/config.py": (
+        _SESSION_FORM, 'SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS", '
+                       '"MCX_RETRY_S": "MCX_RETRY_MS"}\nRETRY = ("MCX_RETRY_S", "MCX_RETRY_MS")')})
+    assert gate.check_time_discipline(good) == []
+    bad = _runtime(tmp_path / "bad", files={"service/sample.py":
+                                           'SECONDS_FORMS = {"MCX_RETRY_S": "MCX_RETRY_MS"}\n'},
+                   patches={"service/config.py": (
+                       _SESSION_FORM, _SESSION_FORM + '\nRETRY = ("MCX_HOLD_S", "MCX_RETRY_MS")\n'
+                       'X = {"MCX_HOLD_S": "MCX_RETRY_MS"}')})
+    assert gate.check_time_discipline(bad) == _lines(bad, [
+        "service/config.py:{L:RETRY = }: setting MCX_HOLD_S counts in a unit other than "
+        "milliseconds (PLT-GEN-011)",
+        "service/config.py:{L:RETRY = }: setting MCX_RETRY_MS has no seconds form in "
+        "SECONDS_FORMS (PLT-GEN-011)",
+        "service/config.py:{L:X = }: setting MCX_HOLD_S counts in a unit other than "
+        "milliseconds (PLT-GEN-011)",
+        "service/config.py:{L:X = }: setting MCX_RETRY_MS has no seconds form in "
+        "SECONDS_FORMS (PLT-GEN-011)",
+        "service/sample.py:1: setting MCX_RETRY_MS has no seconds form in SECONDS_FORMS "
+        "(PLT-GEN-011)",
+        "service/sample.py:1: setting MCX_RETRY_S counts in a unit other than milliseconds "
+        "(PLT-GEN-011)"])
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("seconds, ms, ok", [
+    ("no_answer_s", "no_answer_ms", True), ("timers_s", "timers_ms", True),
+    ("MCX_SESSION_EXPIRES", "MCX_SESSION_EXPIRES_MS", True), ("MCX_X_S", "MCX_X_MS", True),
+    ("no_answer", "no_answer_ms", False), ("MCX_X_SEC", "MCX_X_MS", False),
+    ("ring_s", "no_answer_ms", False), ("MCX_X", "MCX_X", False), ("x_s", "x_s", False),
+    (1, "x_ms", False), ("ab_s", "ab_xx", False), ("AB", "AB_XX", False),
+])
+def test_bnd_016_what_a_seconds_pair_is(seconds, ms, ok):
+    assert gate._ms_pair(seconds, ms) is ok
+
+
+@pytest.mark.vp("VP1-BND-022")
+@pytest.mark.parametrize("text,expected", [
+    ("MIN_REL = 19\ndef f(release):\n    return release >= MIN_REL\n",
+     ["1: a release number held", "3: release compared to a literal"]),
+    ("NEW = frozenset({18, 19, 20})\ndef f(release):\n    return int(release) in NEW\n",
+     ["3: release compared to a literal"]),
+    ("TABLE = {17: 'a', 18: 'b'}\ndef f(release, cfg):\n"
+     "    return TABLE[int(release)], TABLE.get(cfg.release)\n",
+     ["3: a table indexed by release"]),
+    ("import os\ndef f(env):\n    return int(os.environ['MCX_RELEASE']) >= 19 or "
+     "int(env.get('MCX_RELEASE')) >= 19\n", ["3: release compared to a literal"]),
+    ("from core.release import Release, parse_release\ndef f(x):\n"
+     "    return x >= Release(19) or x >= parse_release('19')\n",
+     ["3: a release built from a literal"]),
+    ("def f(release):\n    return release.name == 'REL_19' or str(release) in ('R19', 'R20')\n",
+     ["2: release compared to a literal"]),
+], ids=["named-number", "named-set", "named-table", "env-read", "built", "member-strings"])
+def test_bnd_022_review_probes(tmp_path, text, expected):
+    root = _runtime(tmp_path, {"service/sample.py": text})
+    assert gate.check_release_knowledge_is_in_one_module(root) == [
+        f"service/sample.py:{e} outside core/release.py" for e in expected]
+
+
+_PIN = "    assert tuple(int(r) for r in SUPPORTED) == RELEASES == (13, 14, 15, 16, 17, 18, 19, 20)"
+
+
+@pytest.mark.vp("VP1-BND-023")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"tools/release.Containerfile": ("FROM ", "ENV A=1 MCX_RELEASE=18\nFROM ")},
+     ["tools/release.Containerfile:{L:MCX_RELEASE=18}: sets MCX_RELEASE; a built image or "
+      "unit must not choose the release"]),
+    ({"deploy/mcx.env": "MCX_RELEASE=18\n"}, {},
+     ["deploy/mcx.env:1: sets MCX_RELEASE; a built image or unit must not choose the "
+      "release"]),
+    ({"tests/test_release.py": "from core.release import SUPPORTED\n"
+      "RELEASES = (13, 14, 15, 16, 17, 18, 19, 20)\n"
+      "def test_pin():\n" + _PIN + "\n"}, {},
+     ["tests/test_release.py: no test is parametrised over RELEASES"]),
+    ({}, {"tests/test_release.py": (_PIN, "    _ = tuple(int(r) for r in SUPPORTED) == RELEASES")},
+     ["tests/test_release.py: RELEASES is not asserted equal to core.release.SUPPORTED in a "
+      "test; a new release would go untested"]),
+    ({}, {"tests/test_release.py": ("RELEASES = tuple(range(13, 21))",
+                                    "RELEASES = tuple(range(13, 21))\n"
+                                    "pytestmark = pytest.mark.skip('later')")},
+     ["tests/test_release.py: line {L:pytestmark}: the suite is skipped"]),
+    ({}, {"tests/test_release.py": ('@pytest.mark.vp("VP1-BND-023")\n'
+                                    'def test_the_suite_covers_every_supported_release',
+                                    '@pytest.mark.vp("VP1-BND-023")\n@pytest.mark.skip("x")\n'
+                                    'def test_the_suite_covers_every_supported_release')},
+     ["tests/test_release.py: RELEASES is not asserted equal to core.release.SUPPORTED in a "
+      "test; a new release would go untested"]),
+    ({}, {"tests/test_release.py": (_PIN, "    tuple(int(r) for r in SUPPORTED) == RELEASES")},
+     ["tests/test_release.py: RELEASES is not asserted equal to core.release.SUPPORTED in a "
+      "test; a new release would go untested"]),
+    ({}, {"tests/test_release.py": ("RELEASES = tuple(range(13, 21))",
+                                    "RELEASES = tuple(range(13, 21))\n"
+                                    "pytest.skip('later', allow_module_level=True)")},
+     ["tests/test_release.py: line {L:pytest.skip(}: the suite is skipped"]),
+], ids=["containerfile", "env-file", "suite-without-parametrised-tests", "pin-without-assert",
+        "module-skip", "pin-skipped", "pin-as-expression", "module-skip-call"])
+def test_bnd_023_review_probes(tmp_path, files, patches, expected):
+    root = _runtime(tmp_path, files, patches)
+    got = gate.check_release_is_a_deployment_parameter(root)
+    want = _lines(root, [e for e in expected if "line {L:" not in e])
+    for e in expected:
+        if "line {L:" in e:
+            needle = re.search(r"\{L:(.+?)\}", e).group(1)
+            n = next(i for i, l in enumerate((root / "tests/test_release.py").read_text()
+                                              .splitlines(), 1) if needle in l)
+            want.append(re.sub(r"\{L:.+?\}", str(n), e))
+    assert got == want
+
+
+# -- batch B, the independent review's probes (round 2) and mutation gaps ------
+
+
+@pytest.mark.vp("VP1-BND-007", "VP1-BND-023")
+@pytest.mark.parametrize("key", ["MCX_PROFILE", "MCX_RELEASE"])
+@pytest.mark.parametrize("rel,text,line", [
+    ("deploy/Dockerfile.prod", "FROM x\nENV {k}=18\n", 2),
+    ("deploy/.env.production", "{k}=18\n", 1),
+    ("deploy/k8s.yaml", "env:\n  - value: x\n    name: {k}\n", 3),
+    ("deploy/env.json", '[\n  {{\n    "value": "x",\n    "name": "{k}"\n  }}\n]\n', 4),
+], ids=["dockerfile-suffix", "env-suffix", "value-then-name", "json-value-then-name"])
+def test_bnd_007_023_deployment_file_forms(tmp_path, key, rel, text, line):
+    root = _runtime(tmp_path, {rel: text.format(k=key)})
+    what = "profile" if key == "MCX_PROFILE" else "release"
+    fn = gate.check_no_default_profile if key == "MCX_PROFILE" else \
+        gate.check_release_is_a_deployment_parameter
+    assert fn(root) == [f"{rel}:{line}: sets {key}; a built image or unit must not choose "
+                        f"the {what}"]
+
+
+@pytest.mark.vp("VP1-BND-008")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({"service/sample.py": "from .runtime import build_runtime as rebuild\n"
+      "def reload(rt):\n    return rebuild({}, rt.clock)\n"}, {},
+     ["service/sample.py:1: imports build_runtime; main imports it, under its name, and "
+      "calls it once, at start"]),
+    ({}, {"service/__main__.py": ("from .runtime import build_runtime\n",
+                                  "from .runtime import build_runtime as br\n")},
+     ["service/__main__.py:{L:import build_runtime as br}: imports build_runtime; main "
+      "imports it, under its name, and calls it once, at start"]),
+    ({"service/sample.py": "from core import loader\ndef r(d):\n    return loader.reread(d)\n"
+      "from core.loader import reread\n"}, {},
+     ["service/sample.py:3: refers to the loader's 'reread'; only build_runtime starts it, "
+      "once",
+      "service/sample.py:4: imports the loader's 'reread'; only build_runtime starts it"]),
+    ({"service/sample.py": "def edit(rt):\n    object.__setattr__(rt.loaded.profile, "
+      "'call_types', ())\n"}, {},
+     ["service/sample.py:2: object.__setattr__ changes a frozen value; the profile is not "
+      "modified at run time"]),
+    ({"service/sample.py": "import dataclasses\nfrom dataclasses import replace\n"
+      "def edit(rt, p):\n    a = dataclasses.replace(rt.loaded.profile, call_types=())\n"
+      "    return replace(p.profile), dataclasses.replace(p.request)\n"}, {},
+     ["service/sample.py:4: replace() on the loaded profile; the profile is not modified "
+      "at run time",
+      "service/sample.py:5: replace() on the loaded profile; the profile is not modified "
+      "at run time"]),
+    ({"service/sample.py": "class C:\n    def __init__(self, lp):\n        self.loaded = lp\n"
+      "    def swap(self, lp):\n        self.loaded, self._hooks = lp, lp.hooks\n"}, {},
+     ["service/sample.py:5: sets 'loaded' after construction; the profile is held as loaded",
+      "service/sample.py:5: sets '_hooks' after construction; the profile is held as "
+      "loaded"]),
+    ({"service/sample.py": "def again(rt, lp):\n    rt.health.set_profile(lp)\n"}, {},
+     ["service/sample.py:2: refers to set_profile; build_runtime reports the profile once, "
+      "at start"]),
+    ({}, {"service/runtime.py": ("    health.set_profile(loaded)\n", "")},
+     ["service/runtime.py: build_runtime reports the profile 0 times; once, at start"]),
+    ({}, {"service/runtime.py": ("    health.set_profile(loaded)\n",
+                                 "    health.set_profile(loaded)\n    health.set_profile(loaded)\n")},
+     ["service/runtime.py: build_runtime reports the profile 2 times; once, at start"]),
+    ({"service/sample.py": "import os, sys\ndef restart():\n"
+      "    os.execv(sys.executable, [sys.executable, '-m', 'service'])\n"}, {},
+     ["service/sample.py:3: os.execv restarts or forks the process; a new profile is a new "
+      "deployment"]),
+    ({"service/sample.py": "from ..core import validation as v\nx = v.build({}, 'x')\n"
+      "from ..core.validation import build\nfrom ..core.loader import load\n"
+      "import core.validation\ny = core.validation.build({}, 'x')\n"}, {},
+     ["service/sample.py:2: refers to validation.build; only the loader builds a profile, "
+      "at start",
+      "service/sample.py:3: imports validation.build; only the loader builds a profile, at "
+      "start",
+      "service/sample.py:4: imports the loader's 'load'; only build_runtime starts it",
+      "service/sample.py:6: refers to validation.build; only the loader builds a profile, "
+      "at start"]),
+], ids=["build-runtime-alias", "main-alias", "new-loader-function", "setattr", "replace",
+        "holder-set-later", "second-report", "no-report", "two-reports", "exec", "two-levels-up"])
+def test_bnd_008_review_probes_round_2(tmp_path, files, patches, expected):
+    root = _runtime(tmp_path, files, patches)
+    assert gate.check_no_hot_reload(root) == sorted(_lines(root, expected), key=gate._by_line)
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("text,expected", [
+    ("import os\nk = os.environ.get('MCX_RING_TIMER')\nm = 'MCX_MAX_AGE'\n"
+     "t = ('MCX_SESSION_TIMER_MODE', 'MCX_TIMER_REFRESHER_ROLE')\n",
+     ["2: setting MCX_RING_TIMER names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)",
+      "3: setting MCX_MAX_AGE names a duration without stating milliseconds (_ms) "
+      "(PLT-GEN-011)"]),
+    ("import datetime\nD = datetime.datetime\na = D.fromisoformat('2020-01-01')\n"
+     "b = D.combine(a.date(), a.time())\nc = D.combine(a.date(), a.time(), None)\n"
+     "d = D.fromordinal(1)\ne = D.now(cfg.zone)\n",
+     ["3: fromisoformat: local or zoneless time",
+      "4: combine() without a zone is local or zoneless time",
+      "5: combine() with a zone other than UTC",
+      "6: fromordinal: local or zoneless time",
+      "7: datetime.now() with a zone other than UTC"]),
+], ids=["trailing-duration-words", "other-constructors"])
+def test_bnd_016_review_probes_round_2(tmp_path, text, expected):
+    root = _runtime(tmp_path, {"service/sample.py": text})
+    assert gate.check_time_discipline(root) == [f"service/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_utc_named_any_way_is_utc(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "import datetime\nfrom datetime import UTC as Z, datetime as D\n"
+                               "U = datetime.timezone.utc\n"
+                               "a = D.now(Z)\nb = D.now(U)\nc = D.combine(a.date(), a.time(), U)\n"
+                               "class C:\n    timer_refresher: str = ''\n"})
+    assert gate.check_time_discipline(root) == []
+
+
+@pytest.mark.vp("VP1-BND-022")
+@pytest.mark.parametrize("files,expected", [
+    ({"service/limits.py": "LIMIT = 19\nBY_ID = {17: 'a', 18: 'b'}\n",
+      "service/sample.py": "from .limits import LIMIT as L, BY_ID\n"
+      "def f(release):\n    return release >= L, BY_ID[release]\n"},
+     ["service/sample.py:3: a table indexed by release",
+      "service/sample.py:3: release compared to a literal"]),
+    ({"service/limits.py": "MIN_REL = 19\nBY_REL = {17: 'a'}\nrel_floor = (17, 18)\n"},
+     ["service/limits.py:1: a release number held", "service/limits.py:2: a release number held",
+      "service/limits.py:3: a release number held"]),
+    ({"service/sample.py": "from core.release import parse, Release as R\n"
+      "from core import release as cr\n"
+      "def f(x):\n    return (x >= parse('19'),\n            x >= R['REL_19'],\n"
+      "            x >= R(int('19')),\n            x >= R(18 + 1),\n"
+      "            x >= cr.parse('20'))\n"},
+     [f"service/sample.py:{n}: a release built from a literal" for n in range(4, 9)]),
+], ids=["imported-constants", "held-numbers", "builders"])
+def test_bnd_022_review_probes_round_2(tmp_path, files, expected):
+    root = _runtime(tmp_path, files)
+    assert gate.check_release_knowledge_is_in_one_module(root) == [
+        f"{e} outside core/release.py" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-022")
+def test_bnd_022_leaves_counts_and_non_release_numbers_alone(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "from core.release import parse, SUPPORTED\n"
+                               "rel_count = 0\nrelease_retries = 3\n"
+                               "def f(text, release):\n    return parse(text), release in SUPPORTED\n"})
+    assert gate.check_release_knowledge_is_in_one_module(root) == []
+
+
+# -- batch B, the independent review's probes (round 3) ------------------------
+
+
+@pytest.mark.vp("VP1-BND-008")
+@pytest.mark.parametrize("text,expected", [
+    ("def swap(rt):\n    setattr(rt, 'loaded', None)\n",
+     ["2: sets a profile holder by name; the profile is held as loaded"]),
+    ("def swap(rt):\n    rt.__dict__['loaded'] = None\n    vars(rt.loaded)['profile'] = None\n",
+     ["2: sets a profile holder by name; the profile is held as loaded",
+      "3: sets a profile holder by name; the profile is held as loaded"]),
+    ("import dataclasses\nfrom dataclasses import replace as dc\ndef swap(rt, x):\n"
+     "    return dataclasses.replace(rt, loaded=None), dc(x.loaded, profile=None)\n",
+     ["4: replace() on the loaded profile; the profile is not modified at run time"] * 2),
+    ("class Swap:\n    def __init__(self, rt, new):\n        rt.loaded = new\n"
+     "        self.loaded = new\n",
+     ["3: sets 'loaded' after construction; the profile is held as loaded"]),
+], ids=["setattr", "dict-and-vars", "replace-keyword-and-alias", "other-objects-init"])
+def test_bnd_008_review_probes_round_3(tmp_path, text, expected):
+    root = _runtime(tmp_path, {"service/sample.py": text})
+    assert gate.check_no_hot_reload(root) == [f"service/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_plural_trailing_duration_words(tmp_path):
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "S = ('MCX_FLOOR_TIMERS', 'MCX_CACHE_MAX_AGES')\n"})
+    assert gate.check_time_discipline(root) == [
+        "service/sample.py:1: setting MCX_CACHE_MAX_AGES names a duration without stating "
+        "milliseconds (_ms) (PLT-GEN-011)",
+        "service/sample.py:1: setting MCX_FLOOR_TIMERS names a duration without stating "
+        "milliseconds (_ms) (PLT-GEN-011)"]
+
+
+@pytest.mark.vp("VP1-BND-022")
+def test_bnd_022_constants_reached_as_attributes(tmp_path):
+    root = _runtime(tmp_path, {
+        "service/limits.py": "FLOOR = 19\nBY_ID = {17: 'a'}\nclass Limits:\n    CEILING = 20\n",
+        "service/sample.py": "from service import limits\nimport service.limits as L\n"
+        "from .limits import Limits\n"
+        "def f(release):\n    return (release >= limits.FLOOR,\n"
+        "            release >= L.FLOOR,\n            release >= Limits.CEILING,\n"
+        "            L.BY_ID[release])\n"})
+    assert gate.check_release_knowledge_is_in_one_module(root) == [
+        f"service/sample.py:{n}: {what} outside core/release.py"
+        for n, what in ((5, "release compared to a literal"),
+                        (6, "release compared to a literal"),
+                        (7, "release compared to a literal"),
+                        (8, "a table indexed by release"))]
+
+
+@pytest.mark.vp("VP1-BND-022")
+def test_bnd_022_a_named_table_read_with_get(tmp_path):
+    root = _runtime(tmp_path, {
+        "service/limits.py": "BY_ID = {17: 'a'}\n",
+        "service/sample.py": "from service import limits\nfrom .limits import BY_ID\n"
+        "TABLE = {18: 'b'}\n"
+        "def f(release):\n    a = TABLE.get(release)\n    b = BY_ID.get(release)\n"
+        "    return a, b, limits.BY_ID.get(release)\n"})
+    assert gate.check_release_knowledge_is_in_one_module(root) == [
+        f"service/sample.py:{n}: a table indexed by release outside core/release.py"
+        for n in (5, 6, 7)]
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_a_seconds_field_needs_its_milliseconds_sibling_in_configuration(tmp_path):
+    root = _runtime(tmp_path, files={"service/sample.py":
+                                     "class Probe:\n    hold_s: int = 0\n    hold_ms: int = 0\n"},
+                    patches={"core/model.py": ("    no_answer_s: Optional[int] = None",
+                                               "    no_answer_s: Optional[int] = None\n"
+                                               "    ring_s: Optional[int] = None")})
+    assert gate.check_time_discipline(root) == _lines(root, [
+        "core/model.py:{L:    ring_s: Optional}: field 'ring_s' counts seconds; durations "
+        "are in milliseconds",
+        "service/sample.py:2: field 'hold_s' counts seconds; durations are in milliseconds"])
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_a_seconds_form_is_exempt_only_where_it_is_declared(tmp_path):
+    """Read anywhere else, MCX_SESSION_EXPIRES would skip the rule that the
+    milliseconds apply; and a millisecond setting outside the configuration
+    modules still needs its seconds form."""
+    root = _runtime(tmp_path, {"service/sample.py":
+                               "import os\nx = int(os.environ.get('MCX_SESSION_EXPIRES') or 0)\n"
+                               "y = os.environ.get('MCX_IDLE_TIMEOUT_MS')\n"})
+    assert gate.check_time_discipline(root) == [
+        "service/sample.py:2: setting MCX_SESSION_EXPIRES names a duration without stating "
+        "milliseconds (_ms) (PLT-GEN-011)",
+        "service/sample.py:3: setting MCX_IDLE_TIMEOUT_MS has no seconds form in SECONDS_FORMS "
+        "(PLT-GEN-011)"]
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_bnd_016_a_paired_field_must_hold_a_declared_form(tmp_path):
+    root = _runtime(tmp_path, patches={"core/model.py": (
+        "    no_answer_s: Optional[int] = None",
+        "    no_answer_s: Optional[int] = None\n    hold_timeout_s: Optional[int] = None\n"
+        "    hold_timeout_ms: Optional[int] = None")})
+    assert gate.check_time_discipline(root) == _lines(root, [
+        "core/model.py:{L:hold_timeout_s}: field 'hold_timeout_s' counts seconds; durations "
+        "are in milliseconds"])

@@ -291,8 +291,8 @@ class SipCore:
         # By rtpmap name, in preference order (VP-OP-03, decided 2026-09-25).
         self._preference = tuple(c.name for c in runtime.loaded.profile.media.codecs)
         # How long an invited member may ring, per call type (SIP-OP-15).
-        self._no_answer_s = {ct.id: ct.no_answer_s
-                             for ct in runtime.loaded.profile.call_types}
+        self._no_answer_ms = {ct.id: ct.no_answer_ms
+                              for ct in runtime.loaded.profile.call_types}
         self.local_uri = local_uri
         self.clock = clock
         sip_cfg = runtime.config.sip
@@ -311,8 +311,10 @@ class SipCore:
         self.server = ServerTransactions(clock, t1=t1)
         self.client = ClientTransactions(clock, t1=t1)
         self.flows_by_user: Dict[str, Any] = {}
-        # RFC 4028: the interval asked for, and the cap on a longer one.
-        self._session_expires = sip_cfg.session_expires
+        # RFC 4028: the interval asked for, and the cap on a longer one, in
+        # the seconds of the Session-Expires header (configured in ms, a
+        # whole number of seconds: service/config.py).
+        self._session_expires = sip_cfg.session_expires_ms // 1000
         # From the network profile (ICD-OP-08, ICD-OP-10).
         self._trusted_cores = set(runtime.network.trusted_cores)
         self.calls: Dict[str, Call] = {}
@@ -717,10 +719,10 @@ class SipCore:
             # 3264 6.1): the caller's number.
             call.media.set_payload_types(target, rx=call.choice.offered.pt)
             sdp = self._relay_sdp(call, target)
-        secs = self._no_answer_s.get(call.sr.call_type)
+        limit_ms = self._no_answer_ms.get(call.sr.call_type)
         leg.sig, leg.offer_sdp = sig, sdp
         leg.session_expires = self._session_expires
-        leg.answer_by = self.clock() + secs * 1000 if secs else None
+        leg.answer_by = self.clock() + limit_ms if limit_ms else None
         call.legs[leg.call_id] = leg
         self._dialogs[leg.call_id] = call
         self._send_leg_invite(call, leg, cseq=1)

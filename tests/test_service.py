@@ -138,6 +138,96 @@ def test_process_refuses_and_exits_nonzero(env, change):
         proc.stdout.close(); proc.stderr.close()
 
 
+def _refusal(env, port):
+    """Run the process; return its exit status, the messages it logged, and
+    whether anything ever listened on `port`."""
+    proc = spawn(env, port)
+    try:
+        status = proc.wait(timeout=15)
+        lines = [json.loads(l)["message"] for l in proc.stderr.read().decode().splitlines()
+                 if l.startswith("{")]
+    finally:
+        proc.stdout.close(); proc.stderr.close()
+    with socket.socket() as s:
+        listened = s.connect_ex(("127.0.0.1", port)) == 0
+    return status, lines, listened
+
+
+@pytest.mark.vp("VP1-BND-007")
+@pytest.mark.parametrize("value", [None, "", "  ", " , "])
+def test_no_profile_stated_no_process(env, value):
+    """PLT-GEN-004: nothing supplies a profile the deployment did not state."""
+    env = dict(env)
+    env.pop("MCX_PROFILE")
+    if value is not None:
+        env["MCX_PROFILE"] = value
+    status, messages, listened = _refusal(env, free_port())
+    assert status == 2 and not listened
+    assert messages == ["startup refused: no profile configured: exactly one profile must "
+                        "be named at deployment; the platform provides no default"]
+
+
+@pytest.mark.vp("VP1-BND-007")
+def test_a_profiles_root_holding_one_profile_still_needs_it_named(env, tmp_path):
+    """As a packaged image: the root holds one profile, and the process
+    still refuses to start until the deployment names it."""
+    import shutil
+    root = tmp_path / "profiles"
+    root.mkdir()
+    for name in ("mcx", "common"):
+        shutil.copytree(ROOT / "profiles" / name, root / name,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    env = {k: v for k, v in env.items() if k != "MCX_PROFILE"}
+    status, messages, listened = _refusal({**env, "MCX_PROFILES_ROOT": str(root)},
+                                          free_port())
+    assert status == 2 and not listened
+    assert messages == ["startup refused: no profile configured: exactly one profile must "
+                        "be named at deployment; the platform provides no default"]
+
+
+@pytest.mark.vp("VP1-BND-023")
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_no_release_stated_no_process(env, value):
+    """PLT-REL-002: nothing supplies a release the deployment did not state."""
+    env = dict(env)
+    env.pop("MCX_RELEASE")
+    if value is not None:
+        env["MCX_RELEASE"] = value
+    status, messages, listened = _refusal(env, free_port())
+    assert status == 2 and not listened
+    assert messages == [
+        "startup refused: MCX_RELEASE is not set: state the 3GPP release this deployment "
+        "speaks (PLT-REL-002); there is no default. A guessed release is silent -- subtype "
+        "14 is a valid floor control message in Rel-17 and in Rel-18 and means a different "
+        "one in each"]
+
+
+@pytest.mark.vp("VP1-BND-008")
+def test_the_profile_is_read_once_at_start(env, tmp_path):
+    """PLT-PRF-010: a profile changed on disk under a running process is not
+    picked up; the process keeps the one it loaded."""
+    import shutil
+    root = tmp_path / "profiles"
+    shutil.copytree(ROOT / "profiles", root, ignore=shutil.ignore_patterns("__pycache__"))
+    port = free_port()
+    proc = spawn({**env, "MCX_PROFILES_ROOT": str(root)}, port)
+    try:
+        wait_ready(port, proc)
+        before = json.loads(get(port, "/healthz")[1])["profile"]
+        yaml_path = root / "mcx" / "profile.yaml"
+        text = yaml_path.read_text(encoding="utf-8")
+        assert text.count(f"version: {before['version']}") == 1
+        yaml_path.write_text(text.replace(f"version: {before['version']}",
+                                          "version: 9.9.9"), encoding="utf-8")
+        os.utime(yaml_path, (time.time() + 60, time.time() + 60))
+        time.sleep(1.5)
+        after = json.loads(get(port, "/healthz")[1])["profile"]
+        assert after == before and after["version"] != "9.9.9"
+        assert proc.poll() is None
+    finally:
+        stop(proc)
+
+
 def test_vp1_sig_007_stub_idms_refused_under_production_indicator(env):
     for indicator in ({"MCX_ENV": "production"}, {"MCX_PRODUCTION": "1"}):
         with pytest.raises(StartupRefused, match="stub identity provider"):

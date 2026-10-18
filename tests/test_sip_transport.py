@@ -187,7 +187,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_TLS_CA": str(pki / "ca.crt"),
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
-           "MCX_SESSION_EXPIRES": "1800",
+           "MCX_SESSION_EXPIRES_MS": "1800000",
            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
            "MCX_FOREIGN_INITIATOR": "refuse",
            "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
@@ -846,7 +846,7 @@ def test_sip_disabled_when_no_listen_configured(tmp_path, pki):
     del e["MCX_SIP_LISTEN"]
     from service.config import SIP_ONLY, Config
     for key in SIP_ONLY:          # refused without SIP (owner ruling 2026-10-16)
-        del e[key]
+        e.pop(key, None)
     assert Config.from_env(e).sip is None
 
 
@@ -1598,8 +1598,9 @@ def test_a_cancelled_leg_that_rings_again_stays_out_of_the_call(core, rt, world,
 
 
 def test_the_core_takes_each_call_types_ring_limit_from_the_profile(core, rt):
-    assert core._no_answer_s == {ct.id: ct.no_answer_s
-                                 for ct in rt.loaded.profile.call_types}
+    assert core._no_answer_ms == {ct.id: ct.no_answer_ms
+                                  for ct in rt.loaded.profile.call_types}
+    assert set(core._no_answer_ms.values()) == {32_000}
 
 
 def _ringing_private_call(core, world, cid):
@@ -1610,7 +1611,7 @@ def _ringing_private_call(core, world, cid):
 
 
 def test_a_short_ring_limit_cancels_early(core, world, clock):
-    core._no_answer_s["private"] = 5
+    core._no_answer_ms["private"] = 5_000
     _ringing_private_call(core, world, "nl1")
     clock.now += 4999
     core.tick()
@@ -1624,7 +1625,7 @@ def test_a_short_ring_limit_cancels_early(core, world, clock):
 def test_a_long_ring_limit_outlasts_timer_b(core, rt, world, clock):
     """In 'Proceeding' Timer B does not run (RFC 3261 17.1.1.2), so a call
     type may let members ring longer than 64*T1."""
-    core._no_answer_s["private"] = 60
+    core._no_answer_ms["private"] = 60_000
     _ringing_private_call(core, world, "nl2")
     clock.now += 59_999
     core.tick()
@@ -1638,7 +1639,7 @@ def test_a_long_ring_limit_outlasts_timer_b(core, rt, world, clock):
 def test_a_member_that_never_rings_still_meets_timer_b(core, world, clock):
     """In 'Calling' (no provisional) Timer B still ends the INVITE at 64*T1,
     however long the call type lets members ring."""
-    core._no_answer_s["private"] = 60
+    core._no_answer_ms["private"] = 60_000
     core.on_bytes(invite("nl3", U[0], U[1], "private"), world[U[0]])
     clock.now += 64 * 500
     core.tick()
@@ -2005,7 +2006,7 @@ def test_a_release_sends_its_byes_when_the_store_cannot_mark_it(core, rt, world,
                                                   real(call, leg, cause))
     core.on_bytes(invite("tmr1", U[0], U[1], "private"), world[U[0]])
     core.on_bytes(answer(world[U[1]].requests("INVITE")[-1], 200, SDP), world[U[1]])
-    core.clock.now += 2_000_000                   # past MCX_SESSION_EXPIRES
+    core.clock.now += 2_000_000                   # past MCX_SESSION_EXPIRES_MS
     core.tick()
     assert "tmr1" in {c for c, _ in seen}
     assert all(cid == scope for cid, scope in seen)

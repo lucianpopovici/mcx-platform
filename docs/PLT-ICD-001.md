@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.23 (draft)
-**Date:** 2026-10-17
+**Version:** 0.24 (draft)
+**Date:** 2026-10-18
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -131,17 +131,18 @@ was 32 s for every call type, because that is 64·T1 (RFC 3261 Timer B), a
 transport constant nobody chose.
 
 ```yaml
-no_answer_s: 32        # seconds an invited member may ring
+no_answer_ms: 32000    # milliseconds an invited member may ring
+# or: no_answer_s: 32  # in seconds (PLT-GEN-011)
 ```
 
 | ID | Rule |
 |---|---|
-| ICD-RNG-001 | `no_answer_s` is required on every call type: an integer of at least 1 second, with no default and no upper bound. An absent key, a non-integer (booleans included) or a value below 1 is a load error. |
+| ICD-RNG-001 | Every call type states the limit as `no_answer_ms` (an integer number of milliseconds, at least 1000), or `no_answer_s` (an integer number of seconds, at least 1), or both (PLT-GEN-011 as amended); no default and no upper bound. Neither key, a non-integer (booleans included) or a value below its minimum in either key stated is a load error. With both, `no_answer_ms` is used; if it is not `no_answer_s` × 1000, the disagreement is reported at startup as a warning (log, health document, startup audit record). |
 | ICD-RNG-002 | The limit is counted from the INVITE the core sends each member. When the member's first provisional response arrives, the INVITE enters 'Proceeding' and Timer B stops (RFC 3261 17.1.1.2). The deadline is then the limit. If the limit expires while the member rings, the core CANCELs that member (9.1). |
 | ICD-RNG-003 | A member that has sent no provisional ('Calling') is still ended by Timer B at 64·T1, whatever the limit, because a CANCEL may not be sent before a provisional (9.1). A limit longer than 64·T1 therefore applies only to members that ring. |
 | ICD-RNG-004 | A member that reaches the limit counts as failed for the call. The call fails only if no other member is still invited or answered (the existing rule). |
 
-All three in-tree profiles declare 32 for every call type, which keeps the
+All three in-tree profiles declare 32000 for every call type, which keeps the
 previous behaviour. The value per call type is the profile owner's choice.
 
 **Over the participant limit (since v0.22).** Each call type also declares
@@ -529,7 +530,11 @@ data-only sessions.
 1. `queueing_enabled=False` → `max_queue_depth == 0`.
 2. `queueing_enabled=True` → `max_queue_depth ≥ 1`.
 3. `timers_ms` keys are TS 24.380 timer names. Unknown keys are a contract
-   violation, detected at profile validation.
+   violation, detected at profile validation. (In a profile's
+   `call_types[].floor`, a timer may also be stated in seconds, `timers_s`,
+   PLT-GEN-011 as amended: with both, the milliseconds apply and a
+   disagreement is warned of at startup. `FloorPolicy.timers_ms` returned by
+   the hook is in milliseconds only.)
 4. Omitted timers take the core's specification defaults.
 5. `preemption_at_full_queue` is `"insert"` or `"deny"` (since v0.22). It
    decides a pre-emptor's place when the queue is already at
@@ -808,6 +813,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.24 | 2026-10-18 | PLT-GEN-011 as amended (PLT-SRS 0.5; PLT-VP-R1 RES-OP-09 batch B): a duration in a profile may be stated in milliseconds or in seconds. §2.7: the ring limit is `no_answer_ms` or `no_answer_s`, or both, `no_answer_ms` applying and a disagreement warned of at startup; `CallType` gains `no_answer_s` (as stated, or None). §5.3: a profile's `call_types[].floor` takes `timers_s` beside `timers_ms` per timer, the same way; `FloorConfig` gains `timers_s`. The hook's `FloorPolicy.timers_ms` stays in milliseconds. The in-tree profiles are unchanged. |
 | 0.23 | 2026-10-17 | §9: core code `initiator-not-served` (PLT-VP-R1 RES-OP-11, owner ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required). A minor change: no hook or parameter object changes. |
 | 0.22 | 2026-10-16 | Owner ruling: two decisions become profile settings, required with no default. §2.7 and ICD-LIM-001..003: `group_over_limit` per call type (`truncate`, TS 24.379 6.3.5.5, or `refuse`); §5.3 POST-5: `preemption_at_full_queue` on `FloorPolicy` (`insert`, TS 24.380 6.3.4.4.7 item 2e, or `deny`), checked by the core. A deviation is reported at startup. A signature change: `FloorPolicy` gains a required field; the in-tree profiles state the previous behaviour, so none changes. |
 | 0.21 | 2026-09-29 | §5.2: the core checks and applies the session decision (PLT-VP-R1 RES-OP-12). The participant limit is the decision's, and a group call over it is truncated with warning 122 instead of refused (TS 24.379 6.3.5.5, 10.1.1.4.1); the in-tree admission no longer refuses on it. A session over the limit that is not a truncatable group call is refused with the new core code `participant-limit-exceeded` (§9). POST-1 read as equality, POST-2 states what is counted. ICD-OP-15 opened. A minor change: signatures unchanged; a group call the in-tree profiles used to refuse is now established with fewer participants. |

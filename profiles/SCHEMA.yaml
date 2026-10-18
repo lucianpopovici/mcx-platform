@@ -63,8 +63,12 @@ call_types:
     acknowledgement_required: bool
     recording_required: bool
     max_participants: int?
-    no_answer_s: int              # REQUIRED, >= 1: seconds an invited member may
-                                  # ring before the core CANCELs it (PLT-ICD-001 2.7)
+    no_answer_ms: int             # >= 1000: milliseconds an invited member may ring
+                                  # before the core CANCELs it (PLT-ICD-001 2.7;
+                                  # durations in ms, PLT-GEN-011)
+    no_answer_s: int              # >= 1: the same in seconds (PLT-GEN-011).
+                                  # REQUIRED: one of the two, or both (no_answer_ms
+                                  # used; a disagreement is warned of at startup)
     group_over_limit: truncate|refuse  # REQUIRED: a group call over the session
                                   # decision's max_participants (TS 24.379 6.3.5.5:
                                   # truncate, warning 122; refuse is a deviation)
@@ -84,7 +88,9 @@ call_types:
                                   # queue (TS 24.380 6.3.4.4.7 item 2e: insert, one
                                   # beyond the depth; deny is a deviation, FC-OP-07)
       timers_ms:                  # 24.380 overrides; engine owns the FSM
-        <timer_name>: int
+        <timer_name>: int         # > 0, milliseconds
+      timers_s:                   # the same in seconds (PLT-GEN-011); a timer in
+        <timer_name>: int         # both uses timers_ms, a disagreement warned of
 
 # --------------------------------------------------------------------------
 # Identity. `functional` drives FRMCS functional addressing; an empty list

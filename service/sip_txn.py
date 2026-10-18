@@ -195,7 +195,7 @@ class ClientTxn:
     # the final response it provokes (9.1, last paragraph).
     proceeding: bool = False
     cancelled: bool = False
-    # The call type's no-answer limit (profile `no_answer_s`), as an
+    # The call type's no-answer limit (profile `no_answer_ms`), as an
     # absolute time: the deadline once the INVITE is 'Proceeding', where
     # Timer B no longer runs (17.1.1.2). None: Timer B's deadline stays.
     answer_by: Optional[int] = None

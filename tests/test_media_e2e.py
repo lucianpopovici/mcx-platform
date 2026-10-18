@@ -7,6 +7,7 @@ media is real datagrams.
 
 from __future__ import annotations
 
+import re
 import socket
 import struct
 import sys
@@ -245,6 +246,60 @@ def test_full_call_trace_has_no_deviation(call):
     trace = [(e.direction, e.uri, e.data) for e in ms.trace]
     assert len(trace) >= 8
     assert trace_compare.compare(trace) == []
+
+
+_TIME_WORD = re.compile(r"(?i)(^|_)(at|time|timestamp|ts|when|since|until|expires|expiry|"
+                        r"timeout|interval|duration|delay|deadline|ttl|s|sec|secs|seconds)$")
+
+
+def _time_keys(value, path=""):
+    """Every mapping key under `value` that names a time or a duration."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if _TIME_WORD.search(str(k)) or str(k).endswith("_ms"):
+                yield f"{path}.{k}", v
+            yield from _time_keys(v, f"{path}.{k}")
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            yield from _time_keys(v, f"{path}[{i}]")
+
+
+def _milliseconds(v) -> bool:
+    """A count of milliseconds: a number (a measured duration may be
+    fractional, hook-invocation elapsed_ms), none, or named timers of them
+    (a floor policy's timers_ms)."""
+    if isinstance(v, dict):
+        return all(_milliseconds(x) for x in v.values())
+    return v is None or type(v) in (int, float)
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_every_audit_record_of_a_call_carries_utc_milliseconds_only(call):
+    """PLT-GEN-011 over the audit trail of a whole call: every record is
+    stamped `at_ms` from the injected UTC millisecond clock, and every time
+    or duration anywhere in a record is a number named _ms."""
+    rt, core, flows, ues, clock = call
+    start = clock.now
+    setup_call(call)
+    clock.now += 1234
+    ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+    ues[U[0]].send_floor(MsgType.RELEASE)
+    for u in U[:3]:
+        while ues[u].floor_msg(0.3):
+            pass
+    clock.now += 4321
+    with core.lock:
+        core.on_bytes(msg("BYE", LOCAL, "e2e", 2, U[0], "grp:alpha"), flows[U[0]])
+    trail = rt.store.audit_records()
+    assert len(trail) >= 5
+    assert {r["type"] for r in trail} >= {"session-established", "floor-transition",
+                                          "session-released"}
+    for r in trail:
+        assert type(r["at_ms"]) is int and start <= r["at_ms"] <= clock.now, r
+        assert [k for k in r if k != "at_ms" and _TIME_WORD.search(k)] == [], r
+        for key, v in _time_keys(r["detail"], r["type"]):
+            assert key.endswith("_ms") and _milliseconds(v), (key, v)
+    assert {r["at_ms"] for r in trail} > {start}
 
 
 # ------------------------------------------------------------------ VP1-MED-001/002 via SIP

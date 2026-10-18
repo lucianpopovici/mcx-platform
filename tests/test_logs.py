@@ -123,3 +123,15 @@ def test_configure_installs_the_filter_and_the_json_formatter():
     finally:
         root.handlers[:], _ = saved
         root.setLevel(saved[1])
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_a_log_line_is_stamped_in_utc_milliseconds_only(lines, monkeypatch):
+    """PLT-GEN-011: the one time on a log line is `at_ms`, UTC epoch
+    milliseconds, the record's own creation time; no local rendering."""
+    monkeypatch.setattr(logging.time, "time", lambda: 1_700_000_000.1234)
+    monkeypatch.setattr(logging.time, "time_ns", lambda: 1_700_000_000_123_400_000)
+    LOG.warning("stamped")
+    (line,) = lines()
+    assert line == {"at_ms": 1_700_000_000_123, "level": "WARNING",
+                    "logger": "mcx.test-logs", "message": "stamped"}
