@@ -2705,7 +2705,7 @@ _RELEASE_TEXT = re.compile(r"(?i)^\s*(rel(ease)?[-_ ]?|r)?\d+\s*$")
 _RELEASE_BUILDERS = frozenset({"Release", "parse_release"})
 _RELEASE_MEMBER = re.compile(r"^REL_\d+$")
 # Every package with Python in it is scanned, and any new top-level one.
-_NOT_CODE = frozenset({"docs", "kb", ".git"})
+_NOT_CODE = frozenset({"docs", "kb", ".git", ".venv"})
 
 
 def _release_named(name: str) -> bool:

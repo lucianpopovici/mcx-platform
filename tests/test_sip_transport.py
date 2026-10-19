@@ -98,7 +98,11 @@ def pki(tmp_path_factory):
              .serial_number(x509.random_serial_number())
              .not_valid_before(now - datetime.timedelta(minutes=1))
              .not_valid_after(now + datetime.timedelta(days=1))
-             .add_extension(x509.BasicConstraints(ca=ca, path_length=None), True))
+             .add_extension(x509.BasicConstraints(ca=ca, path_length=None), True)
+             .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                 key.public_key()), False)
+             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                 issuer_key.public_key()), False))
         names = []
         if san:
             names += [x509.DNSName("localhost"),
@@ -125,6 +129,9 @@ def pki(tmp_path_factory):
           .not_valid_before(now - datetime.timedelta(minutes=1))
           .not_valid_after(now + datetime.timedelta(days=1))
           .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+              ca_key.public_key()), False)
+          .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), True)
           .sign(ca_key, hashes.SHA256()))
     write("ca", ca_key, ca)
     k, c = make("mcx-server", ca.subject, ca_key, san=True)
@@ -137,7 +144,10 @@ def pki(tmp_path_factory):
                .not_valid_before(now - datetime.timedelta(minutes=1))
                .not_valid_after(now + datetime.timedelta(days=1))
                .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
-               .sign(core_key, hashes.SHA256()))
+               .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+              core_key.public_key()), False)
+          .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), True)
+          .sign(core_key, hashes.SHA256()))
     write("core-ca", core_key, core_ca)
     # plays a SIP core: issued by the core CA, and trusted by DNS name
     k, c = make("core-client", core_ca.subject, core_key, dns=("core-client.example",))

@@ -572,7 +572,7 @@ def test_a_ci_job_collects_exactly_its_combination(given):
     assert sorted(i.split("::")[1].split("[")[0] for i in ids) == defined, ids
     at_release = [i for i in ids if "Rel-" in i]
     assert len(at_release) == 3
-    assert all(f"Rel-{given}]" in i and "frmcs" in i for i in at_release), at_release
+    assert all(f"Rel-{given}-frmcs]" in i for i in at_release), at_release
 
 
 @pytest.mark.vp("VP1-REL-002")
