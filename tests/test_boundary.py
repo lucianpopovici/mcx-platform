@@ -572,7 +572,11 @@ def test_a_ci_job_collects_exactly_its_combination(given):
     assert sorted(i.split("::")[1].split("[")[0] for i in ids) == defined, ids
     at_release = [i for i in ids if "Rel-" in i]
     assert len(at_release) == 3
-    assert all(f"Rel-{given}-frmcs]" in i for i in at_release), at_release
+    # Parameter order inside the id is pytest's choice, not ours: compare the
+    # parts, so "frmcs-Rel-13" and "Rel-13-frmcs" both pass and "Rel-130" does not.
+    params = [i.split("[", 1)[1].rstrip("]").replace(f"Rel-{given}", "<rel>")
+              for i in at_release]
+    assert all(sorted(p.split("-")) == ["<rel>", "frmcs"] for p in params), at_release
 
 
 @pytest.mark.vp("VP1-REL-002")
