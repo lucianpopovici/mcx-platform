@@ -1179,3 +1179,44 @@ def test_vp1_fc_013_a_profile_s_queue_is_bounded_and_drains_in_declared_order():
         release(fc, fc.holder)
         granted.append(fc.holder)
     assert granted == expected == ["p3", "p6", "p1", "p4", "p7", "p0", "p2", "p5"]
+
+
+# --------------------------------------------------------------------------
+# VP1-BND-015 — the machine stands alone (PLT-FC-004)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.vp("VP1-BND-015")
+def test_importing_the_floor_machine_loads_no_sip_media_or_network():
+    """In a fresh, isolated interpreter, importing core.floor loads nothing
+    of SIP, media, the service, profiles or the network, and from the core
+    only core.floor itself."""
+    import subprocess
+    code = ("import sys; sys.path.insert(0, %r); import core.floor; "
+            "print('\\n'.join(sorted(sys.modules)))" % str(ROOT))
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True,
+                       timeout=60)
+    assert r.returncode == 0, r.stderr
+    loaded = set(r.stdout.split())
+    forbidden = {"core.sip", "core.rtcp", "core.codec", "core.mcinfo", "core.session",
+                 "core.loader", "service", "profiles", "socket", "_socket", "ssl", "_ssl",
+                 "select", "selectors", "asyncio", "http", "urllib", "email", "multiprocessing",
+                 "subprocess", "concurrent"}
+    assert sorted(m for m in loaded if m.split(".")[0] in forbidden or m in forbidden) == []
+    assert sorted(m for m in loaded if m.split(".")[0] == "core") == ["core", "core.floor"]
+
+
+@pytest.mark.vp("VP1-BND-015")
+def test_the_floor_machine_runs_alone_on_an_injected_clock():
+    """ENV-UNIT: built with nothing but a policy and an injected clock, it
+    grants, times out on that clock, and goes idle (T1, 6.3.4.4.3)."""
+    clock = Clock()
+    clock.advance(5000)
+    fc = FloorControl(NO_QUEUEING, clock=clock)
+    actions = establish(fc, "a")
+    assert fc.state is FloorState.TAKEN and fc.holder == "a"
+    assert ActionType.SEND_GRANTED in kinds(actions)
+    assert fc.running_timers()[T_END_OF_MEDIA] == 5000 + 4000
+    clock.advance(4000)
+    expire(fc, T_END_OF_MEDIA)
+    assert fc.state is FloorState.IDLE and fc.holder is None

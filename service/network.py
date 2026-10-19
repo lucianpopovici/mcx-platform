@@ -90,7 +90,7 @@ def _spki(cert: x509.Certificate) -> bytes:
                                           PublicFormat.SubjectPublicKeyInfo)
 
 
-_PEM_LABEL = re.compile(rb"-----BEGIN ([A-Z0-9 ]+)-----")
+_PEM_BEGIN = re.compile(rb"-----BEGIN ([A-Z0-9 ]+)-----")
 
 
 def _pem_certificates(path: Path, what: str,
@@ -104,7 +104,7 @@ def _pem_certificates(path: Path, what: str,
     except OSError as exc:
         defects.append(f"{what}: {path}: {exc}")
         return None
-    others = sorted({m.decode() for m in _PEM_LABEL.findall(data)} - {"CERTIFICATE"})
+    others = sorted({m.decode() for m in _PEM_BEGIN.findall(data)} - {"CERTIFICATE"})
     if others:
         defects.append(f"{what}: {path}: holds {', '.join(others)} block(s); only "
                        "CERTIFICATE blocks are accepted")
