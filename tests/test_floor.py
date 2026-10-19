@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.floor import (  # noqa: E402
+    Action,
     ActionType,
     DenyReason,
     Event,
@@ -278,14 +279,49 @@ def test_vp1_fc_013_queue_bounded_and_excess_denied_not_dropped():
     assert len(fc.queue) == 3
 
 
-def test_vp1_fc_013_duplicate_request_denied():
+def test_vp1_fc_013_a_repeated_request_keeps_its_place():
+    """TS 24.380 6.3.5.4.4 item 4: a participant already queued at the same
+    priority that asks again gets Queue Position Info and keeps its place.
+    It used to be denied, although it stayed queued and was granted later
+    (RES-OP-10 review)."""
     fc = machine()
     establish(fc, "holder", 300)
+    request(fc, "p0", 100)
     request(fc, "p1", 100)
     actions = request(fc, "p1", 100)
-    deny = [a for a in actions if a.type is ActionType.SEND_DENY][0]
-    assert deny.reason is DenyReason.ALREADY_QUEUED
-    assert fc.queue == ("p1",)
+    assert actions == (Action(ActionType.SEND_QUEUE_POSITION, target="p1",
+                              queue_position=2),)
+    assert fc.queue == ("p0", "p1")
+
+
+def test_a_repeated_request_without_queueing_is_answered_with_nothing():
+    """Item 4 without queueing negotiated: the held pre-emptor asking again
+    gets no Deny and no Queue Position Info, and is granted in its turn."""
+    fc = machine(Policy(queueing_enabled=False, override_allowed=True,
+                        max_queue_depth=0))
+    establish(fc, "a", 100)
+    request(fc, "b", 200)
+    assert request(fc, "b", 200) == ()
+    assert request(fc, "b", 150) == ()        # in front: nothing outranks it
+    expire(fc, T_STOP_TALKING_GRACE)
+    assert fc.holder == "b"
+
+
+@pytest.mark.vp("VP1-FC-013")
+def test_a_repeated_request_at_another_priority_is_repositioned():
+    """Item 8: a queued participant asking at another priority is moved to
+    follow the requests at its new priority."""
+    fc = machine(Policy(queueing_enabled=True, override_allowed=False,
+                        max_queue_depth=3))
+    establish(fc, "holder", 300)
+    for p, priority in (("p1", 100), ("p2", 50), ("p3", 50)):
+        request(fc, p, priority)
+    assert fc.queue == ("p1", "p2", "p3")
+    actions = request(fc, "p3", 200)
+    assert ActionType.SEND_DENY not in kinds(actions)
+    assert fc.queue == ("p3", "p1", "p2")
+    request(fc, "p3", 50)                      # down again: behind its peers
+    assert fc.queue == ("p1", "p2", "p3")
 
 
 def test_vp1_fc_013_queue_positions_reported():
@@ -339,12 +375,41 @@ def test_vp1_fc_014_deny_not_queue_when_queueing_disabled():
     assert fc.holder == "a"
 
 
-def test_vp1_fc_014_no_queue_entry_created_ever():
+def test_vp1_fc_014_no_queue_entry_for_any_request_when_override_is_off():
+    """Queueing disabled and override not allowed: whatever the priority, no
+    request is held. (The name this replaced, "no queue entry created ever",
+    claimed more: see the next test.)"""
     fc = machine(NO_QUEUEING)
     establish(fc, "a", 100)
     for p in ("b", "c", "d", "e"):
         request(fc, p, 255)
     assert fc.queue == ()
+
+
+def test_vp1_fc_014_with_override_only_a_pre_emptor_is_held():
+    """VP1-FC-014 as amended (RES-OP-10 ruling 3): queueing disabled, an
+    ordinary request is denied with no queue entry; a pre-emption, where
+    override is allowed, is held in the one front place TS 24.380 6.3.4.4.7
+    item 2e requires (FC-OP-07), with no Deny and no Queue Position Info;
+    anything after it is denied."""
+    fc = machine(Policy(queueing_enabled=False, override_allowed=True,
+                        max_queue_depth=0))
+    establish(fc, "a", 100)
+    for p, priority in (("c", 100), ("d", 50)):              # not higher: ordinary
+        actions = request(fc, p, priority)
+        assert [(x.reason, x.target) for x in actions if x.type is ActionType.SEND_DENY] \
+            == [(DenyReason.QUEUEING_DISABLED, p)]
+        assert fc.queue == ()
+    actions = request(fc, "b", 200)                          # higher: pre-emption
+    assert ActionType.SEND_DENY not in kinds(actions)
+    assert ActionType.SEND_QUEUE_POSITION not in kinds(actions)
+    assert [x.target for x in actions if x.type is ActionType.SEND_REVOKE] == ["a"]
+    assert (fc.state, fc.holder, fc.queue) == (FloorState.REVOKING, "a", ("b",))
+    for p, priority in (("e", 250), ("f", 200)):             # the place is taken
+        actions = request(fc, p, priority)
+        assert [(x.reason, x.target) for x in actions if x.type is ActionType.SEND_DENY] \
+            == [(DenyReason.QUEUEING_DISABLED, p)]
+    assert fc.queue == ("b",)
 
 
 def test_request_without_a_session_is_denied():
@@ -487,38 +552,98 @@ def test_retransmission_of_a_stale_release_is_harmless():
 # --------------------------------------------------------------------------
 
 
-def test_vp1_fc_021_every_transition_recorded_with_trigger_and_result():
-    clock = Clock()
+def _contended(clock):
+    """a talks; b, of higher priority, pre-empts; a releases."""
     fc = machine(clock=clock)
     establish(fc, "a", 100)
     clock.advance(10)
     request(fc, "b", 250)
     clock.advance(10)
     release(fc, "a")
+    return fc
 
-    assert len(fc.history) == 3
-    for t in fc.history:
-        assert t.event.type in EventType
-        assert t.to_state in FloorState
-        assert t.at_ms >= 0
-    assert [t.sequence for t in fc.history] == [1, 2, 3]
-    assert fc.history[0].at_ms == 0 and fc.history[1].at_ms == 10
+
+def test_vp1_fc_021_every_transition_recorded_with_trigger_and_result():
+    """Every record literal: trigger, timestamp and resulting state (RES-OP-03
+    review: the assertions it replaced could not fail)."""
+    fc = _contended(Clock())
+    assert [(t.sequence, t.at_ms, t.event.type, t.event.participant, t.from_state,
+             t.to_state, t.holder, t.queue) for t in fc.history] == [
+        (1, 0, EventType.SESSION_ESTABLISHED, "a", FloorState.START_STOP,
+         FloorState.TAKEN, "a", ()),
+        (2, 10, EventType.FLOOR_REQUEST, "b", FloorState.TAKEN,
+         FloorState.REVOKING, "a", ("b",)),
+        (3, 20, EventType.FLOOR_RELEASE, "a", FloorState.REVOKING,
+         FloorState.TAKEN, "b", ()),
+    ]
 
 
 def test_vp1_fc_021_sequence_reconstructible_from_history_alone():
-    """PLT-FC-011: the audit trail alone must let an operator replay the call."""
+    """PLT-FC-011: a chain, each transition starting where the last ended."""
     fc = machine()
     establish(fc, "a", 100)
     request(fc, "b", 100)
     request(fc, "c", 200)
     release(fc, "a")
+    h = fc.history
+    assert h[0].from_state is FloorState.START_STOP
+    assert all(b.from_state is a.to_state for a, b in zip(h, h[1:]))
+    assert [(t.to_state, t.holder, t.queue) for t in h] == [
+        (FloorState.TAKEN, "a", ()),
+        (FloorState.TAKEN, "a", ("b",)),
+        # c outranks a and override is allowed: a is revoked, c queued ahead
+        (FloorState.REVOKING, "a", ("c", "b")),
+        (FloorState.TAKEN, "c", ("b",)),
+    ]
 
-    replay = [(t.from_state, t.event.type, t.to_state, t.holder, t.queue)
-              for t in fc.history]
-    assert replay[0][0] is FloorState.START_STOP
-    assert replay[-1][2] is FloorState.TAKEN
-    assert replay[-1][3] == "c"             # higher priority promoted first
-    assert replay[-1][4] == ("b",)
+
+@pytest.mark.vp("VP1-FC-021")
+def test_a_transition_as_audit_data_is_literal_and_complete():
+    """RES-OP-03: what goes to the audit trail, every field, enums as their
+    TS 24.380 names."""
+    fc = _contended(Clock())
+    first, second = fc.history[0].as_record(), fc.history[1].as_record()
+    assert first == {
+        "sequence": 1, "floor_at_ms": 0,
+        "from_state": "start-stop", "to_state": "floor-taken",
+        "trigger": {"type": "session-established", "participant": "a",
+                    "floor_priority": 100, "timer": None, "detail": ""},
+        "actions": [
+            {"type": "floor-granted", "target": "a", "reason": None,
+             "revoke_reason": None, "timer": None, "duration_ms": None,
+             "queue_position": None},
+            {"type": "floor-taken", "target": None, "reason": None,
+             "revoke_reason": None, "timer": None, "duration_ms": None,
+             "queue_position": None},
+            {"type": "start-timer", "target": None, "reason": None,
+             "revoke_reason": None, "timer": "T1", "duration_ms": 4000,
+             "queue_position": None},
+        ],
+        "holder": "a", "queue": [],
+    }
+    revoke = [a for a in second["actions"] if a["type"] == "floor-revoke"]
+    assert revoke == [{"type": "floor-revoke", "target": "a", "reason": None,
+                       "revoke_reason": "media-burst-pre-empted", "timer": None,
+                       "duration_ms": None, "queue_position": None}]
+    assert second["to_state"] == "pending-revoke" and second["queue"] == ["b"]
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_the_observer_is_told_each_recorded_transition_and_only_those():
+    """Every recorded transition, as it is recorded; not a media report that
+    only restarts T1, which the history does not record either."""
+    told = []
+    fc = FloorControl(QUEUEING, clock=Clock(), observer=told.append)
+    establish(fc, "a")
+    media(fc, "a")                            # first media starts T2: recorded
+    media(fc, "a")                            # refresh only: not a transition
+    request(fc, "b")
+    release(fc, "zz")                         # ignored event: still recorded
+    assert told == list(fc.history)
+    assert [t.event.type for t in told] == [EventType.SESSION_ESTABLISHED,
+                                            EventType.MEDIA_RECEIVED,
+                                            EventType.FLOOR_REQUEST,
+                                            EventType.FLOOR_RELEASE]
 
 
 def test_history_records_actions_taken():
@@ -563,9 +688,11 @@ def test_policy_built_from_hook_floor_policy():
         override_allowed = False
         max_queue_depth = 5
         timers_ms = {T_STOP_TALKING: 1234}
+        preemption_at_full_queue = "insert"
 
     p = Policy.from_hook(FakeFloorPolicy())
     assert p.max_queue_depth == 5
+    assert p.preemption_at_full_queue == "insert"
     assert p.timer(T_STOP_TALKING) == 1234
 
 
@@ -868,3 +995,187 @@ def test_operator_revoke_uses_the_generic_cause():
     actions = fc.handle(Event(EventType.FLOOR_REVOKE, participant="a"))
     assert [a.revoke_reason for a in actions
             if a.type is ActionType.SEND_REVOKE] == [RevokeReason.OTHER]
+
+
+def _busy_floor(fc):
+    """Denials, a T2 revoke and its T8 resend, a T3 hand-over, T20 up to C20,
+    a pre-emption and a T1 expiry."""
+    establish(fc, "a", 100)
+    media(fc, "a")
+    for p in ("b", "b", "c", "d", "e"):
+        request(fc, p)
+    for timer in ("T2", "T8", "T3", "T20", "T20", "T20", "T20"):
+        expire(fc, timer)
+    request(fc, "f", 250)
+    for timer in ("T8", "T3", "T1"):
+        expire(fc, timer)
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_the_audit_feed_is_the_history_through_timers_denials_and_pre_emption():
+    """RES-OP-03 review: the feed was compared with the history on one short
+    sequence only. Here every recorded transition of a busy floor."""
+    told = []
+    fc = FloorControl(QUEUEING, clock=Clock(), observer=told.append)
+    _busy_floor(fc)
+    assert told == list(fc.history)
+    T, R = FloorState.TAKEN, FloorState.REVOKING
+    assert [(t.event.type.value, t.event.participant or t.event.timer, t.to_state,
+             t.holder, t.queue) for t in told] == [
+        ("session-established", "a", T, "a", ()),
+        ("media-received", "a", T, "a", ()),
+        ("floor-request", "b", T, "a", ("b",)),
+        ("floor-request", "b", T, "a", ("b",)),                   # keeps its place
+        ("floor-request", "c", T, "a", ("b", "c")),
+        ("floor-request", "d", T, "a", ("b", "c", "d")),
+        ("floor-request", "e", T, "a", ("b", "c", "d")),          # queue full
+        ("timer-expiry", "T2", R, "a", ("b", "c", "d")),
+        ("timer-expiry", "T8", R, "a", ("b", "c", "d")),
+        ("timer-expiry", "T3", T, "b", ("c", "d")),
+        ("timer-expiry", "T20", T, "b", ("c", "d")),
+        ("timer-expiry", "T20", T, "b", ("c", "d")),
+        ("timer-expiry", "T20", T, "b", ("c", "d")),              # C20 reached
+        ("timer-expiry", "T20", T, "b", ("c", "d")),
+        ("floor-request", "f", R, "b", ("f", "c", "d")),          # pre-emption
+        ("timer-expiry", "T8", R, "b", ("f", "c", "d")),
+        ("timer-expiry", "T3", T, "f", ("c", "d")),
+        ("timer-expiry", "T1", T, "c", ("d",)),
+    ]
+    denies = [a.reason.value for t in told for a in t.actions
+              if a.type is ActionType.SEND_DENY]
+    revokes = [a.revoke_reason.value for t in told for a in t.actions
+               if a.type is ActionType.SEND_REVOKE]
+    assert denies == ["queue-full"]
+    assert revokes == ["media-burst-too-long", "media-burst-too-long",
+                       "media-burst-pre-empted", "media-burst-pre-empted"]
+
+
+class _FailingAudit:
+    def __init__(self):
+        self.fail, self.written = False, []
+
+    def __call__(self, transition):
+        if self.fail:
+            raise OSError("audit store unavailable")
+        self.written.append(transition)
+
+
+def _state_of(fc):
+    return (fc.state, fc.holder, fc.queue, fc.running_timers(), fc.history)
+
+
+@pytest.mark.vp("VP1-FC-021")
+@pytest.mark.parametrize("step", [
+    lambda fc: request(fc, "c"),                 # queued
+    lambda fc: request(fc, "z", 250),            # pre-emption
+    lambda fc: release(fc, "a"),                 # the queue's head granted
+    lambda fc: expire(fc, "T2"),                 # revoke
+    lambda fc: media(fc, "a"),                   # first media: T2 starts
+    lambda fc: release(fc, "nobody"),            # ignored, still recorded
+], ids=["request", "pre-emption", "release", "timer", "first-media", "ignored"])
+def test_a_transition_whose_record_fails_is_undone(step):
+    """RES-OP-03 review: the transition was kept and its actions never sent,
+    so the floor moved on unannounced. Now it is undone, and done again once
+    the record can be written, with no gap in the sequence."""
+    audit = _FailingAudit()
+    fc = FloorControl(QUEUEING, clock=Clock(), observer=audit)
+    establish(fc, "a", 100)
+    request(fc, "b")
+    before = _state_of(fc)
+    audit.fail = True
+    with pytest.raises(OSError):
+        step(fc)
+    assert _state_of(fc) == before
+    audit.fail = False
+    actions = step(fc)
+    assert actions or fc.history[-1].event.participant == "nobody"
+    assert [t.sequence for t in fc.history] == [1, 2, 3]
+    assert audit.written == list(fc.history)
+
+
+_BUSY_STEPS = (
+    [lambda fc: establish(fc, "a", 100), lambda fc: media(fc, "a")]
+    + [(lambda p: lambda fc: request(fc, p))(p) for p in ("b", "b", "c", "d", "e")]
+    + [(lambda t: lambda fc: expire(fc, t))(t)
+       for t in ("T2", "T8", "T3", "T20", "T20", "T20", "T20")]
+    + [lambda fc: request(fc, "f", 250)]
+    + [(lambda t: lambda fc: expire(fc, t))(t) for t in ("T8", "T3", "T1")]
+)
+
+
+@pytest.mark.vp("VP1-FC-021")
+@pytest.mark.parametrize("failing", range(len(_BUSY_STEPS)))
+def test_a_failed_then_retried_step_leaves_no_trace_in_what_follows(failing):
+    """Undo is total: the busy floor with any one step's record failing once
+    and the step retried ends exactly as the floor where nothing failed --
+    every transition, action, counter and timer (C20, revoke causes and
+    priorities included)."""
+    def run(fail_at):
+        audit = _FailingAudit()
+        clock = Clock()
+        fc = FloorControl(QUEUEING, clock=clock, observer=audit)
+        for i, step in enumerate(_BUSY_STEPS):
+            if i == fail_at:
+                audit.fail = True
+                with pytest.raises(OSError):
+                    step(fc)
+                audit.fail = False
+            step(fc)
+            clock.advance(5)
+        return ([t.as_record() for t in fc.history], fc.running_timers(),
+                [t.as_record() for t in audit.written])
+
+    control = run(None)
+    assert run(failing) == control
+    assert control[0] == control[2]
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_a_final_transition_stands_when_its_record_fails():
+    """The session is ending, which the audit trail cannot stop: the floor
+    is released all the same, and the error still raised for the caller to
+    log (RES-OP-03 review)."""
+    audit = _FailingAudit()
+    fc = FloorControl(QUEUEING, clock=Clock(), observer=audit)
+    establish(fc, "a")
+    request(fc, "b")
+    audit.fail = True
+    with pytest.raises(OSError):
+        fc.handle(Event(EventType.SESSION_RELEASED), final=True)
+    assert (fc.state, fc.holder, fc.queue) == (FloorState.RELEASED, None, ())
+    assert fc.history[-1].event.type is EventType.SESSION_RELEASED
+
+
+@pytest.mark.vp("VP1-FC-013")
+def test_vp1_fc_013_a_profile_s_queue_is_bounded_and_drains_in_declared_order():
+    """With a profile's own floor policy (mcx prearranged-group, as its hook
+    returns it): requests beyond its max_queue_depth are denied, not dropped,
+    and the queue is granted in floor-priority order, then arrival order
+    (prior review gap of VP1-FC-013)."""
+    from core import loader
+    from core.hooks import MediaKind, Resolution, ResolutionKind, SessionRequest
+    lp = loader.load(ROOT / "profiles" / "mcx")
+    request_ = SessionRequest(request_id="q1", initiator="sip:h@mcptt.example",
+                              target="grp:alpha", call_type="prearranged-group",
+                              media=(MediaKind.VOICE,))
+    hook_policy = lp.hooks.session_policy.floor_policy(
+        request_, Resolution(kind=ResolutionKind.GROUP, members=("x",), group_id="g"))
+    fc = FloorControl(Policy.from_hook(hook_policy), clock=Clock())
+    depth = fc.policy.max_queue_depth
+    assert fc.policy.queueing_enabled and depth == 8
+    establish(fc, "holder", 255)                 # nothing outranks it
+    asks = [(f"p{i}", priority) for i, priority in
+            enumerate((10, 50, 10, 90, 50, 10, 90, 50, 70, 30))]
+    denied = []
+    for participant, priority in asks:
+        actions = request(fc, participant, priority)
+        denied += [a.target for a in actions if a.type is ActionType.SEND_DENY
+                   and a.reason is DenyReason.QUEUE_FULL]
+        assert len(fc.queue) <= depth
+    assert denied == ["p8", "p9"] and len(fc.queue) == depth
+    expected = [p for p, _ in sorted(asks[:depth], key=lambda a: (-a[1], asks.index(a)))]
+    granted = []
+    while fc.queue:
+        release(fc, fc.holder)
+        granted.append(fc.holder)
+    assert granted == expected == ["p3", "p6", "p1", "p4", "p7", "p0", "p2", "p5"]

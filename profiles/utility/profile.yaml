@@ -35,7 +35,8 @@ call_types:
     label: Field crew call
     # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
     mc_signature: {session_type: prearranged}
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: routine
@@ -50,6 +51,7 @@ call_types:
       queueing_enabled: true
       override_allowed: false
       max_queue_depth: 5
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 5000, T20: 100, T8: 1000, T3: 3000}
 
   - id: switching-order
@@ -59,13 +61,18 @@ call_types:
     # how to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
     # request it.
     mc_signature: null
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]
     session_model: on-demand
     urgency: safety-critical
     application: switching
     auto_answer: true
-    acknowledgement_required: true
+    # R1 carries out no acknowledged call (no required members, no TNG1):
+    # declared false so the data says what the platform does, until the
+    # procedure exists (PLT-RAIL-008, R3; PLT-VP-R1 RES-OP-13, owner ruling
+    # 2026-09-29).
+    acknowledgement_required: false
     recording_required: true
     max_participants: 4
     initiator_roles: [control-engineer]
@@ -74,15 +81,21 @@ call_types:
       queueing_enabled: false
       override_allowed: true
       max_queue_depth: 0
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {T2: 2000, T20: 100, T8: 1000, T3: 3000}
 
   - id: telemetry-session
     label: Grid telemetry session
     # MCData, not an MCPTT session.
     mc_signature: null
-    no_answer_s: 32               # = 64*T1, the limit before it was declared (SIP-OP-15)
+    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
+    group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [data]
-    session_model: pre-established
+    # R1 runs on-demand sessions only; this call type is pre-established by
+    # nature and returns to it when PLT-SIG-006 (R2) is implemented. Declared
+    # on-demand so the data says what the platform does (PLT-VP-R1 RES-OP-12,
+    # owner ruling 2026-09-29).
+    session_model: on-demand
     urgency: fault
     application: telemetry
     auto_answer: true
@@ -94,6 +107,7 @@ call_types:
       queueing_enabled: false
       override_allowed: false
       max_queue_depth: 0
+      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
       timers_ms: {}
 
 identity:

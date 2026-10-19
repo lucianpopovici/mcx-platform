@@ -98,7 +98,11 @@ def pki(tmp_path_factory):
              .serial_number(x509.random_serial_number())
              .not_valid_before(now - datetime.timedelta(minutes=1))
              .not_valid_after(now + datetime.timedelta(days=1))
-             .add_extension(x509.BasicConstraints(ca=ca, path_length=None), True))
+             .add_extension(x509.BasicConstraints(ca=ca, path_length=None), True)
+             .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+                 key.public_key()), False)
+             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                 issuer_key.public_key()), False))
         names = []
         if san:
             names += [x509.DNSName("localhost"),
@@ -125,6 +129,9 @@ def pki(tmp_path_factory):
           .not_valid_before(now - datetime.timedelta(minutes=1))
           .not_valid_after(now + datetime.timedelta(days=1))
           .add_extension(x509.BasicConstraints(ca=True, path_length=None), True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+              ca_key.public_key()), False)
+          .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), True)
           .sign(ca_key, hashes.SHA256()))
     write("ca", ca_key, ca)
     k, c = make("mcx-server", ca.subject, ca_key, san=True)
@@ -137,7 +144,10 @@ def pki(tmp_path_factory):
                .not_valid_before(now - datetime.timedelta(minutes=1))
                .not_valid_after(now + datetime.timedelta(days=1))
                .add_extension(x509.BasicConstraints(ca=True, path_length=0), True)
-               .sign(core_key, hashes.SHA256()))
+               .add_extension(x509.SubjectKeyIdentifier.from_public_key(
+              core_key.public_key()), False)
+          .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), True)
+          .sign(core_key, hashes.SHA256()))
     write("core-ca", core_key, core_ca)
     # plays a SIP core: issued by the core CA, and trusted by DNS name
     k, c = make("core-client", core_ca.subject, core_key, dns=("core-client.example",))
@@ -187,7 +197,11 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_TLS_CA": str(pki / "ca.crt"),
            "MCX_SIP_CLIENT_AUTH": "required",
            "MCX_SIP_ROLES": "controlling,participating",
-           "MCX_SESSION_EXPIRES": "1800",
+           "MCX_SESSION_EXPIRES_MS": "1800000",
+           "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
+           "MCX_FOREIGN_INITIATOR": "refuse",
+           "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
+           "MCX_LOCATION_REPORTS": "read",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
     env.update(over)
     return env
@@ -401,7 +415,8 @@ def test_guard_runs_before_anything_acts_on_the_request(core, rt):
     bad = msg("INVITE", U[1], "bad1", 1, U[0], U[1]).replace(b"CSeq: 1 INVITE\r\n", b"")
     core.on_bytes(bad, f)
     assert f.codes() == [400] and called == []
-    assert rt.store.audit_records() == []
+    # Nothing but the process's own startup record (owner ruling 2026-10-16).
+    assert [r["type"] for r in rt.store.audit_records()] == ["configuration-accepted"]
 
 
 def test_unknown_session_bye_is_answered_481(core):
@@ -466,6 +481,50 @@ def test_vp1_cc_004_auto_answer_establishes_without_callee_action(core, rt, worl
     assert world[U[0]].codes() == [100, 200]
     assert rt.store.has_session("auto1")
     assert rt.manager.session("auto1") is not None
+
+
+def _limit_decided(rt, limit):
+    """The runtime's decide() with the participant limit `limit`: a
+    substituted session policy, as the core sees one."""
+    import dataclasses as dc
+    sp = rt.manager._hooks.session_policy
+
+    class Policy:
+        def __getattr__(self, name):
+            return getattr(sp, name)
+
+        def decide(self, request, resolution):
+            return dc.replace(sp.decide(request, resolution), max_participants=limit)
+
+    rt.manager._hooks = dc.replace(rt.manager._hooks, session_policy=Policy())
+
+
+def _ok_to_originator(flow):
+    [ok] = [m for m in flow.messages()
+            if isinstance(m, ReceivedResponse) and m.code == 200]
+    return ok
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_group_call_over_its_limit_is_answered_with_warning_122(core, rt, world):
+    """TS 24.379 6.3.5.5 and 10.1.1.4.1: grp:alpha has 4 members; with a
+    limit of 3 the caller and u1, u2 take part, u3 is not invited, and the
+    200 OK says why (RES-OP-12)."""
+    _limit_decided(rt, 3)
+    core.on_bytes(invite("trunc1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    assert [len(world[u].requests("INVITE")) for u in U[1:]] == [1, 1, 0]
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[0], 200, SDP), world[U[1]])
+    assert world[U[0]].codes() == [100, 200]
+    assert _ok_to_originator(world[U[0]]).headers.get("Warning") == \
+        '399 mcptt.example "122 too many participants"'
+
+
+def test_a_group_call_within_its_limit_carries_no_warning(core, rt, world):
+    _limit_decided(rt, 4)
+    core.on_bytes(invite("whole1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    assert [len(world[u].requests("INVITE")) for u in U[1:]] == [1, 1, 1]
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[0], 200, SDP), world[U[1]])
+    assert _ok_to_originator(world[U[0]]).headers.get("Warning") is None
 
 
 def test_private_call_without_auto_answer_rings_then_answers(core, rt, world):
@@ -795,7 +854,9 @@ def test_client_auth_has_no_default_and_rejects_nonsense(tmp_path, pki, clock):
 def test_sip_disabled_when_no_listen_configured(tmp_path, pki):
     e = sip_env(tmp_path, pki)
     del e["MCX_SIP_LISTEN"]
-    from service.config import Config
+    from service.config import SIP_ONLY, Config
+    for key in SIP_ONLY:          # refused without SIP (owner ruling 2026-10-16)
+        e.pop(key, None)
     assert Config.from_env(e).sip is None
 
 
@@ -1547,8 +1608,9 @@ def test_a_cancelled_leg_that_rings_again_stays_out_of_the_call(core, rt, world,
 
 
 def test_the_core_takes_each_call_types_ring_limit_from_the_profile(core, rt):
-    assert core._no_answer_s == {ct.id: ct.no_answer_s
-                                 for ct in rt.loaded.profile.call_types}
+    assert core._no_answer_ms == {ct.id: ct.no_answer_ms
+                                  for ct in rt.loaded.profile.call_types}
+    assert set(core._no_answer_ms.values()) == {32_000}
 
 
 def _ringing_private_call(core, world, cid):
@@ -1559,7 +1621,7 @@ def _ringing_private_call(core, world, cid):
 
 
 def test_a_short_ring_limit_cancels_early(core, world, clock):
-    core._no_answer_s["private"] = 5
+    core._no_answer_ms["private"] = 5_000
     _ringing_private_call(core, world, "nl1")
     clock.now += 4999
     core.tick()
@@ -1573,7 +1635,7 @@ def test_a_short_ring_limit_cancels_early(core, world, clock):
 def test_a_long_ring_limit_outlasts_timer_b(core, rt, world, clock):
     """In 'Proceeding' Timer B does not run (RFC 3261 17.1.1.2), so a call
     type may let members ring longer than 64*T1."""
-    core._no_answer_s["private"] = 60
+    core._no_answer_ms["private"] = 60_000
     _ringing_private_call(core, world, "nl2")
     clock.now += 59_999
     core.tick()
@@ -1587,7 +1649,7 @@ def test_a_long_ring_limit_outlasts_timer_b(core, rt, world, clock):
 def test_a_member_that_never_rings_still_meets_timer_b(core, world, clock):
     """In 'Calling' (no provisional) Timer B still ends the INVITE at 64*T1,
     however long the call type lets members ring."""
-    core._no_answer_s["private"] = 60
+    core._no_answer_ms["private"] = 60_000
     core.on_bytes(invite("nl3", U[0], U[1], "private"), world[U[0]])
     clock.now += 64 * 500
     core.tick()
@@ -1923,3 +1985,163 @@ def test_a_cancel_from_another_connection_is_refused(core, rt, world):
     core.on_bytes(_cancel_from_initiator("dc1"), other)
     assert other.codes() == [481]
     assert 487 not in world[U[0]].codes()
+
+
+def test_a_release_sends_its_byes_when_the_store_cannot_mark_it(core, rt, world, caplog):
+    """RES-OP-03 review: the store row was marked before the signals were
+    sent, so a store that failed kept the other parties' legs up."""
+    core.on_bytes(invite("rel1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[0], 200, SDP), world[U[1]])
+    sent = []
+    handler = rt.on_signals
+    rt.on_signals = lambda session, signals: sent.extend(signals) or handler(session, signals)
+
+    def down(*_):
+        raise OSError("audit store unavailable")
+
+    rt.store.mark_released = down
+    signals = rt.release("rel1")
+    assert signals and list(signals) == sent
+    assert {s.target for s in sent if s.type.value == "bye"} == set(U)   # every member
+    [lost] = [r for r in caplog.records
+              if "rel1: released, but its store row was not marked released"
+              in r.getMessage()]
+    assert lost.correlation_id == "rel1"          # RES-OP-04
+
+    # RES-OP-04: the SIP timers run each call in its scope.
+    from service import logs
+    seen = []
+    real = core._dialog_gone
+    core._dialog_gone = lambda call, leg, cause: (seen.append((call.cid, logs.current())),
+                                                  real(call, leg, cause))
+    core.on_bytes(invite("tmr1", U[0], U[1], "private"), world[U[0]])
+    core.on_bytes(answer(world[U[1]].requests("INVITE")[-1], 200, SDP), world[U[1]])
+    core.clock.now += 2_000_000                   # past MCX_SESSION_EXPIRES_MS
+    core.tick()
+    assert "tmr1" in {c for c, _ in seen}
+    assert all(cid == scope for cid, scope in seen)
+
+
+@pytest.mark.vp("VP1-OAM-004")
+def test_a_message_is_handled_in_the_scope_of_its_session(core, world, caplog):
+    """RES-OP-04: everything logged while a message is handled carries the
+    session it belongs to. A request: the call its Call-ID names (a new
+    INVITE's Call-ID is the session's id); a stray one, none. A response:
+    its call once matched to the platform's own request; a response any peer
+    could send with a live call's Call-ID, before that, none."""
+    import logging
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())   # as the service's handler
+    core.on_bytes(invite("scope1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    leg = world[U[1]].requests("INVITE")[0]
+    seen = []
+    real_request, real_matched = core._on_request, core._on_matched_response
+    core._on_request = lambda m, f: (seen.append(logs.current()), real_request(m, f))
+    core._on_matched_response = lambda t, r, f: (seen.append(logs.current()),
+                                                 real_matched(t, r, f))
+    try:
+        core.on_bytes(answer(leg, 180), world[U[1]])                        # a leg's
+        core.on_bytes(msg("BYE", LOCAL, "scope1", 2, U[0], LOCAL,
+                          to_tag="nomatch"), world[U[0]])                   # the caller's
+        core.on_bytes(invite("scope2", U[1], "grp:alpha", "emergency-group"),
+                      world[U[1]])                                          # a new one
+        core.on_bytes(msg("BYE", LOCAL, "nobody", 2, U[0], LOCAL,
+                          to_tag="x"), world[U[0]])                         # stray
+        core.on_bytes(msg("INVITE", LOCAL, "nobody2", 3, U[0], LOCAL,
+                          to_tag="x"), world[U[0]])          # a stray re-INVITE
+        # U[2]'s leg of the live call scope2, answered from U[3]'s connection:
+        # not the platform's request's, so dropped -- and logged as no
+        # session's, though its Call-ID is a live call's.
+        live = world[U[2]].requests("INVITE")[-1]
+        assert core._cid_of(live.headers.get("Call-ID")) == "scope2"
+        with caplog.at_level(logging.INFO, logger="mcx.sip"):
+            core.on_bytes(answer(live, 180), world[U[3]])
+    finally:
+        core._on_request, core._on_matched_response = real_request, real_matched
+    assert seen == ["scope1", "scope1", "scope2", None, None]
+    assert logs.current() is None
+    assert leg.headers.get("Call-ID") != "scope1"      # the leg has its own
+    [dropped] = [r for r in caplog.records if "dropped" in r.getMessage()]
+    assert dropped.correlation_id is None             # stamped, and no session's
+
+
+@pytest.mark.vp("VP1-OAM-004")
+def test_a_leg_s_transaction_timeout_is_handled_in_its_call_s_scope(core, world):
+    """RES-OP-04 review: the client transaction timers' scope was untested.
+    An unanswered leg's INVITE times out (Timer B) inside its call's scope."""
+    from service import logs
+    core.on_bytes(invite("tb1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    seen = []
+    real = core._client_timeout
+    core._client_timeout = lambda ctxn: (seen.append(logs.current()), real(ctxn))
+    core.clock.now += 40_000                      # past 64*T1
+    core.tick()
+    assert seen and set(seen) == {"tb1"}
+
+
+def test_a_fault_in_one_call_s_timers_is_logged_in_its_scope_and_contained(
+        core, world, caplog):
+    """RES-OP-04 review: a fault ending one call escaped its scope, was logged
+    as a bare "tick fault" and skipped every other call's timers."""
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())   # as the service's handler
+    for cid in ("f1", "f2"):
+        core.on_bytes(invite(cid, U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    for req in world[U[1]].requests("INVITE"):
+        core.on_bytes(answer(req, 200, SDP), world[U[1]])
+    ended = []
+    real = core._end
+
+    def end(call, **kw):
+        ended.append(call.cid)
+        if call.cid == "f1":
+            raise RuntimeError("store down")
+        return real(call, **kw)
+
+    core._end = end
+    core.clock.now += 40_000                      # no ACK from the caller
+    core.tick()
+    assert sorted(ended) == ["f1", "f2"]
+    [fault] = [r for r in caplog.records if r.getMessage().startswith("ending call f1")]
+    assert fault.correlation_id == "f1" and fault.exc_info
+
+
+def test_a_fault_in_one_call_s_transaction_timeout_is_contained(core, world, caplog):
+    """RES-OP-04 review: logged in that call's scope; the other calls'
+    timed-out transactions are still handled."""
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())
+    for cid in ("g1", "g2"):
+        core.on_bytes(invite(cid, U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    handled = []
+    real = core._client_timeout
+
+    def timeout(ctxn):
+        handled.append(logs.current())
+        if logs.current() == "g1":
+            raise RuntimeError("store down")
+        return real(ctxn)
+
+    core._client_timeout = timeout
+    core.clock.now += 40_000
+    core.tick()
+    assert handled.count("g1") == 3 and handled.count("g2") == 3     # three legs each
+    faults = [r for r in caplog.records
+              if r.getMessage() == "client transaction timeout handling failed"]
+    assert len(faults) == 3 and {r.correlation_id for r in faults} == {"g1"}
+
+
+def test_a_fault_escaping_a_request_is_logged_in_its_scope_not_raised(core, world, caplog):
+    """RES-OP-04 review: it ended the connection's reader thread with a
+    traceback that was not JSON and named no call."""
+    from service import logs
+    caplog.handler.addFilter(logs.CorrelationFilter())
+    core.on_bytes(invite("h1", U[0], "grp:alpha", "emergency-group"), world[U[0]])
+
+    def broken(req, flow):
+        raise RuntimeError("unguarded")
+
+    core._on_request = broken
+    core.on_bytes(msg("BYE", LOCAL, "h1", 2, U[0], LOCAL, to_tag="t"), world[U[0]])
+    [fault] = [r for r in caplog.records if r.getMessage() == "fault handling a BYE request"]
+    assert fault.correlation_id == "h1" and fault.exc_info

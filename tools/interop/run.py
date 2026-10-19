@@ -143,7 +143,13 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         "MCX_SIP_CLIENT_AUTH": "optional",
         "MCX_SIP_ROLES": "participating,controlling",
         # RFC 4028 (SIP-OP-17): short, so a run can see a refresh.
-        "MCX_SESSION_EXPIRES": "90",
+        "MCX_SESSION_EXPIRES_MS": "90000",
+        # The decisions of PLT-VP-R1, stated as the deployment settings they
+        # are since 2026-10-16. Plain HTTP: the harness reads /healthz.
+        "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
+        "MCX_FOREIGN_INITIATOR": "refuse",
+        "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
+        "MCX_LOCATION_REPORTS": "read",
         # The core under test authenticates its users; by its certificate's
         # DNS name and issuer it may assert their identities (ICD-OP-08,
         # ICD-OP-10). Both are network data.
@@ -214,6 +220,17 @@ def start_asterisk(work: Path, core_port: int, platform_port: int) -> Proc:
                     if _dir_exists(p, "asterisk")), None)
     if modules is None:
         raise RuntimeError("asterisk module directory not found")
+    # Asterisk's CLI reaches the daemon through a Unix socket in astrundir,
+    # and a socket path holds at most 107 bytes (sun_path is 108, with the
+    # NUL). Past that the daemon creates no socket, or a truncated one that
+    # works only while client and daemon happen to truncate alike; the CLI
+    # then answers nothing, and the scenario reports registrations missing
+    # that are there.
+    ctl = work / "asterisk-run" / "asterisk.ctl"
+    if len(str(ctl).encode()) > 107:
+        raise RuntimeError(
+            f"--workdir is too long for Asterisk's control socket ({ctl}, "
+            f"{len(str(ctl).encode())} bytes; at most 107): use a shorter one")
     for d in ("asterisk-etc", "asterisk-var", "asterisk-spool", "asterisk-run",
               "asterisk-log"):
         (work / d).mkdir(exist_ok=True)

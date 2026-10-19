@@ -175,7 +175,7 @@ def from_pytest(outcomes: Dict[str, dict]) -> List[Evidence]:
 
 def from_gates(output: str) -> List[Evidence]:
     out = []
-    for m in re.finditer(r"^(PASS|FAIL)\s+(VP1-BND-\d{3})\b", output, re.M):
+    for m in re.finditer(r"^(PASS|FAIL)\s+(VP1-[A-Z]+-\d{3})\b", output, re.M):
         out.append(Evidence(f"gate:{m.group(2)}",
                             "passed" if m.group(1) == "PASS" else "failed",
                             (m.group(2),)))

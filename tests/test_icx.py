@@ -144,6 +144,62 @@ def test_outbound_assertion_is_advisory_and_labelled(wired):
     assert asserted["scope"] == "public-safety"
 
 
+def _with_outbound(mcx, map_outbound):
+    """`wired`, with the partner gateway's map_outbound replaced."""
+    import dataclasses as dc
+    from core.loader import LoadedProfile
+    gw = mcx.hooks.interconnection_gateway
+
+    class Gateway:
+        def __getattr__(self, name):
+            return getattr(gw, name)
+
+        def map_outbound(self, request, priority):
+            return map_outbound(gw.map_outbound(request, priority))
+
+    resolver = mcx.hooks.identity_resolver
+    for i in range(3):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    sink = MemorySink()
+    lp = LoadedProfile(profile=mcx.profile, source=mcx.source,
+                       hooks=dc.replace(mcx.hooks, interconnection_gateway=Gateway()))
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()),
+                          clock=Clock()), sink
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_the_outbound_assertion_is_an_audited_invocation(wired):
+    """map_outbound went uninvoked by the Invoker: no deadline, no record of
+    what the partner was told (ICD-GEN-040/041, RES-OP-02 review)."""
+    manager, sink, _ = wired
+    manager.establish(req("icx:rail:sip:c1@frmcs.example"))
+    [record] = [r for r in sink.of_type(RecordType.HOOK_INVOCATION)
+                if r.detail["method"] == "map_outbound"]
+    assert record.detail["interface"] == "IF-ICX"
+    assert record.detail["outcome"] == "ok"
+    assert record.detail["returned"]["label"] == "normal-private"
+    assert record.detail["returned"]["scope"] == "public-safety"
+
+
+def test_a_failing_outbound_assertion_fails_before_qos_is_reserved(mcx):
+    def boom(_):
+        raise RuntimeError("partner table corrupt")
+
+    manager, sink = _with_outbound(mcx, boom)
+    session, signals, refusal = manager.establish(req("icx:rail:sip:c1@frmcs.example"))
+    assert session is None and refusal.reason_code == "hook-error"
+    assert SignalType.RESERVE_QOS not in types(signals)
+    assert SignalType.INVITE not in types(signals)
+    assert sink.of_type(RecordType.SESSION_FAILED)[-1].detail["interface"] == "IF-ICX"
+
+
+def test_an_outbound_assertion_the_audit_cannot_record_is_refused(mcx):
+    from types import MappingProxyType
+    manager, sink = _with_outbound(mcx, lambda m: MappingProxyType(dict(m)))
+    session, _, refusal = manager.establish(req("icx:rail:sip:c1@frmcs.example"))
+    assert session is None and refusal.reason_code == "hook-contract-violation"
+
+
 # --------------------------------------------------------------------------
 # Inbound priority mapping — the adversarial core of the design
 # --------------------------------------------------------------------------

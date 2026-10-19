@@ -1,8 +1,8 @@
 # Mission-critical services platform — Software Requirements Specification
 
 **Document:** PLT-SRS
-**Version:** 0.4 (draft)
-**Date:** 2026-09-26
+**Version:** 0.5 (draft)
+**Date:** 2026-10-18
 **Status:** Draft for review — not baselined
 
 ---
@@ -149,7 +149,7 @@ profile-aware core behaviour is a defect in this document.
 | PLT-GEN-008 | R1 | The platform shall expose the loaded profile's name, version and content hash on its health endpoint. | T |
 | PLT-GEN-009 | R1 | The platform shall operate correctly with no persistent state beyond its configured stores, such that any instance may be restarted without loss of committed session records. | T |
 | PLT-GEN-010 | R2 | The platform shall support horizontal scaling of participating functions without session affinity to a specific instance. | T |
-| PLT-GEN-011 | R1 | All time values in configuration and logs shall be UTC; all durations shall be expressed in milliseconds. | I |
+| PLT-GEN-011 | R1 | All time values in configuration and logs shall be UTC. Every duration in configuration may be stated in milliseconds or in seconds; where both are stated, the milliseconds apply and a disagreement is reported. Logs and audit records state durations in milliseconds. | I |
 
 ---
 
@@ -588,6 +588,7 @@ requirements below are written as constraints on what a partner cannot do.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.5 | 2026-10-18 | PLT-GEN-011 amended by owner decision: a duration in configuration may be stated in milliseconds or in seconds (the milliseconds apply when both are stated; a disagreement is reported); logs and audit records keep milliseconds (PLT-VP-R1 RES-OP-09). |
 | 0.4 | 2026-09-26 | OP-06 closed: the codec set is decided and the same for every profile. |
 | 0.3 | 2026-09-25 | PLT-GEN-001 revised by decision: one codebase, one release image per profile, the core byte-identical across images (was: a single image carrying every profile). §1.1 and PLT-VER-001 follow. Each delivery now contains only the profile its deployment uses. |
 | 0.2 | 2026-09-19 | Added §14A (PLT-ICX, 26 requirements) for interconnection with partner MC systems, distinct from interworking. R3 exit criterion extended. |

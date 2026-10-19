@@ -33,6 +33,14 @@ ADHOC_TOO_MANY_PARTICIPANTS = "adhoc-too-many-participants"
 # The identity a request asserts is not one its connection authenticated
 # (PLT-ICD-001 ICD-OP-08; PLT-IDM-004 in its R1 form).
 IDENTITY_NOT_AUTHENTICATED = "identity-not-authenticated"
+# More participants than the session decision allows, in a session that is
+# not a group call it could truncate (PLT-ICD-001 §5.2; PLT-VP-R1 RES-OP-12).
+PARTICIPANT_LIMIT_EXCEEDED = "participant-limit-exceeded"
+# The initiator is not within the profile's declared domains (PLT-IDM-008;
+# PLT-VP-R1 RES-OP-11, owner ruling 2026-10-17: MCX_FOREIGN_INITIATOR=refuse).
+# TS 24.379 answers a participating function that cannot associate the
+# caller with an MCPTT ID with 404 and warning 141.
+INITIATOR_NOT_SERVED = "initiator-not-served"
 
 RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
     {
@@ -54,6 +62,8 @@ RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
         ADHOC_PARTICIPANTS_UNDETERMINED,
         ADHOC_TOO_MANY_PARTICIPANTS,
         IDENTITY_NOT_AUTHENTICATED,
+        PARTICIPANT_LIMIT_EXCEEDED,
+        INITIATOR_NOT_SERVED,
     }
 )
 
@@ -73,6 +83,8 @@ CORE_ORIGINATED: FrozenSet[str] = frozenset(
         # code is raised by a resolver, so a profile may declare it.
         ADHOC_TOO_MANY_PARTICIPANTS,
         IDENTITY_NOT_AUTHENTICATED,
+        PARTICIPANT_LIMIT_EXCEEDED,
+        INITIATOR_NOT_SERVED,
     }
 )
 

@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.19 (draft)
-**Date:** 2026-09-29
+**Version:** 0.24 (draft)
+**Date:** 2026-10-18
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -63,7 +63,7 @@ be handled gracefully: the core fails the session and records the violation
 
 | ID | Rule |
 |---|---|
-| ICD-GEN-010 | The core shall apply a deadline to every hook invocation. Default budgets: IF-IDR 50 ms, IF-PRI 5 ms, IF-SES 5 ms, IF-BER 10 ms, IF-IWF 20 ms, IF-ICX 20 ms. |
+| ICD-GEN-010 | The core shall apply a deadline to every hook invocation. Default budgets: IF-IDR 50 ms, IF-PRI 5 ms, IF-SES 5 ms, IF-BER 10 ms, IF-IWF 20 ms, IF-ICX 20 ms. (Before v0.20 the core applied none to IF-ICX, and called IF-ICX `map_outbound` and IF-PRI `compare` outside its invocation boundary, unaudited and without a deadline.) |
 | ICD-GEN-011 | On deadline expiry the core shall abandon the invocation, fail the session with `hook-timeout`, and record the interface and elapsed time. |
 | ICD-GEN-012 | The core shall not retry a timed-out invocation on the session-establishment path. |
 | ICD-GEN-013 | Budgets are deployment-configurable downward but not upward beyond the §6 latency allowance of PLT-SRS. |
@@ -91,7 +91,7 @@ be handled gracefully: the core fails the session and records the violation
 | ID | Rule |
 |---|---|
 | ICD-GEN-040 | Every invocation shall be recorded with interface ID, session correlation ID, elapsed time and outcome (PLT-OAM-002). |
-| ICD-GEN-041 | Returned decisions shall be recorded in full. A decision absent from the audit trail cannot be relied on in a safety case. |
+| ICD-GEN-041 | Returned decisions shall be recorded in full. A decision absent from the audit trail cannot be relied on in a safety case. **Since v0.20** (PLT-VP-R1 RES-OP-02): each invocation's record carries `returned`, every field of what the hook returned as plain data, whether the value was used or refused by its POST check; a hook that raised, or timed out under an enforced deadline, returned nothing, and nothing is recorded (an overrun measured after the call returned is recorded as usual). Only exact types are rendered: the value classes and enums of `core/hooks.py`, `str`, `int`, `bool`, `None`, a finite `float`, and dicts with string keys, tuples, lists and frozensets of these. Anything else, a subclass included, could show the audit one thing and the core another, or run the profile's code inside the audit, so a value holding one is refused as `hook-contract-violation`: the core never acts on a decision the trail does not hold exactly. Free-form maps such as a path's `attributes` are recorded like any other field, so a profile shall not put key material or credentials in them (PLT-SEC-009). |
 | ICD-GEN-042 | Hooks shall not log. Observability is the core's responsibility, so that one correlation scheme covers all interfaces. |
 
 ### 2.6 Call-type signatures (declared data, not a hook)
@@ -131,18 +131,39 @@ was 32 s for every call type, because that is 64·T1 (RFC 3261 Timer B), a
 transport constant nobody chose.
 
 ```yaml
-no_answer_s: 32        # seconds an invited member may ring
+no_answer_ms: 32000    # milliseconds an invited member may ring
+# or: no_answer_s: 32  # in seconds (PLT-GEN-011)
 ```
 
 | ID | Rule |
 |---|---|
-| ICD-RNG-001 | `no_answer_s` is required on every call type: an integer of at least 1 second, with no default and no upper bound. An absent key, a non-integer (booleans included) or a value below 1 is a load error. |
+| ICD-RNG-001 | Every call type states the limit as `no_answer_ms` (an integer number of milliseconds, at least 1000), or `no_answer_s` (an integer number of seconds, at least 1), or both (PLT-GEN-011 as amended); no default and no upper bound. Neither key, a non-integer (booleans included) or a value below its minimum in either key stated is a load error. With both, `no_answer_ms` is used; if it is not `no_answer_s` × 1000, the disagreement is reported at startup as a warning (log, health document, startup audit record). |
 | ICD-RNG-002 | The limit is counted from the INVITE the core sends each member. When the member's first provisional response arrives, the INVITE enters 'Proceeding' and Timer B stops (RFC 3261 17.1.1.2). The deadline is then the limit. If the limit expires while the member rings, the core CANCELs that member (9.1). |
 | ICD-RNG-003 | A member that has sent no provisional ('Calling') is still ended by Timer B at 64·T1, whatever the limit, because a CANCEL may not be sent before a provisional (9.1). A limit longer than 64·T1 therefore applies only to members that ring. |
 | ICD-RNG-004 | A member that reaches the limit counts as failed for the call. The call fails only if no other member is still invited or answered (the existing rule). |
 
-All three in-tree profiles declare 32 for every call type, which keeps the
+All three in-tree profiles declare 32000 for every call type, which keeps the
 previous behaviour. The value per call type is the profile owner's choice.
+
+**Over the participant limit (since v0.22).** Each call type also declares
+what happens to a group call whose session decision allows fewer
+participants than the group has (§5.2), and each floor policy declares a
+pre-emptor's place at a full queue (§5.3 POST-5):
+
+```yaml
+group_over_limit: truncate      # or refuse
+floor:
+  preemption_at_full_queue: deny   # or insert
+```
+
+| ID | Rule |
+|---|---|
+| ICD-LIM-001 | `group_over_limit` is required on every call type, `truncate` or `refuse`, with no default. Anything else, or an absent key, is a load error. |
+| ICD-LIM-002 | `floor.preemption_at_full_queue` is required in every floor policy, `insert` or `deny`, with no default. Anything else, or an absent key, is a load error. |
+| ICD-LIM-003 | `refuse` and `deny` depart from TS 24.379 6.3.5.5 and TS 24.380 6.3.4.4.7 item 2e respectively. A profile may declare them; the service reports each one at startup (log, health document `deviations`, and the `configuration-accepted` audit record). |
+
+The in-tree profiles declare `truncate` and `deny` everywhere: the decisions
+as they stood (PLT-VP-R1 RES-OP-12 ruling 1, FC-OP-07).
 
 
 ### 2.8 Network profile (deployment data, not a hook and not the service profile)
@@ -365,6 +386,7 @@ profile knowledge, so it is a hook. `SessionRequest` gains
 3. Antisymmetric: `sign(compare(a,b)) == -sign(compare(b,a))`.
 4. Transitive within a scope.
 5. Reflexive as equality: `compare(a,a) == 0`.
+6. Returns an `int` (not a `bool`). The core checks this one (since v0.20).
 
 **INV**
 1. `0` means *no relation*, not *equal*. The core never pre-empts on `0`, so an
@@ -449,8 +471,14 @@ may raise `HookContractViolation`. The in-tree policy does.
 **PRE** Called only after `admit` returned `permitted=True`.
 
 **POST**
-1. `model` is consistent with the call type's declared session model.
-2. `max_participants`, if set, is ≥ 1; `None` means unlimited.
+1. `model` is consistent with the call type's declared session model. Since
+   v0.21 this is read as *equal to*: the model is declared per call type and
+   nothing else could make another one consistent (see ICD-OP-15 for R2).
+2. `max_participants`, if set, is ≥ 1; `None` means unlimited. It counts the
+   session's participants: for a group, its members, the initiator among them
+   when a member (TS 24.379 6.3.5.5 NOTE 2, `<on-network-max-participant-count>`);
+   for an ad hoc call, the users invited, the caller not counted (17.4.2.2
+   step 6, `<max-no-participants>`).
 3. `recording_required=True` binds: the core refuses establishment if recording
    is unavailable (PLT-OAM-008).
 
@@ -458,6 +486,40 @@ may raise `HookContractViolation`. The in-tree policy does.
 1. The core applies the decision verbatim (PLT-CC-005). It does not infer
    auto-answer from urgency, or recording from call type.
 2. The decision is immutable for the session.
+
+**Checked and applied by the core (since v0.21, PLT-VP-R1 RES-OP-12).** The
+returned value must be a `SessionDecision` with boolean flags that satisfies
+POST-1 and POST-2, or the session fails with `hook-contract-violation`. The
+participant limit is the decision's, applied by the core; admission does not
+apply it. A session over it:
+
+- a group call (a `GROUP` resolution, for a call type that is not a private
+  call) whose call type declares `group_over_limit: truncate` is **not
+  refused**: only `max_participants` participants take part,
+  the initiator always among them when a member and the others in the
+  resolver's order, and the 200 OK to the originator carries warning
+  `122 too many participants` (6.3.5.5, 10.1.1.4.1). The platform has no
+  `<on-network-required>` members; which members to prefer is otherwise
+  operator policy (6.3.5.5 NOTE 3), which the resolver states by its order.
+  IF-SES `floor_policy` and IF-BER `select` see the members that take part;
+  A limit that would leave only the initiator (1, on a group the initiator
+  belongs to) invites no one, and is refused instead, `participant-limit-exceeded`;
+- a group call whose call type declares `group_over_limit: refuse` (since
+  v0.22, a recorded deviation from 6.3.5.5, reported at startup) is refused
+  `participant-limit-exceeded`, SIP 486 with warning 122;
+- an ad hoc call is refused, `adhoc-too-many-participants` (warning 189);
+- anything else (a private call whose target resolved to a group, a broadcast
+  area) is refused, `participant-limit-exceeded`: SIP 486 with warning
+  `122 too many participants`, the pairing TS 24.379 10.1.2 uses for a call
+  already at its limit. Before v0.21 these were `capacity-exhausted`, which
+  renders as 503 "maximum number of sessions reached": a server condition, and
+  one a caller may retry.
+
+A routed or partner session has no local members, and the limit is not
+applied to it here. One exception reads the call type's declared limit rather
+than the decision's: 17.4.2.2 step 6 checks an ad hoc caller's list against
+the configured `<max-no-participants>` before step 12 determines the
+participants, and `decide` cannot be asked before then.
 
 ### 5.3 `floor_policy(request, resolution) -> FloorPolicy`
 
@@ -468,14 +530,35 @@ data-only sessions.
 1. `queueing_enabled=False` → `max_queue_depth == 0`.
 2. `queueing_enabled=True` → `max_queue_depth ≥ 1`.
 3. `timers_ms` keys are TS 24.380 timer names. Unknown keys are a contract
-   violation, detected at profile validation.
+   violation, detected at profile validation. (In a profile's
+   `call_types[].floor`, a timer may also be stated in seconds, `timers_s`,
+   PLT-GEN-011 as amended: with both, the milliseconds apply and a
+   disagreement is warned of at startup. `FloorPolicy.timers_ms` returned by
+   the hook is in milliseconds only.)
 4. Omitted timers take the core's specification defaults.
+5. `preemption_at_full_queue` is `"insert"` or `"deny"` (since v0.22). It
+   decides a pre-emptor's place when the queue is already at
+   `max_queue_depth` and the pre-emptor is not in it: `insert` follows TS
+   24.380 6.3.4.4.7 item 2e, putting it in front of every queued request, one
+   entry beyond the declared depth until it is granted; `deny`, a recorded
+   deviation (PLT-VP-R1 FC-OP-07), treats it as an ordinary request, denied
+   queue-full, and the talker keeps the floor. It takes effect only where
+   queueing and override are both enabled. With `insert`, the declared depth
+   bounds the ordinary entries; the pre-emptor in front is the one beyond it.
+   It must equal the call type's declared `floor.preemption_at_full_queue`
+   (checked by the core): what the service reports at startup is what runs.
+   The startup report lists `deny` where the call type declares queueing and
+   override; a hook that enables both where the declaration does not has the
+   deviation named in that session's `session-established` record
+   (`deviations`).
 
 **Checked by the core (since v0.19, PLT-VP-R1 RES-OP-07).** Profile
 validation checks the in-tree floor tables. The core also checks what the hook
 returns, so a hook that computes its policy is held to the same contract: the
 value is a `FloorPolicy` itself, not an object shaped like one; its flags are
-booleans; `max_queue_depth` is an integer and satisfies POST-1 and POST-2; and
+booleans; `max_queue_depth` is an integer and satisfies POST-1 and POST-2;
+`preemption_at_full_queue` is one of POST-5's two strings and the call type's
+declared one; and
 each `timers_ms` entry names a timer in POST-3's set with a positive integer of
 milliseconds. A failure is `hook-contract-violation` on IF-SES, before any
 bearer is selected or QoS reserved.
@@ -585,6 +668,8 @@ refused here. Whether POST-5 also covers the vulnerability flag is ICD-OP-14.
 ### 8.1 Session establishment — normal
 
 ```
+-  core: initiator within the declared domains (MCX_FOREIGN_INITIATOR=refuse, v0.23)
+   ── if not: refuse initiator-not-served (404 + 141), stop — no hook runs ──
 0  IF-IDR.identities_of(initiator)             → the initiator's roles (§3.4)
 0  IF-SES.authorise(request without target)     → Admission   (v0.13, §5.0)
    ── if not permitted: reject, stop — nothing about the target looked up ──
@@ -681,6 +766,8 @@ they may not redefine these.
 | `hook-contract-violation` | core | Returned value failed a POST check |
 | `adhoc-participants-undetermined` | core, IF-IDR | Ad hoc participants cannot be determined (TS 24.379 warning 187) |
 | `adhoc-too-many-participants` | core | Ad hoc participants over the call type's limit (warning 189) |
+| `participant-limit-exceeded` | core | More participants than the session decision allows, in a session that is not a group call the core can truncate (§5.2; SIP 486, warning 122). Since v0.21 |
+| `initiator-not-served` | core | The initiator is not within the profile's declared domains, and the deployment states `MCX_FOREIGN_INITIATOR=refuse` (PLT-IDM-008; PLT-VP-R1 RES-OP-11). Checked before step 0, so no hook runs; SIP 404 with warning `141 user unknown to the participating function`, as TS 24.379 answers a caller the participating function has no MCPTT ID for (10.1.1.3.1.1 step 2a, 11.1.1.3.1.1 step 4). Not applied to a request a gateway relays through the IF-IWF API (§7.2); a gateway's INVITE over SIP is subject to it. Since v0.23 |
 
 `hook-contract-violation` is distinguished from `hook-error` deliberately: the
 first indicates a profile defect and should be alertable, the second may be an
@@ -718,6 +805,7 @@ environmental condition.
 | ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. | before a two-digit-MNC deployment |
 | ICD-OP-13 | **From v0.13.** A request relayed by a gateway (§7.2) has two weaknesses. (1) Its audit trail records `session-admitted` before §8.1 runs, so a request refused at step 0 shows "admitted" and then "refused". (2) The gateway may name a local user as the initiator, and step 0 then authorises it with that user's roles. The gateway's word is taken for who is calling. Both predate v0.13. The remedy for the second is to authorise gateway-originated requests on the gateway's own rights. | R4 start |
 | ICD-OP-14 | **From v0.19.** §6.1 POST-5 says the ARP pre-emption *flags* are consistent with the priority decision, but states only capability. A bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` is accepted, and makes the session immune to network pre-emption that IF-PRI left it open to. Decide whether POST-5 covers vulnerability (a major change: it tightens a POST, and every in-tree bearer rule must then agree with its priority rule). Related: IF-PRI's own decision is not checked by the core, and the 5QI is checked only as an integer, in profile validation and at runtime alike (TS 23.501 values are 0 to 255). | R2 start |
+| ICD-OP-15 | **From v0.21.** §5.2 POST-1 is read as equality, and R1 runs on-demand sessions only (the in-tree call types that are pre-established or broadcast by nature are declared on-demand until their release, PLT-VP-R1 RES-OP-12). In TS 24.379, falling back to on-demand when no pre-established session exists is ordinary, and equality forbids a hook from choosing it. Revisit POST-1 with PLT-SIG-006 (pre-established sessions). | R2 start |
 
 ---
 
@@ -725,6 +813,11 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.24 | 2026-10-18 | PLT-GEN-011 as amended (PLT-SRS 0.5; PLT-VP-R1 RES-OP-09 batch B): a duration in a profile may be stated in milliseconds or in seconds. §2.7: the ring limit is `no_answer_ms` or `no_answer_s`, or both, `no_answer_ms` applying and a disagreement warned of at startup; `CallType` gains `no_answer_s` (as stated, or None). §5.3: a profile's `call_types[].floor` takes `timers_s` beside `timers_ms` per timer, the same way; `FloorConfig` gains `timers_s`. The hook's `FloorPolicy.timers_ms` stays in milliseconds. The in-tree profiles are unchanged. |
+| 0.23 | 2026-10-17 | §9: core code `initiator-not-served` (PLT-VP-R1 RES-OP-11, owner ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required). A minor change: no hook or parameter object changes. |
+| 0.22 | 2026-10-16 | Owner ruling: two decisions become profile settings, required with no default. §2.7 and ICD-LIM-001..003: `group_over_limit` per call type (`truncate`, TS 24.379 6.3.5.5, or `refuse`); §5.3 POST-5: `preemption_at_full_queue` on `FloorPolicy` (`insert`, TS 24.380 6.3.4.4.7 item 2e, or `deny`), checked by the core. A deviation is reported at startup. A signature change: `FloorPolicy` gains a required field; the in-tree profiles state the previous behaviour, so none changes. |
+| 0.21 | 2026-09-29 | §5.2: the core checks and applies the session decision (PLT-VP-R1 RES-OP-12). The participant limit is the decision's, and a group call over it is truncated with warning 122 instead of refused (TS 24.379 6.3.5.5, 10.1.1.4.1); the in-tree admission no longer refuses on it. A session over the limit that is not a truncatable group call is refused with the new core code `participant-limit-exceeded` (§9). POST-1 read as equality, POST-2 states what is counted. ICD-OP-15 opened. A minor change: signatures unchanged; a group call the in-tree profiles used to refuse is now established with fewer participants. |
+| 0.20 | 2026-09-29 | ICD-GEN-041 made true (PLT-VP-R1 RES-OP-02): every invocation records what the hook returned, in full, and a value the audit cannot record exactly is refused. IF-ICX `map_outbound` and IF-PRI `compare` now go through the invocation boundary; `map_outbound` runs before QoS is reserved. IF-ICX gets the 20 ms deadline ICD-GEN-010 always gave it. §4.2 POST-6. A minor change: signatures unchanged; what is newly refused is a value holding a type the ICD's own value types do not declare. |
 | 0.19 | 2026-09-29 | §5.3 and §6.1: the core checks the floor policy and bearer decision a hook returns (PLT-VP-R1 RES-OP-07). Before, only profile validation checked them, so a substituted hook was not held to its contract. A minor change: no POST is tightened, and a value that passes profile validation passes these checks. ICD-OP-14 opened. |
 | 0.18 | 2026-09-28 | ICD-GEN-001 made true: value types hold nothing mutable (`Value`, `FrozenDict`); VP1-BND-004's gate checks it (PLT-VP-R1 RES-OP-06). A minor change: types and signatures unchanged. What now raises TypeError: a hook mutating a value it received; a value built holding an object that is not known to be immutable (e.g. a profile's own class); a sequence field given a string, a set or a mapping. |
 | 0.17 | 2026-09-28 | §3.2 POST-3 made precise and enforced by the core; §3.5 gains POST-3 (PLT-VP-R1 RES-OP-01). The service profile's `identity.domains` must be lower-case DNS names. A minor change: no hook signature changes, but a resolver that returned members outside the declared domains, or written other than `sip[s]:user@host`, is now a contract violation. |

@@ -46,13 +46,17 @@ change set.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (1464 tests)
-python3 tools/check_boundary.py --root .      # must stay 20/20
+python3 -m pytest tests/ -q                   # must stay green (2417 tests)
+python3 tools/check_boundary.py --root .      # must stay 21/21
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
 MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
   MCX_STRICT_RELEASE=true MCX_ADHOC_LIST_MAX=100 MCX_NETWORK_FILE=examples/network.yaml \
-  MCX_DATA_DIR=/tmp/mcx python3 -m service
+  MCX_HTTP_TLS=off MCX_FLOOR_UNRECORDED=deny MCX_FOREIGN_INITIATOR=refuse MCX_DATA_DIR=/tmp/mcx python3 -m service
+# with SIP (MCX_SIP_LISTEN) also MCX_SERVICE_REFUSAL_STATUS=503|480,
+# MCX_DIALOG_TAKEOVER=same-party|never, MCX_LOCATION_REPORTS=read|ignore;
+# MCX_HTTP_TLS=on needs MCX_HTTP_TLS_CERT/KEY and MCX_HTTP_CLIENT_AUTH (+ _CA).
+# A value that departs from the standard is reported at startup (deviations).
 # VP1-SIG-001: the real process against a third-party SIP core (needs the
 # kamailio / asterisk packages; prints PASS/FAIL/OBSERVED per step)
 python3 tools/interop/run.py --core kamailio
@@ -190,9 +194,7 @@ ADHOC-OP-04), checked before any entry is resolved. Every process also names
 a network profile, `MCX_NETWORK_FILE` (required, no default; NET-OP-01): the
 PLMNs, the map from reported cells to locations, and the trusted SIP cores
 with a CA of their own (ICD-OP-10). Its `name/version/hash` joins the profile
-and release in every audit record. With SIP enabled, `MCX_SESSION_EXPIRES`
-(required, no default, at least 90) is the RFC 4028 session interval: how long
-a call whose far end vanished without a BYE can outlive it (SIP-OP-17). The
+and release in every audit record. With SIP enabled, `MCX_SESSION_EXPIRES_MS` (whole seconds in ms, at least 90000) or `MCX_SESSION_EXPIRES` (seconds, at least 90), or both (the ms value used, a disagreement warned of; required, no default; PLT-GEN-011: every configured duration may be stated in ms or s) is the RFC 4028 session interval: how long a call whose far end vanished without a BYE can outlive it (SIP-OP-17). The
 conformance matrix being
 green does not mean every call type is reachable. Release numbers live in
 `core/release.py` and nowhere else — `VP1-BND-022` fails a build that compares
@@ -216,7 +218,7 @@ suppressed or raised.
 | `docs/PLT-ICD-001.md` | The six hook contracts: PRE/POST/INV, §8.1 sequence, reason codes |
 | `docs/PLT-VP-R1.md` | R1 verification plan: 99 cases with exact pass criteria |
 | `docs/PLT-ANL-R1.md` | The three analyses and the gate-failure procedure |
-| `core/PROFILE_BOUNDARY.md` | Why the boundary sits where it does, and why one image per profile |
+| `docs/PROFILE_BOUNDARY.md` | Why the boundary sits where it does, and why one image per profile |
 
 ## Status and honesty
 

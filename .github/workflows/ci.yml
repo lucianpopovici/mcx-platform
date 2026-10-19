@@ -37,7 +37,9 @@ jobs:
       fail-fast: false
       matrix:
         profile: [mcx, frmcs, utility]
-        release: [17, 19]
+        # Every supported release (core.release.SUPPORTED), not a sample: the
+        # boundary gate fails if this list and that tuple differ (RES-OP-08).
+        release: [13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

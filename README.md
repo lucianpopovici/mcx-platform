@@ -107,7 +107,7 @@ defect**, not a test to fix. Classify it in your PR (procedure in
 | `docs/PLT-ICD-001.md` | The six hook contracts: PRE / POST / INV, sequences, reason codes |
 | `docs/PLT-VP-R1.md` | R1 verification plan — 99 cases, full traceability matrix |
 | `docs/PLT-ANL-R1.md` | The three R1 analyses, performed as worked changes |
-| `core/PROFILE_BOUNDARY.md` | Why the boundary is where it is |
+| `docs/PROFILE_BOUNDARY.md` | Why the boundary is where it is |
 
 ---
 

@@ -25,12 +25,24 @@ from . import model
 from . import qos as qos_spec
 from .errors import CORE_ORIGINATED, ProfileValidationError
 
+# PLT-GEN-011 as amended 2026-10-18: every duration in a profile may be
+# stated in seconds or in milliseconds. Each seconds key and its millisecond
+# key; with both, the milliseconds apply and a disagreement is reported at
+# startup (service/runtime.py).
+SECONDS_FORMS = {"no_answer_s": "no_answer_ms", "timers_s": "timers_ms"}
+# PLT-ICD-001 2.7 (ICD-RNG-001): the shortest ring limit a call type may declare.
+NO_ANSWER_MIN_MS = 1000
+
 # --------------------------------------------------------------------------
 # Closed vocabularies fixed by specification, not by profile.
 # --------------------------------------------------------------------------
 
 MEDIA_KINDS = ("voice", "video", "data")
 SESSION_MODELS = ("on-demand", "pre-established", "broadcast")
+# Owner ruling 2026-10-16: two decisions become profile settings. The first
+# value of each is the 3GPP behaviour; the second a recorded deviation.
+PREEMPTION_AT_FULL_QUEUE = ("insert", "deny")       # TS 24.380 6.3.4.4.7 item 2e
+GROUP_OVER_LIMIT = ("truncate", "refuse")            # TS 24.379 6.3.5.5
 TRANSPORTS = ("udp", "tcp", "sctp")
 REDUNDANCY = ("single", "multipath", "multihomed")
 BINDINGS = ("static", "dynamic")
@@ -305,6 +317,40 @@ def _applications(c: _Checker, node: Any) -> Tuple[model.Application, ...]:
     return tuple(out)
 
 
+def _whole(c: "_Checker", path: str, item: Mapping, key: str, least: int,
+           unit: str) -> Optional[int]:
+    """`item[key]` as an integer of at least `least`; None when absent, and
+    a defect (with None) when it is not one."""
+    if key not in item:
+        return None
+    v = item[key]
+    if isinstance(v, bool) or not isinstance(v, int):
+        c.add(f"{path}.{key}", "bad-type", f"expected an integer ({unit})")
+        return None
+    if v < least:
+        c.add(f"{path}.{key}", "bad-value",
+              f"must be at least {least} {'ms' if unit == 'milliseconds' else 's'}")
+        return None
+    return v
+
+
+def _ring_limit(c: "_Checker", path: str, item: Mapping) -> Tuple[int, Optional[int]]:
+    """PLT-ICD-001 2.7 (owner ruling 2026-10-18): `no_answer_ms`, at least
+    NO_ANSWER_MIN_MS, or `no_answer_s`, at least 1; at least one is given.
+    Returns (the limit in ms, the seconds as stated or None). With both,
+    the milliseconds take priority; that they disagree is reported at
+    startup. No upper bound: how long a member may ring is the service's
+    call."""
+    ms = _whole(c, path, item, "no_answer_ms", NO_ANSWER_MIN_MS, "milliseconds")
+    s = _whole(c, path, item, "no_answer_s", 1, "seconds")
+    if "no_answer_ms" not in item and "no_answer_s" not in item:
+        c.add(f"{path}.no_answer_ms", "missing-key",
+              "required key absent (or no_answer_s, in seconds)")
+    if ms is not None:
+        return ms, s
+    return (s * 1000 if s is not None else 0), s
+
+
 def _media_list(c: _Checker, path: str, node: Any) -> Tuple[str, ...]:
     if not isinstance(node, list) or not node:
         c.add(path, "bad-value", "expected a non-empty list of media kinds")
@@ -317,14 +363,29 @@ def _media_list(c: _Checker, path: str, node: Any) -> Tuple[str, ...]:
     return tuple(out)
 
 
+def _required_choice(c: _Checker, path: str, value: Any, allowed: Sequence[str]) -> str:
+    """A required choice with no default (owner ruling 2026-10-16): an empty
+    or null value is not one of the choices, and is a load error like any
+    other (`enum` lets None through, for optional keys). The value returned
+    after an error is never used: the profile does not load."""
+    if value is None:
+        c.add(path, "bad-value", f"null is not one of: {', '.join(allowed)}")
+        return allowed[0]
+    return c.enum(path, value, allowed) or allowed[0]
+
+
 def _floor(c: _Checker, path: str, node: Any) -> model.FloorConfig:
     default = model.FloorConfig(False, False, False, 0, model.freeze_map({}))
     if not c.keys(path, node, allowed=(
             "initial_grant_to_initiator", "queueing_enabled", "override_allowed",
-            "max_queue_depth", "timers_ms"),
+            "max_queue_depth", "timers_ms", "timers_s", "preemption_at_full_queue"),
             required=("initial_grant_to_initiator", "queueing_enabled",
-                      "override_allowed", "max_queue_depth")):
+                      "override_allowed", "max_queue_depth",
+                      "preemption_at_full_queue")):
         return default
+    preemption = _required_choice(c, f"{path}.preemption_at_full_queue",
+                                  node.get("preemption_at_full_queue"),
+                                  PREEMPTION_AT_FULL_QUEUE)
 
     queueing = bool(c.typed(path, node, "queueing_enabled", bool, False))
     depth = c.typed(path, node, "max_queue_depth", int, 0)
@@ -338,26 +399,12 @@ def _floor(c: _Checker, path: str, node: Any) -> model.FloorConfig:
         c.add(f"{path}.max_queue_depth", "inconsistent",
               "queueing is enabled, so depth must be at least 1")
 
-    timers = {}
-    raw = node.get("timers_ms") or {}
-    tp = f"{path}.timers_ms"
-    if not isinstance(raw, dict):
-        c.add(tp, "bad-type", f"expected a mapping, found {_typename(raw)}")
-    else:
-        for name, value in raw.items():
-            # PLT-ICD-001 §5.3 POST-3: unknown timer names are contract violations.
-            if name not in FLOOR_TIMERS:
-                c.add(f"{tp}.{name}", "unknown-key",
-                      f"not a TS 24.380 timer (known: {', '.join(FLOOR_TIMERS)})")
-                continue
-            if isinstance(value, bool) or not isinstance(value, int):
-                c.add(f"{tp}.{name}", "bad-type",
-                      f"expected an integer in milliseconds, found {_typename(value)}")
-                continue
-            if value <= 0:
-                c.add(f"{tp}.{name}", "bad-value", "must be greater than zero")
-                continue
-            timers[name] = value
+    # PLT-GEN-011 as amended 2026-10-18: each timer in milliseconds
+    # (timers_ms) or seconds (timers_s); a timer in both takes its
+    # milliseconds, and a disagreement is reported at startup.
+    timers_s = _timer_map(c, path, node, "timers_s", "seconds")
+    timers = {name: s * 1000 for name, s in timers_s.items()}
+    timers.update(_timer_map(c, path, node, "timers_ms", "milliseconds"))
 
     return model.FloorConfig(
         initial_grant_to_initiator=bool(
@@ -366,7 +413,37 @@ def _floor(c: _Checker, path: str, node: Any) -> model.FloorConfig:
         override_allowed=bool(c.typed(path, node, "override_allowed", bool, False)),
         max_queue_depth=depth,
         timers_ms=model.freeze_map(timers),
+        preemption_at_full_queue=preemption,
+        timers_s=model.freeze_map(timers_s),
     )
+
+
+def _timer_map(c: _Checker, path: str, node: Mapping, key: str, unit: str) -> Dict[str, int]:
+    """`node[key]`, TS 24.380 timer name -> a positive integer in `unit`;
+    the valid entries, a defect for each other one."""
+    timers: Dict[str, int] = {}
+    raw = node.get(key)
+    tp = f"{path}.{key}"
+    if raw is None:                     # absent: no timer stated in this form
+        return timers
+    if not isinstance(raw, dict):
+        c.add(tp, "bad-type", f"expected a mapping, found {_typename(raw)}")
+        return timers
+    for name, value in raw.items():
+        # PLT-ICD-001 §5.3 POST-3: unknown timer names are contract violations.
+        if name not in FLOOR_TIMERS:
+            c.add(f"{tp}.{name}", "unknown-key",
+                  f"not a TS 24.380 timer (known: {', '.join(FLOOR_TIMERS)})")
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            c.add(f"{tp}.{name}", "bad-type",
+                  f"expected an integer in {unit}, found {_typename(value)}")
+            continue
+        if value <= 0:
+            c.add(f"{tp}.{name}", "bad-value", "must be greater than zero")
+            continue
+        timers[name] = value
+    return timers
 
 
 def _call_types(c: _Checker, node: Any, urgencies: Set[str],
@@ -382,11 +459,11 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                 "id", "label", "media", "session_model", "urgency", "application",
                 "auto_answer", "acknowledgement_required", "recording_required",
                 "max_participants", "initiator_roles", "floor", "mc_signature",
-                "no_answer_s"),
+                "no_answer_ms", "no_answer_s", "group_over_limit"),
                 required=("id", "label", "media", "session_model", "urgency",
                           "auto_answer", "acknowledgement_required",
                           "recording_required", "initiator_roles", "floor",
-                          "mc_signature", "no_answer_s")):
+                          "mc_signature", "group_over_limit")):
             continue
         ident = c.typed(p, item, "id", str, "")
         if ident in seen:
@@ -428,15 +505,7 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                       "must be at least 1; use null for unlimited")
                 maxp = None
 
-        # PLT-ICD-001 2.7: required, a whole number of seconds, at least 1.
-        # No upper bound: how long a member may ring is the service's call.
-        no_answer = item.get("no_answer_s")
-        if isinstance(no_answer, bool) or not isinstance(no_answer, int):
-            if "no_answer_s" in item:
-                c.add(f"{p}.no_answer_s", "bad-type", "expected an integer (seconds)")
-            no_answer = 0
-        elif no_answer < 1:
-            c.add(f"{p}.no_answer_s", "bad-value", "must be at least 1 second")
+        no_answer, no_answer_s = _ring_limit(c, p, item)
 
         out.append(model.CallType(
             id=ident,
@@ -455,7 +524,11 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
             initiator_roles=tuple(parsed_roles),
             floor=_floor(c, f"{p}.floor", item.get("floor")),
             mc_signature=_mc_signature(c, f"{p}.mc_signature", item.get("mc_signature")),
-            no_answer_s=no_answer,
+            no_answer_ms=no_answer,
+            no_answer_s=no_answer_s,
+            group_over_limit=_required_choice(c, f"{p}.group_over_limit",
+                                              item.get("group_over_limit"),
+                                              GROUP_OVER_LIMIT),
         ))
 
     # A signature must name at most one call type, or the core would have to

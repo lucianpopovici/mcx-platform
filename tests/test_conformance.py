@@ -1,8 +1,12 @@
-"""Per-profile conformance suite (VP1-BND-021 / PLT-VER-001).
+"""Per-profile conformance suite (VP1-BND-021 / PLT-VER-001), at a release
+(VP1-REL-002 / PLT-REL-003 / PLT-REL-007).
 
 One suite, run once per profile against the SAME core: the shared part whose
-hash is identical in every release image (VP1-BND-006, PLT-GEN-001). The profile
-under test is named by `MCX_PROFILE`; CI runs this file once per profile.
+hash is identical in every release image (VP1-BND-006, PLT-GEN-001). The
+combination under test is named by `MCX_PROFILE` and `MCX_RELEASE`; CI runs
+this file once per combination, every in-tree profile at every supported
+release (the gate VP1-BND-020 checks the matrix). Left unset, as in a local
+run, either axis covers all its values, so nothing is skipped silently.
 
 This is the mechanical half of PLT-VER-003. Nothing here asserts behaviour
 specific to one profile — every assertion is derived from the loaded profile's
@@ -27,7 +31,23 @@ from core.hooks import MediaKind, Resolution, ResolutionKind, SessionRequest  # 
 from core.session import SessionManager  # noqa: E402
 
 PROFILES = ROOT / "profiles"
-PROFILE_NAME = os.environ.get("MCX_PROFILE", "mcx")
+ALL_PROFILES = sorted(p.parent.name for p in PROFILES.glob("*/profile.yaml"))
+PROFILE_NAMES = [os.environ["MCX_PROFILE"]] if os.environ.get("MCX_PROFILE") \
+    else ALL_PROFILES
+
+
+def _releases():
+    from core.release import SUPPORTED, parse
+    raw = os.environ.get("MCX_RELEASE")
+    if not raw:
+        return list(SUPPORTED)
+    try:
+        return [parse(raw)]
+    except Exception as exc:                   # noqa: BLE001 - reported, not skipped
+        raise pytest.UsageError(f"MCX_RELEASE={raw!r}: {exc}") from exc
+
+
+RELEASES = _releases()
 
 
 class Clock:
@@ -38,11 +58,21 @@ class Clock:
         return self.now
 
 
+@pytest.fixture(scope="module", params=PROFILE_NAMES)
+def profile_name(request):
+    return request.param
+
+
+@pytest.fixture(scope="module", params=RELEASES, ids=str)
+def release(request):
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def loaded():
-    directory = PROFILES / PROFILE_NAME
+def loaded(profile_name):
+    directory = PROFILES / profile_name
     if not directory.is_dir():
-        pytest.fail(f"MCX_PROFILE={PROFILE_NAME!r} names no profile package")
+        pytest.fail(f"MCX_PROFILE={profile_name!r} names no profile package")
     return loader.load(directory)
 
 
@@ -62,8 +92,8 @@ def any_resolution():
 # --------------------------------------------------------------------------
 
 
-def test_profile_loads(loaded):
-    assert loaded.profile.name == PROFILE_NAME
+def test_profile_loads(loaded, profile_name):
+    assert loaded.profile.name == profile_name
     assert len(loaded.profile.content_hash) == 64
 
 
@@ -226,3 +256,143 @@ def test_reserved_capacity_fits_within_the_maximum(loaded):
     admission = loaded.profile.admission
     assert sum(admission.reserved_for_urgency.values()) <= \
         admission.max_concurrent_sessions
+
+
+# --------------------------------------------------------------------------
+# At the release (VP1-REL-002): what the release decides, for this profile
+# --------------------------------------------------------------------------
+
+
+def _invite_for(signature, target="sip:t@example"):
+    """A conformant client's INVITE for `signature`, written by the
+    independent fixture, not by core/mcinfo.py."""
+    from core.sip import Headers, Request
+    from tests import mcpttinfo_fixture as mcf
+    adhoc = signature.session_type == "adhoc"
+    xml = mcf.mcinfo_xml(signature.session_type, target,
+                         emergency=signature.emergency and not adhoc,
+                         imminent_peril=signature.imminent_peril,
+                         adhoc_emergency=True if adhoc and signature.emergency else None)
+    sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\n"
+    return Request("INVITE", "sip:server@example", Headers([
+        ("From", "<sip:a@example>;tag=1"), ("To", "<sip:server@example>"),
+        ("Call-ID", "conf-1"), ("CSeq", "1 INVITE"),
+        ("Content-Type", mcf.CONTENT_TYPE)]), mcf.multipart(sdp, xml))
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_every_call_type_is_requestable_or_reported_unreachable(loaded, release):
+    """PLT-REL-003: at this release, a call type with a signature is either
+    one a conformant client can request -- its INVITE comes out as that call
+    type -- or one the startup report names as unreachable (ICD-SIG-006).
+    Never silently neither."""
+    from core import mcinfo
+    from core.sip import Adapter
+    adapter = Adapter("sip:server@example", release, loaded.profile.call_types)
+    undeclared, blocked = mcinfo.reachability(loaded.profile.call_types, release)
+    blocked_ids = {ct for ct, _ in blocked}
+    for ct in loaded.profile.call_types:
+        if ct.mc_signature is None:
+            assert ct.id in undeclared
+            continue
+        got = adapter.parse_invite(_invite_for(ct.mc_signature)).call_type
+        if ct.id in blocked_ids:
+            assert got == "", (ct.id, str(release))
+        else:
+            assert got == ct.id, (ct.id, str(release))
+        # Spelled out, not read from core/release.py: TS 24.379 has ad hoc
+        # group calls and their emergency indication from Rel-18; every other
+        # session type an in-tree profile uses is Rel-13.
+        expected_blocked = ct.mc_signature.session_type == "adhoc" and int(release) < 18
+        assert (ct.id in blocked_ids) is expected_blocked, (ct.id, str(release))
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_every_refusal_speaks_only_codes_the_release_defines(loaded, release):
+    """PLT-REL-009 with this profile's own codes: whatever the profile may
+    refuse with renders at this release, carrying only a warning code the
+    release's table 4.4.2-2 defines."""
+    import re
+    from core.errors import RESERVED_REASON_CODES
+    from core.release import supports_sip_warning
+    from core.sip import Adapter, DialogContext
+    adapter = Adapter("sip:server@example", release, loaded.profile.call_types)
+    # Spelled out: warning 179 is Rel-17 onwards, 100 and 145 every release
+    # (TS 24.379 table 4.4.2-2).
+    assert supports_sip_warning(release, 100) and supports_sip_warning(release, 145)
+    assert supports_sip_warning(release, 179) is (int(release) >= 17)
+    ctx = DialogContext(call_id="c1", local_uri="sip:server@example")
+    for code in sorted(set(loaded.profile.admission.reject_reason_codes)
+                       | set(RESERVED_REASON_CODES)):
+        response = adapter.reject(code, ctx)
+        assert 400 <= response.status.code < 700, code
+        warning = response.headers.get("Warning")
+        m = re.match(r'399 \S+ "(\d{3}) ', warning or "")
+        if m:
+            assert supports_sip_warning(release, int(m.group(1))), (code, str(release))
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_every_floor_message_the_policy_can_send_exists_at_the_release(loaded, release):
+    """The floor messages, fields and causes this profile's floor policies can
+    make the platform send are all defined at this release, and round-trip."""
+    from core import rtcp
+    from core.floor import DenyReason, RevokeReason
+    from service.media import _DENY_CAUSE, _REVOKE_CAUSE
+    M = rtcp.MsgType
+    codec = rtcp.Codec(release)
+    res = Resolution(kind=ResolutionKind.GROUP, members=("sip:x@example",), group_id="g")
+    for ct in loaded.profile.call_types:
+        if not ({"voice", "video"} & set(ct.media)):
+            continue
+        fp = loaded.hooks.session_policy.floor_policy(SessionRequest(
+            request_id="f", initiator="sip:a@example", target="t",
+            call_type=ct.id, media=(MediaKind.VOICE,)), res)
+        messages = [rtcp.message(M.GRANTED, 1, rtcp.f_duration(30)),
+                    rtcp.message(M.TAKEN, 1, rtcp.f_granted_party("sip:a@example")),
+                    rtcp.message(M.IDLE, 1)]
+        denies = [DenyReason.QUEUEING_DISABLED, DenyReason.LOWER_PRIORITY,
+                  DenyReason.ALREADY_HOLDER, DenyReason.NO_SESSION]
+        revokes = [RevokeReason.MEDIA_BURST_TOO_LONG, RevokeReason.OTHER]
+        if fp.queueing_enabled:
+            denies.append(DenyReason.QUEUE_FULL)
+            messages.append(rtcp.message(M.QUEUE_POSITION_INFO, 1, rtcp.f_queue_info(1, 100)))
+        if fp.override_allowed:
+            revokes.append(RevokeReason.PREEMPTED)
+        messages += [rtcp.message(M.DENY, 1, rtcp.f_reject(_DENY_CAUSE[d], d.value))
+                     for d in denies]
+        messages += [rtcp.message(M.REVOKE, 1, rtcp.f_reject(_REVOKE_CAUSE[r], r.value))
+                     for r in revokes]
+        for m in messages:
+            assert codec.decode(codec.encode(m)) == m, (ct.id, m.type, str(release))
+    # Spelled out: Floor Revoke cause 7 arrives in Rel-19 (TS 24.380
+    # 8.2.10.2), so the codec this suite just used must refuse it before.
+    revoke7 = rtcp.message(M.REVOKE, 1, rtcp.f_reject(7, "x"))
+    if int(release) >= 19:
+        assert codec.decode(codec.encode(revoke7)) == revoke7
+    else:
+        with pytest.raises(rtcp.ReleaseRefused):
+            codec.encode(revoke7)
+
+
+@pytest.mark.vp("VP1-REL-002")
+def test_the_release_axis_changes_what_a_profile_can_carry():
+    """Not a test per combination but of the matrix: across the in-tree
+    profiles some call type is unreachable at one supported release and
+    reachable at another, so running every release is not running one
+    release eight times."""
+    from core import mcinfo
+    from core.release import SUPPORTED
+    changes, adhoc = set(), set()
+    for name in ALL_PROFILES:
+        types = loader.load(PROFILES / name).profile.call_types
+        if any(ct.mc_signature is not None and ct.mc_signature.session_type == "adhoc"
+               for ct in types):
+            adhoc.add(name)
+        blocked = {r: {ct for ct, _ in mcinfo.reachability(types, r)[1]} for r in SUPPORTED}
+        if len({frozenset(b) for b in blocked.values()}) > 1:
+            changes.add(name)
+            assert blocked[SUPPORTED[0]] and not blocked[SUPPORTED[-1]], name
+    # Derived from the profiles, not named: the ones with an ad hoc call type
+    # are the ones the release changes, and the tree has at least one.
+    assert changes and changes == adhoc, (changes, adhoc)

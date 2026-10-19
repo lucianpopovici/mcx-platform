@@ -114,23 +114,96 @@ def test_dialog_timer_arithmetic():
 # ============================================================ configuration
 
 
-@pytest.mark.parametrize("value", [None, "", "89", "0", "ten", "1.5", "-90", "1234567"])
+@pytest.mark.parametrize("value", [None, ""])
 def test_the_session_interval_must_be_stated(tmp_path, pki, value):
     from service.config import Config
     env = sip_env(tmp_path, pki)
-    env.pop("MCX_SESSION_EXPIRES")
+    env.pop("MCX_SESSION_EXPIRES_MS")
     if value is not None:
-        env["MCX_SESSION_EXPIRES"] = value
+        env["MCX_SESSION_EXPIRES_MS"] = value
     with pytest.raises(StartupRefused) as exc:
         Config.from_env(env)
-    assert "MCX_SESSION_EXPIRES" in str(exc.value)
+    assert str(exc.value) == (
+        "MCX_SESSION_EXPIRES_MS is not set (nor MCX_SESSION_EXPIRES, in seconds): SIP "
+        "is enabled and requires the RFC 4028 session interval; there is no default")
 
 
-@pytest.mark.parametrize("value", ["90", "300", "86400"])
-def test_the_session_interval_is_read(tmp_path, pki, value):
+@pytest.mark.parametrize("value", ["89999", "89000", "0", "ten", "1.5", "-90000",
+                                   "90500", "90001", "1000000000", "+90000", "²",
+                                   "９００００", "٩٠٠٠٠"])
+def test_a_bad_session_interval_is_refused(tmp_path, pki, value):
+    """Milliseconds (PLT-GEN-011), a whole number of seconds because the
+    Session-Expires header counts in seconds: no rounding."""
     from service.config import Config
-    cfg = Config.from_env(sip_env(tmp_path, pki, MCX_SESSION_EXPIRES=value))
-    assert cfg.sip.session_expires == int(value)
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(sip_env(tmp_path, pki, MCX_SESSION_EXPIRES_MS=value))
+    assert str(exc.value) == (
+        f"MCX_SESSION_EXPIRES_MS={value!r}: give the RFC 4028 session interval "
+        "in milliseconds, a whole number of seconds (RFC 4028 counts in seconds), "
+        "at least 90000. It bounds how long a call whose far end vanished "
+        "without a BYE stays up")
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("ms, s, effective", [
+    (None, "1800", (1_800_000, 1800)),          # seconds alone: converted, kept as stated
+    ("1800000", None, (1_800_000, None)),       # milliseconds alone
+    ("1800000", "1800", (1_800_000, 1800)),     # both, agreeing
+    ("600000", "1800", (600_000, 1800)),        # both, disagreeing: the milliseconds win
+    (None, "90", (90_000, 90)),                 # the least
+])
+def test_the_session_interval_in_either_form(tmp_path, pki, ms, s, effective):
+    """Owner ruling 2026-10-18: MCX_SESSION_EXPIRES_MS or MCX_SESSION_EXPIRES,
+    at least one; with both, the milliseconds take priority."""
+    from service.config import Config
+    env = sip_env(tmp_path, pki)
+    env.pop("MCX_SESSION_EXPIRES_MS")
+    if ms is not None:
+        env["MCX_SESSION_EXPIRES_MS"] = ms
+    if s is not None:
+        env["MCX_SESSION_EXPIRES"] = s
+    sip = Config.from_env(env).sip
+    assert (sip.session_expires_ms, sip.session_expires_s) == effective
+
+
+@pytest.mark.vp("VP1-BND-016")
+@pytest.mark.parametrize("value", ["89", "0", "ten", "1.5", "-90", "1234567", "+90", "²",
+                                   "９０"])
+@pytest.mark.parametrize("with_ms", [False, True], ids=["alone", "beside-ms"])
+def test_a_bad_session_interval_in_seconds_is_refused(tmp_path, pki, value, with_ms):
+    """Every form set must be valid, even beside a valid MCX_SESSION_EXPIRES_MS."""
+    from service.config import Config
+    env = sip_env(tmp_path, pki, MCX_SESSION_EXPIRES=value)
+    if not with_ms:
+        env.pop("MCX_SESSION_EXPIRES_MS")
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(env)
+    assert str(exc.value) == (
+        f"MCX_SESSION_EXPIRES={value!r}: give the RFC 4028 session interval in whole "
+        "seconds, at least 90. It bounds how long a call whose far end vanished "
+        "without a BYE stays up")
+
+
+@pytest.mark.vp("VP1-BND-016")
+def test_the_session_interval_in_seconds_without_sip_is_refused_not_ignored(tmp_path, pki):
+    from service.config import Config
+    env = {k: v for k, v in sip_env(tmp_path, pki, MCX_SESSION_EXPIRES="1800").items()
+           if not k.startswith(("MCX_SIP_", "MCX_MEDIA_"))
+           and k not in ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER",
+                         "MCX_LOCATION_REPORTS", "MCX_SESSION_EXPIRES_MS")}
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(env)
+    assert str(exc.value) == ("MCX_SESSION_EXPIRES is set but SIP is not enabled "
+                              "(MCX_SIP_LISTEN)")
+
+
+@pytest.mark.parametrize("value, header_s", [("90000", 90), ("300000", 300),
+                                             ("86400000", 86400), ("999999000", 999999)])
+def test_the_session_interval_is_read(tmp_path, pki, value, header_s):
+    from service.config import Config
+    cfg = Config.from_env(sip_env(tmp_path, pki, MCX_SESSION_EXPIRES_MS=value))
+    assert cfg.sip.session_expires_ms == int(value)
+    assert cfg.sip.session_expires_ms // 1000 == header_s
 
 
 # ============================================================ helpers
@@ -1388,3 +1461,15 @@ def test_a_callee_ack_on_the_connection_the_leg_left_completes(core, world):
                       body=SDP.replace("10.0.0.1", "10.8.1.1"), ctype="application/sdp"),
                   world[U[1]])
     assert core.calls["y8"].media.endpoints[U[1]].remote_rtp[0] == "10.8.1.1"
+
+
+def test_the_session_interval_without_sip_is_refused_not_ignored(tmp_path, pki):
+    from service.config import Config
+    env = {k: v for k, v in sip_env(tmp_path, pki).items()
+           if not k.startswith(("MCX_SIP_", "MCX_MEDIA_"))
+           and k not in ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER",
+                         "MCX_LOCATION_REPORTS")}
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(env)
+    assert str(exc.value) == ("MCX_SESSION_EXPIRES_MS is set but SIP is not enabled "
+                              "(MCX_SIP_LISTEN)")

@@ -34,6 +34,8 @@ from .errors import (
     ADHOC_TOO_MANY_PARTICIPANTS,
     CALL_TYPE_NOT_PERMITTED,
     IDENTITY_NOT_AUTHENTICATED,
+    PARTICIPANT_LIMIT_EXCEEDED,
+    INITIATOR_NOT_SERVED,
     CAPACITY_EXHAUSTED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
@@ -100,7 +102,7 @@ FEATURE_TAG_ISFOCUS = "isfocus"
 # callees (6.3.3.1.2 items 6-7); `Require: timer` and Session-Expires on the
 # 200 OK to the originator (6.3.3.2.3.2 items 2-3, 6.3.2.1.5.2 items 1-2).
 # The interval the platform asks for is a deployment setting
-# (MCX_SESSION_EXPIRES); 90 s is the smallest RFC 4028 permits (section 4),
+# (MCX_SESSION_EXPIRES_MS); 90 s is the smallest RFC 4028 permits (section 4),
 # and the platform accepts any interval down to it.
 OPTION_TIMER = "timer"
 MIN_SE_S = 90
@@ -126,14 +128,14 @@ def parse_session_expires(value: Optional[str]) -> Optional[SessionExpires]:
         return None
     head, *params = [p.strip() for p in value.split(";")]
     if not head.isdigit() or len(head) > 10:
-        raise SipError(f"Session-Expires {value!r}")
+        raise SipError(f"Session-Expires {clip(value)}")
     refresher = None
     for p in params:
         name, _, v = p.partition("=")
         if name.strip().lower() == "refresher":
             refresher = v.strip().lower()
             if refresher not in ("uac", "uas"):
-                raise SipError(f"Session-Expires refresher {v!r}")
+                raise SipError(f"Session-Expires refresher {clip(v)}")
     return SessionExpires(int(head), refresher)
 
 
@@ -142,7 +144,7 @@ def parse_min_se(value: Optional[str]) -> Optional[int]:
         return None
     head = value.split(";", 1)[0].strip()
     if not head.isdigit() or len(head) > 10:
-        raise SipError(f"Min-SE {value!r}")
+        raise SipError(f"Min-SE {clip(value)}")
     return int(head)
 
 
@@ -289,6 +291,9 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     NOT_AUTHORISED: Status.FORBIDDEN,
     CALL_TYPE_NOT_PERMITTED: Status.FORBIDDEN,
     CAPACITY_EXHAUSTED: Status.SERVICE_UNAVAILABLE,
+    # 10.1.2: a call already at its maximum number of participants is refused
+    # 486 with warning 122, the one refusal TS 24.379 pairs with 122.
+    PARTICIPANT_LIMIT_EXCEEDED: Status.BUSY_HERE,
     RECORDING_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     QOS_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
     RESOLVER_UNAVAILABLE: Status.SERVICE_UNAVAILABLE,
@@ -306,6 +311,21 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     ADHOC_PARTICIPANTS_UNDETERMINED: Status.FORBIDDEN,
     ADHOC_TOO_MANY_PARTICIPANTS: Status.FORBIDDEN,
     IDENTITY_NOT_AUTHENTICATED: Status.FORBIDDEN,
+    # TS 24.379 10.1.1.3.1.1 step 2a and the other participating-function
+    # procedures: no binding of the caller to an MCPTT ID is 404, warning 141.
+    INITIATOR_NOT_SERVED: Status.NOT_FOUND,
+}
+
+# Not covered by that setting: a resolver that cannot answer is a back-end
+# failure with no warning text, and a bare 480 would present it as the callee
+# being away (review of the 2026-10-16 settings).
+KEEP_503 = frozenset({RESOLVER_UNAVAILABLE})
+
+# The statuses a deployment may give the refusals mapped to 503 above
+# (MCX_SERVICE_REFUSAL_STATUS, owner ruling 2026-10-16 on SIP-OP-10).
+SERVICE_REFUSAL_STATUS: Mapping[int, Status] = {
+    503: Status.SERVICE_UNAVAILABLE,
+    480: Status.TEMPORARILY_UNAVAILABLE,
 }
 
 # TS 24.379 clause 4.4.1: the RFC 3261 warn-code is always 399 (miscellaneous
@@ -342,6 +362,12 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     # configured limit."
     ADHOC_TOO_MANY_PARTICIPANTS: (189,
                                   "maximum number of allowed adhoc group participants exceeded"),
+    # "The group call has reached its maximum number of participants."
+    PARTICIPANT_LIMIT_EXCEEDED: (122, "too many participants"),
+    # "The participating function is unable to associate the public user
+    # identity with an MCPTT ID." A caller outside the domains this
+    # deployment serves is one it has no MCPTT ID for (RES-OP-11).
+    INITIATOR_NOT_SERVED: (141, "user unknown to the participating function"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -394,6 +420,12 @@ ADHOC_WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
 # Step 3A (6.3.3.1.25): an ad hoc call may carry <adhoc-emergency-ind> or
 # <imminentperil-ind>, not both.
 INVALID_COMBINATION = (150, "invalid combinations of data received in MIME body")
+
+# 10.1.1.4.1: the 200 OK to a group call that has more members than
+# <on-network-max-participant-count> carries this; only that many take part
+# (6.3.5.5). Table 4.4.2-2: "The group call has reached its maximum number of
+# participants." (PLT-VP-R1 RES-OP-12)
+TOO_MANY_PARTICIPANTS = WARNING_TEXTS[PARTICIPANT_LIMIT_EXCEEDED]
 
 # Steps 3B and 3C answer with a body and skip steps 4 and 5, so no MC code
 # goes with it: 185 would say the user may not start ad hoc calls at all,
@@ -566,13 +598,13 @@ def split_frame(data: bytes) -> Optional[Tuple[bytes, int]]:
     length = 0
     for line in head.decode("utf-8", "replace").split("\r\n")[1:]:
         name, _, value = line.partition(":")
-        if _COMPACT.get(name.strip().lower(), name.strip()).lower() == "content-length":
-            try:
-                length = int(value.strip())
-            except ValueError:
+        name = name.strip(" \t")
+        if _COMPACT.get(name.lower(), name).lower() == "content-length":
+            value = value.strip(" \t")
+            # ASCII digits only: int() would also take Unicode digits and "_".
+            if not (value.isascii() and value.isdigit()):
                 raise SipError("malformed Content-Length")
-            if length < 0:
-                raise SipError("negative Content-Length")
+            length = int(value)
     total = end + 4 + length
     return (head, total) if len(data) >= total else None
 
@@ -596,17 +628,20 @@ def parse_message(data: bytes):
     lines: List[str] = []
     for raw in head.split("\r\n"):
         if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += " " + raw.strip()
+            lines[-1] += " " + raw.strip(" \t")
         else:
             lines.append(raw)
     start, header_lines = lines[0], lines[1:]
     headers = Headers()
     for line in header_lines:
         name, sep, value = line.partition(":")
-        if not sep or not name.strip():
-            raise SipError(f"malformed header line {line!r}")
-        name = name.strip()
-        headers.add(_COMPACT.get(name.lower(), name), value.strip())
+        if not sep or not name.strip(" \t"):
+            # Clipped: the line is the sender's, and the error is logged.
+            raise SipError(f"malformed header line {clip(line)}")
+        name = name.strip(" \t")
+        # RFC 3261 LWS is spaces and tabs; str.strip() would also take
+        # Unicode whitespace (U+0085, U+00A0) off a value.
+        headers.add(_COMPACT.get(name.lower(), name), value.strip(" \t"))
     headers = Headers([(n, v) for n, v in headers.items()
                        if n.lower() != "content-length"])
     m = _STATUS_LINE.match(start)
@@ -615,7 +650,7 @@ def parse_message(data: bytes):
     m = _REQUEST_LINE.match(start)
     if m:
         return Request(m.group(1), m.group(2), headers, body)
-    raise SipError(f"malformed start line {start!r}")
+    raise SipError(f"malformed start line {clip(start)}")
 
 
 # --------------------------------------------------------------------------
@@ -678,6 +713,30 @@ _REQUIRED_HEADERS = ("Via", "From", "To", "Call-ID", "CSeq")
 _CSEQ = re.compile(r"^\d+\s+[A-Z]+$")
 
 
+# RES-OP-15: a new INVITE's Call-ID becomes its session's correlation id in
+# the audit trail and in every log line about it. RFC 3261 sets no length, so
+# the guard does: a Call-ID longer than this, or not of RFC 3261 25.1's
+# `callid = word [ "@" word ]`, is answered 400 before anything uses it.
+# Clients use a random part and a host (a UUID@host is under 100 bytes).
+CALL_ID_MAX = 256
+_WORD = r"[A-Za-z0-9\-.!%*_+`'~()<>:\\\"/\[\]?{}]+"
+_CALL_ID = re.compile(rf"{_WORD}(?:@{_WORD})?")
+
+
+def clip(text: str, limit: int = 80) -> str:
+    """A peer's text for an error message or a log line: its repr, cut to
+    `limit` characters, with its length when cut (RES-OP-15 review). Error
+    messages built from what a peer sent end up in the log and the audit."""
+    shown = repr(text[:limit])
+    return shown if len(text) <= limit else f"{shown}... ({len(text)} characters)"
+
+
+def valid_call_id(value: Optional[str]) -> bool:
+    """RFC 3261 25.1 `callid`, at most CALL_ID_MAX characters."""
+    return value is not None and len(value) <= CALL_ID_MAX and \
+        _CALL_ID.fullmatch(value) is not None
+
+
 class InboundGuard:
     """Rejects malformed, replayed and unknown-session requests.
 
@@ -723,6 +782,15 @@ class InboundGuard:
         cseq = request.headers.get("CSeq") or ""
         if not _CSEQ.match(cseq.strip()):
             return "malformed CSeq"
+        if len(request.headers.get_all("Call-ID")) != 1:
+            # Single-valued (RFC 3261 20.8): two would let two readers see two
+            # calls, and the second would sit unchecked in transaction memory.
+            return "Call-ID header not exactly once"
+        call_id = request.headers.get("Call-ID")
+        if call_id is not None and len(call_id) > CALL_ID_MAX:
+            return f"Call-ID longer than {CALL_ID_MAX} characters"
+        if not valid_call_id(call_id):
+            return "malformed Call-ID"
         if request.body and not request.headers.has("Content-Type"):
             return "body present without Content-Type"
         return None
@@ -782,10 +850,24 @@ class Adapter:
     """Renders abstract signals into TS 24.379 messages and parses inbound ones."""
 
     def __init__(self, local_uri: str, release: Release,
-                 call_types: Sequence[Any] = ()) -> None:
+                 call_types: Sequence[Any] = (), *,
+                 service_refusal_status: int = 503,
+                 read_location: bool = True) -> None:
         """`call_types` are the loaded profile's; the adapter reads only each
         one's `id` and `mc_signature` (PLT-ICD-001 2.6) and learns nothing
-        else about the profile."""
+        else about the profile.
+
+        `service_refusal_status` (MCX_SERVICE_REFUSAL_STATUS, SIP-OP-10) is the
+        status of every refusal REASON_TO_STATUS maps to 503 but those in
+        KEEP_503: 503, or 480.
+        `read_location` (MCX_LOCATION_REPORTS, ADHOC-OP-03): False ignores
+        the client's location report. The defaults are the decided behaviour;
+        the service always passes the deployment's stated values."""
+        if service_refusal_status not in SERVICE_REFUSAL_STATUS:
+            raise ValueError(f"service refusal status {service_refusal_status!r} "
+                             f"is not one of {sorted(SERVICE_REFUSAL_STATUS)}")
+        self._service_status = SERVICE_REFUSAL_STATUS[service_refusal_status]
+        self._read_location = read_location is True
         self._local = local_uri
         self._host = _host_of(local_uri)
         self._by_signature: Dict[mcinfo.Signature, str] = {}
@@ -931,6 +1013,8 @@ class Adapter:
         (185) or step 5 (186).
         """
         status = REASON_TO_STATUS.get(reason_code, Status.SERVER_ERROR)
+        if status is Status.SERVICE_UNAVAILABLE and reason_code not in KEEP_503:
+            status = self._service_status
         headers = self._common(context)
         info = self._adhoc_info(invite) if authorisation else None
         if info is not None and (info.emergency or info.imminent_peril) and \
@@ -981,6 +1065,11 @@ class Adapter:
         imminent = info.imminent_peril is not None or \
             "imminentperil-ind" in info.encrypted
         return imminent and info.emergency is not None
+
+    def too_many_participants(self) -> str:
+        """The Warning header value for a group call over its limit."""
+        code, text = TOO_MANY_PARTICIPANTS
+        return f'{WARNING_CODE_MISC} {self._host} "{code} {text}"'
 
     def reject_invalid_combination(self, context: DialogContext) -> Response:
         code, text = INVALID_COMBINATION
@@ -1054,8 +1143,8 @@ class Adapter:
         if message.method != "INVITE":
             raise SipError(f"expected INVITE, found {message.method}")
 
-        initiator = _uri(message.headers.get("P-Asserted-Identity")
-                         or message.headers.get("From") or "")
+        initiator = _asserted_identity(message.headers.get_all("P-Asserted-Identity")) \
+            or _uri(message.headers.get("From") or "")
         target = _uri(message.uri)
         if not initiator or not target:
             raise SipError("INVITE lacks a usable initiator or target")
@@ -1106,7 +1195,8 @@ class Adapter:
             # the client's location report, when it sent one. The serving
             # cell only; what the cell means is the profile's (section 2.8),
             # applied by the session layer.
-            location=_location(content_type, message.body),
+            location=_location(content_type, message.body) if self._read_location
+            else None,
             attributes=attributes,
             # Clause 17: an ad hoc call's members are listed or described,
             # never a group the core already knows (PLT-ICD-001 section 3.5).
@@ -1227,7 +1317,7 @@ def parse_sdp(body: str) -> SdpInfo:
     _check_media_address(address)
     if not 0 < audio[0] <= 65535:
         # Port 0 declines the stream (RFC 3264 6); nothing to relay to.
-        raise SipError(f"SDP audio port {audio[0]} is not usable")
+        raise SipError(f"SDP audio port {clip(str(audio[0]), 12)} is not usable")
     if floor_port is not None and not 0 < floor_port <= 65535:
         floor_port = None                     # the floor stream declined
     return SdpInfo(address, audio[0], audio[1], floor_port)
@@ -1246,7 +1336,7 @@ def _check_media_address(address: str) -> None:
         return
     if ip.is_unspecified or ip.is_multicast or \
             ip == ipaddress.ip_address("255.255.255.255"):
-        raise SipError(f"SDP connection address {address} is not a unicast peer")
+        raise SipError(f"SDP connection address {clip(address, 64)} is not a unicast peer")
 
 
 def build_sdp(address: str, audio_port: int, floor_port: Optional[int],
@@ -1291,6 +1381,22 @@ def _location(content_type: str, body: str) -> Optional["LocationContext"]:
     if report is None or report.cell is None:
         return None
     return LocationContext(cell_id=report.cell)
+
+
+def _asserted_identity(values: Sequence[str]) -> str:
+    """The identity P-Asserted-Identity asserts: its first sip: or sips:
+    value, else its first value. RFC 3325 9.1 allows one sip: and one tel:,
+    as one header or two, in either order, and TS 24.379 binds the MCPTT ID
+    to the SIP public user identity (review of RES-OP-11: an S-CSCF that
+    asserted tel: first had its user taken as foreign)."""
+    found = []
+    for value in values:
+        found += re.findall(r"<([^>]+)>", value) or [v for v in value.split(",") if v.strip()]
+    found = [f.split(";")[0].strip() for f in found if f.strip()]
+    for f in found:
+        if f.lower().startswith(("sip:", "sips:")):
+            return f
+    return found[0] if found else ""
 
 
 def _uri(value: str) -> str:

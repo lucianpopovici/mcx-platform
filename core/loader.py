@@ -23,7 +23,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 
@@ -107,6 +107,52 @@ class LoadedHooks:
     interworking_gateway: Any
     interconnection_gateway: Any
 
+
+
+def _declared(target: Any, methods: Tuple[str, ...], field: str) -> Any:
+    """A hook seen through its Protocol: its declared methods, nothing else.
+
+    The hook is held in the closure of a class made for it, not on the
+    instance, and each declared method is a plain function that looks the
+    method up on the hook at each call -- so neither an attribute of the
+    view nor a method's `__self__` reaches the hook itself (review of
+    RES-OP-09), and a hook patched after the view was made is still the one
+    called."""
+    def method(name: str) -> Callable[..., Any]:
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return getattr(target, name)(*args, **kwargs)
+        call.__name__ = call.__qualname__ = name
+        return call
+
+    calls = {m: method(m) for m in methods}
+
+    class _Declared:
+        __slots__ = ()
+
+        def __getattr__(self, name: str) -> Any:
+            if name in calls:
+                return calls[name]
+            raise AttributeError(f"{field} declares no {name!r} (PLT-ICD-001; VP1-BND-003)")
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            raise AttributeError("a hook view is read-only")
+
+        def __dir__(self):
+            return sorted(calls)
+
+        def __repr__(self) -> str:
+            return f"<{field}: {', '.join(sorted(calls))}>"
+
+    return _Declared()
+
+
+def declared_view(hooks: "LoadedHooks") -> "LoadedHooks":
+    """The bundle with each hook behind a _Declared view. A field that is
+    None (a profile loaded without resolving) stays None."""
+    return LoadedHooks(**{
+        field: None if getattr(hooks, field) is None else
+        _declared(getattr(hooks, field), HOOK_INTERFACES[field][1], field)
+        for field in validation.HOOK_FIELDS})
 
 def _import_symbol(spec: str) -> Any:
     module_name, _, attr = spec.partition(":")

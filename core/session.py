@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 from types import MappingProxyType
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import identity
 from . import qos as qos_spec
@@ -41,6 +42,8 @@ from .errors import (
     NO_BINDING,
     NO_LOCATION_BINDING,
     PARTNER_NOT_PERMITTED,
+    PARTICIPANT_LIMIT_EXCEEDED,
+    INITIATOR_NOT_SERVED,
     PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
@@ -55,13 +58,17 @@ from .hooks import (
     PathSpec,
     ResolutionKind,
     PriorityDecision,
+    SessionModel,
     Resolution,
     SessionDecision,
     SessionRequest,
 )
 from .invoke import HookFailure, Invoker
 from .loader import LoadedProfile
-from .validation import FLOOR_TIMERS, REDUNDANCY, TRANSPORTS
+from .loader import declared_view
+from .validation import FLOOR_TIMERS, PREEMPTION_AT_FULL_QUEUE, REDUNDANCY, TRANSPORTS
+
+log = logging.getLogger("mcx.session")
 
 
 class SessionState(Enum):
@@ -119,7 +126,37 @@ class Session:
     # system. A session has either members or a gateway, never both.
     gateway: Optional[str] = None
     partner_id: Optional[str] = None
+    # Set when the group had more members than the session decision allows
+    # (TS 24.379 6.3.5.5): how many it had. `members` are those that take part.
+    truncated_from: Optional[int] = None
 
+
+# RES-OP-14: what a floor transition the audit store cannot take does.
+FLOOR_UNRECORDED = ("deny", "allow")
+# RES-OP-11: what a caller outside the profile's declared domains gets.
+FOREIGN_INITIATOR = ("refuse", "allow")
+
+
+
+
+INITIATOR_RECORDED_MAX = 256
+
+
+def _bounded(text: str) -> str:
+    """At most INITIATOR_RECORDED_MAX characters, with the full length."""
+    if len(text) <= INITIATOR_RECORDED_MAX:
+        return text
+    return f"{text[:INITIATOR_RECORDED_MAX]}... ({len(text)} characters)"
+
+class _CountingAuditor:
+    """MCX_FLOOR_UNRECORDED=allow: the floor's records, written or counted
+    (RES-OP-14)."""
+
+    def __init__(self, auditor: Auditor) -> None:
+        self._auditor = auditor
+
+    def emit(self, record_type: RecordType, correlation_id: str, **detail: Any):
+        return self._auditor.emit_or_count(record_type, correlation_id, **detail)
 
 class Platform:
     """Environment the session manager depends on but does not own.
@@ -146,9 +183,16 @@ class SessionManager:
                  functions: Optional[Mapping[str, str]] = None,
                  defer_floor_start: bool = False,
                  adhoc_list_max: Optional[int] = None,
-                 cells: Optional[Mapping[str, Mapping[str, str]]] = None) -> None:
+                 cells: Optional[Mapping[str, Mapping[str, str]]] = None,
+                 floor_unrecorded: str = "deny",
+                 foreign_initiator: str = "refuse") -> None:
         self._loaded = loaded
-        self._hooks = loaded.hooks
+        # The core holds each hook through a view that exposes only the
+        # methods its Protocol declares (VP1-BND-003; review of RES-OP-09):
+        # whatever route core code takes to a hook -- an alias passed on, a
+        # global, getattr -- an undeclared capability is not there to reach.
+        # The service and the tests keep the objects themselves.
+        self._hooks = declared_view(loaded.hooks)
         self._profile = loaded.profile
         self._auditor = auditor
         self._platform = platform or Platform()
@@ -170,6 +214,25 @@ class SessionManager:
         # Serving cell -> location attributes: deployment data, supplied by
         # the host (the network profile; PLT-ICD-001 2.8, PRF-OP-03).
         self._cells = dict(cells or {})
+        # RES-OP-14 (owner ruling 2026-10-16, MCX_FLOOR_UNRECORDED, required
+        # in the service): a floor transition the audit store cannot take is
+        # "deny": undone and not sent, so the floor stops until the store
+        # recovers (PLT-FC-011 kept); or "allow": it stands and is sent, and
+        # the transitions lost are counted and written as one `audit-gap`
+        # record when the store takes records again.
+        if floor_unrecorded not in FLOOR_UNRECORDED:
+            raise ValueError(f"floor_unrecorded {floor_unrecorded!r} is not one of "
+                             f"{', '.join(FLOOR_UNRECORDED)}")
+        self._floor_unrecorded = floor_unrecorded
+        # RES-OP-11 (owner ruling 2026-10-17, MCX_FOREIGN_INITIATOR, required
+        # in the service): a caller outside the profile's declared domains is
+        # "refuse"d, 404 + 141 (PLT-IDM-008), or "allow"ed, a deviation the
+        # service reports. A request a gateway relays (receive_inbound) is
+        # foreign by nature and not subject to it.
+        if foreign_initiator not in FOREIGN_INITIATOR:
+            raise ValueError(f"foreign_initiator {foreign_initiator!r} is not one of "
+                             f"{', '.join(FOREIGN_INITIATOR)}")
+        self._foreign_initiator = foreign_initiator
 
     # -- observation ----------------------------------------------------
 
@@ -189,7 +252,19 @@ class SessionManager:
 
         Exactly one of `session` and `refusal` is non-None.
         """
+        return self._establish(request, relayed=False)
+
+    def _establish(self, request: SessionRequest, relayed: bool) -> Tuple[
+            Optional[Session], Tuple[Signal, ...], Optional[Refusal]]:
         cid = request.request_id
+        if not relayed and self._foreign_initiator == "refuse" and \
+                identity.outside([request.initiator], self._profile.identity.domains):
+            # Before anything else: a caller this deployment does not serve
+            # learns nothing about the target, the roles or the call types
+            # (PLT-IDM-008; RES-OP-11).
+            return self._refuse(cid, request, INITIATOR_NOT_SERVED,
+                                "initiator is outside the profile's declared domains",
+                                step="initiator")
         invoker = Invoker(self._auditor, cid)
         signals: List[Signal] = []
         request = self._located(request)
@@ -292,7 +367,38 @@ class SessionManager:
             # 5 — IF-SES.decide
             decision = invoker.call("IF-SES", "decide",
                                     self._hooks.session_policy.decide,
-                                    request, resolution)
+                                    request, resolution,
+                                    post=lambda d: self._check_decision(d, request))
+
+            # §5.2 INV-1: the decision's limit is applied as decided, whatever
+            # the profile's table says (RES-OP-12).
+            truncated_from = None
+            limit = decision.max_participants
+            if limit is not None and len(resolution.members) > limit:
+                over = (f"{len(resolution.members)} participants, "
+                        f"the session decision allows {limit}")
+                if request.adhoc:
+                    # 17.4.2.2: an ad hoc call over its limit is refused, 189.
+                    return self._refuse(cid, request, ADHOC_TOO_MANY_PARTICIPANTS, over)
+                if not self._is_group_call(request, resolution):
+                    return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED, over)
+                if self._over_limit(request) == "refuse":
+                    # The profile's recorded deviation from 6.3.5.5 (RES-OP-12
+                    # ruling 1 as a setting, 2026-10-16): 486 + 122 as for a
+                    # call already full (10.1.2).
+                    return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED,
+                                        over + " (group_over_limit: refuse)")
+                # 6.3.5.5 and 10.1.1.4.1: a group call is not refused; only
+                # `limit` of its members take part, and the 200 OK says so
+                # with warning 122.
+                kept = self._first_members(resolution.members, request.initiator, limit)
+                if not [m for m in kept if m != request.initiator]:
+                    # A limit of 1 on a group the caller belongs to leaves no
+                    # one to invite: a call with no callee is not established.
+                    return self._refuse(cid, request, PARTICIPANT_LIMIT_EXCEEDED,
+                                        over + ", so no one else can be invited")
+                truncated_from = len(resolution.members)
+                resolution = dataclasses.replace(resolution, members=kept)
 
             # PLT-OAM-008: a session requiring recording is not established
             # when no recorder is available.
@@ -307,13 +413,22 @@ class SessionManager:
                 floor_policy = invoker.call(
                     "IF-SES", "floor_policy",
                     self._hooks.session_policy.floor_policy, request, resolution,
-                    post=self._check_floor_policy)
+                    post=lambda p: self._check_floor_policy_for(p, request))
 
             # 7 — IF-BER
             bearer = invoker.call("IF-BER", "select",
                                   self._hooks.bearer_selector.select,
                                   request, priority, tuple(request.media),
                                   post=lambda b: self._check_bearer(b, priority))
+
+            # 7b — IF-ICX.map_outbound: what the partner is told, before any
+            # QoS is reserved, so a failing hook leaves nothing to undo.
+            asserted = None
+            if partner is not None:
+                asserted = invoker.call(
+                    "IF-ICX", "map_outbound",
+                    self._hooks.interconnection_gateway.map_outbound,
+                    request, priority)
 
             # 8 — reserve and establish
             if not self._platform.reserve_qos(bearer):
@@ -333,17 +448,16 @@ class SessionManager:
         session = Session(
             correlation_id=cid, request=request, resolution=resolution,
             priority=priority, decision=decision, bearer=bearer,
-            members=tuple(resolution.members),
+            members=tuple(resolution.members), truncated_from=truncated_from,
         )
 
         if floor_policy is not None:
+            # Every floor transition goes to the audit trail under the
+            # session's correlation id, whoever drives the machine (PLT-FC-011,
+            # RES-OP-03).
             session.floor = floor_mod.FloorControl(
-                floor_mod.Policy.from_hook(floor_policy), clock=self._clock)
-            if not self._defer_floor:
-                session.floor.handle(floor_mod.Event(
-                    floor_mod.EventType.SESSION_ESTABLISHED,
-                    participant=request.initiator,
-                    floor_priority=priority.floor_priority))
+                floor_mod.Policy.from_hook(floor_policy), clock=self._clock,
+                observer=self._floor_observer(cid))
 
         if decision.recording_required:
             signals.append(Signal(SignalType.START_RECORDING))
@@ -353,8 +467,6 @@ class SessionManager:
             # local fan-out. The resolution carries no local members.
             session.gateway = partner.gateway
             session.partner_id = partner.partner_id
-            asserted = self._hooks.interconnection_gateway.map_outbound(
-                request, priority)
             signals.append(Signal(SignalType.INVITE, target=partner.gateway,
                                   detail={
                                       "auto_answer": decision.auto_answer,
@@ -392,19 +504,43 @@ class SessionManager:
 
         session.state = SessionState.ESTABLISHED
         self._sessions[cid] = session
-
-        self._auditor.emit(RecordType.SESSION_ADMITTED, cid,
-                           call_type=request.call_type,
-                           initiator=request.initiator,
-                           priority=priority.label, scope=priority.scope,
-                           members=len(resolution.members),
-                           resolved_from=resolution.resolved_from,
-                           **self._functions)
-        self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
-                           members=tuple(resolution.members),
-                           qos_identifier=bearer.qos_identifier,
-                           recording=decision.recording_required,
-                           **self._functions)
+        unreported = self._unreported_floor_deviation(request, floor_policy)
+        if unreported:
+            log.warning("session %s: %s", cid, unreported[0]["consequence"],
+                        extra={"correlation_id": cid})
+        try:
+            self._auditor.emit(RecordType.SESSION_ADMITTED, cid,
+                               call_type=request.call_type,
+                               initiator=request.initiator,
+                               priority=priority.label, scope=priority.scope,
+                               members=len(resolution.members),
+                               resolved_from=resolution.resolved_from,
+                               **self._functions)
+            self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
+                               members=tuple(resolution.members),
+                               truncated_from=truncated_from,
+                               qos_identifier=bearer.qos_identifier,
+                               recording=decision.recording_required,
+                               **({"deviations": unreported} if unreported else {}),
+                               **self._functions)
+        except BaseException:
+            # Not recorded, so not established: a session left here would
+            # count toward capacity and be a pre-emption candidate, with no
+            # record of it ever (review of RES-OP-14). Its trail is closed
+            # where it can be: a failure record, best effort.
+            self._sessions.pop(cid, None)
+            self._emit_unless_lost(RecordType.SESSION_FAILED, cid,
+                                   call_type=request.call_type,
+                                   initiator=request.initiator,
+                                   reason_code="", detail="establishment not recorded")
+            raise
+        # The floor starts after the session's own records, so the trail
+        # reads admitted, established, then the floor.
+        if session.floor is not None and not self._defer_floor:
+            session.floor.handle(floor_mod.Event(
+                floor_mod.EventType.SESSION_ESTABLISHED,
+                participant=request.initiator,
+                floor_priority=priority.floor_priority))
         return session, tuple(signals), None
 
     # -- inbound from a non-MC system -------------------------------------
@@ -417,6 +553,9 @@ class SessionManager:
         receives NO privilege from having arrived through a gateway: it is
         resolved, prioritised and admitted exactly like a local request.
         Priority the foreign system asserted is advisory; IF-PRI decides.
+        One check is skipped: MCX_FOREIGN_INITIATOR, since a relayed caller
+        is foreign by nature (RES-OP-11). This is the IF-IWF API path only; a
+        gateway's INVITE over SIP is an ordinary request and subject to it.
         """
         # A read-only copy: the gateway must not change what the core reads
         # back below, nor the caller's own mapping (RES-OP-06).
@@ -438,7 +577,7 @@ class SessionManager:
                            inbound_from=str(foreign.get("system") or ""),
                            mapped_call_type=request.call_type,
                            asserted_priority=str(foreign.get("priority") or ""))
-        return self.establish(request)
+        return self._establish(request, relayed=True)
 
     # -- release ---------------------------------------------------------
 
@@ -447,18 +586,66 @@ class SessionManager:
         session = self._sessions.get(correlation_id)
         if session is None or session.state is not SessionState.ESTABLISHED:
             return ()
-        if session.floor is not None:
-            session.floor.handle(floor_mod.Event(
-                floor_mod.EventType.SESSION_RELEASED))
+        # A release is never undone nor held up by the audit trail: a session
+        # kept up because its record could not be written is the unsafe way
+        # to fail. A record that cannot be written is logged as lost, and the
+        # release completes (RES-OP-03 review).
+        self._final_floor(session)
         session.state = SessionState.RELEASED
         if session.gateway is not None:
             signals = [Signal(SignalType.BYE, target=session.gateway)]
         else:
             signals = [Signal(SignalType.BYE, target=m) for m in session.members]
         signals.append(Signal(SignalType.RELEASE_QOS))
-        self._auditor.emit(RecordType.SESSION_RELEASED, correlation_id,
-                           cause=cause)
+        self._emit_unless_lost(RecordType.SESSION_RELEASED, correlation_id,
+                               cause=cause)
         return tuple(signals)
+
+    def _final_floor(self, session: Session) -> None:
+        """End the session's floor; its last transition stands even if its
+        record cannot be written (FloorControl.handle `final`)."""
+        if session.floor is None:
+            return
+        try:
+            session.floor.handle(floor_mod.Event(floor_mod.EventType.SESSION_RELEASED),
+                                 final=True)
+        except Exception:                                   # noqa: BLE001
+            log.exception("session %s: floor release not recorded; released anyway",
+                          session.correlation_id,
+                          extra={"correlation_id": session.correlation_id})
+
+    def _emit_unless_lost(self, record_type: RecordType, correlation_id: str,
+                          **detail: Any) -> None:
+        try:
+            self._auditor.emit(record_type, correlation_id, **detail)
+        except Exception:                                   # noqa: BLE001
+            log.exception("session %s: %s record lost; the session ended anyway",
+                          correlation_id, record_type.value,
+                          extra={"correlation_id": correlation_id})
+
+    # -- floor audit (PLT-FC-011, RES-OP-14) ------------------------------
+
+    def _floor_observer(self, cid: str) -> Callable[[floor_mod.Transition], None]:
+        auditor = self.floor_auditor()
+        return lambda transition: auditor.emit(
+            RecordType.FLOOR_TRANSITION, cid, **transition.as_record())
+
+    def floor_auditor(self) -> Any:
+        """What records the floor's work: its transitions, and the IF-PRI
+        evaluations a floor request makes (a host's Invoker for those uses
+        this). Under "deny" the auditor itself: a failed write reaches the
+        caller, and FloorControl.handle undoes the transition. Under "allow"
+        one whose failed write is counted into the auditor's gap and lets the
+        work go on (Auditor.emit_or_count)."""
+        return self._auditor if self._floor_unrecorded == "deny" else \
+            _CountingAuditor(self._auditor)
+
+    def floor_audit_state(self) -> Dict[str, Any]:
+        """For the health document: the setting, the floor's records lost
+        since the process started (transitions and floor-request IF-PRI
+        evaluations), and the gap still to be written, if any."""
+        return {"floor_unrecorded": self._floor_unrecorded,
+                **self._auditor.gap_state()}
 
     def start_floor(self, correlation_id: str) -> Tuple[floor_mod.Action, ...]:
         """Start a deferred floor machine; returns its opening actions.
@@ -482,27 +669,32 @@ class SessionManager:
         session = self._sessions.pop(correlation_id, None)
         if session is None:
             return ()
-        if session.floor is not None:
-            session.floor.handle(floor_mod.Event(
-                floor_mod.EventType.SESSION_RELEASED))
-        self._auditor.emit(RecordType.SESSION_FAILED, correlation_id,
-                           call_type=session.request.call_type,
-                           initiator=session.request.initiator,
-                           reason_code="", detail=reason, abandoned=True)
+        self._final_floor(session)
+        self._emit_unless_lost(RecordType.SESSION_FAILED, correlation_id,
+                               call_type=session.request.call_type,
+                               initiator=session.request.initiator,
+                               reason_code="", detail=reason, abandoned=True)
         return (Signal(SignalType.RELEASE_QOS),)
 
     # -- pre-emption -----------------------------------------------------
 
-    def preemption_victims(self, incoming: PriorityDecision) -> Tuple[Session, ...]:
+    def preemption_victims(self, incoming: PriorityDecision,
+                           correlation_id: str) -> Tuple[Session, ...]:
         """§8.2 steps 2–3. Selection only: the caller releases the victims.
 
         Every gate must pass. Cross-scope pairs are excluded by `compare`
         returning 0, and the capability and vulnerability flags are checked
         independently of it (PLT-PRI-002).
+
+        Each `compare` is an invocation like any other (ICD-GEN-040/041),
+        audited under the incoming session's `correlation_id`; one that fails
+        raises HookFailure, and the caller fails the incoming session
+        (ICD-GEN-021), as for any hook on its path.
         """
         if not incoming.preemption_capability:
             return ()
         policy = self._hooks.priority_policy
+        invoker = Invoker(self._auditor, correlation_id)
         victims = []
         for session in self.active:
             candidate = session.priority
@@ -510,7 +702,8 @@ class SessionManager:
                 continue
             if candidate.scope != incoming.scope:
                 continue
-            if policy.compare(incoming, candidate) <= 0:
+            if invoker.call("IF-PRI", "compare", policy.compare, incoming, candidate,
+                            post=self._check_comparison) <= 0:
                 continue
             victims.append(session)
         return tuple(victims)
@@ -610,6 +803,109 @@ class SessionManager:
                 f"resolution returned {len(outside)} member(s) outside the "
                 f"profile's declared domains: {', '.join(map(repr, outside[:3]))}")
 
+    def _check_decision(self, decision: SessionDecision,
+                        request: SessionRequest) -> None:
+        """PLT-ICD-001 §5.2 POST-1 and POST-2 on what `decide` returned
+        (RES-OP-12). POST-1's "consistent with the call type's declared
+        session model" is read as the same model: the model is declared per
+        call type and nothing else could make another one consistent."""
+        if type(decision) is not SessionDecision:
+            raise HookContractViolation(
+                f"session decision is a {type(decision).__name__}, not a SessionDecision")
+        for name in ("auto_answer", "acknowledgement_required", "recording_required"):
+            if type(getattr(decision, name)) is not bool:
+                raise HookContractViolation(
+                    f"session decision {name} {getattr(decision, name)!r} is not a boolean")
+        declared = self._profile.call_type(request.call_type)
+        if declared is None:
+            raise HookContractViolation(
+                f"session decision for undeclared call type {request.call_type!r}")
+        if decision.model is not SessionModel(declared.session_model):
+            raise HookContractViolation(
+                f"session decision model {decision.model!r} is not call type "
+                f"{declared.id!r}'s declared {declared.session_model!r} (§5.2 POST-1)")
+        limit = decision.max_participants
+        if limit is not None and (type(limit) is not int or limit < 1):
+            raise HookContractViolation(
+                f"session decision max_participants {limit!r} is neither None nor "
+                "an integer of at least 1 (§5.2 POST-2)")
+
+    def _is_group_call(self, request: SessionRequest, resolution: Resolution) -> bool:
+        """A group session in the sense of TS 24.379 6.3.5.5: a group
+        resolved for a call type that is not a private call. A private call
+        whose target resolved to a group is not made a smaller group call."""
+        if resolution.kind is not ResolutionKind.GROUP:
+            return False
+        declared = self._profile.call_type(request.call_type)
+        signature = declared.mc_signature if declared is not None else None
+        return signature is None or signature.session_type != "private"
+
+    def _over_limit(self, request: SessionRequest) -> str:
+        """The call type's `group_over_limit`: "truncate" or "refuse". Only
+        reached for a group call, whose call type `_is_group_call` found."""
+        declared = self._profile.call_type(request.call_type)
+        if declared is None:
+            raise HookContractViolation(
+                f"group call for undeclared call type {request.call_type!r}")
+        return declared.group_over_limit
+
+    def _unreported_floor_deviation(self, request: SessionRequest,
+                                    policy: Optional[FloorPolicy]) -> list:
+        """The startup report lists `deny` where the call type DECLARES both
+        queueing and override. A hook may compute both flags (§5.3), so a
+        session whose policy enables them where the declaration does not runs
+        `deny` unreported: say so in its own record (review, 2026-10-16)."""
+        if policy is None or policy.preemption_at_full_queue != "deny" or \
+                not (policy.queueing_enabled and policy.override_allowed):
+            return []
+        declared = self._profile.call_type(request.call_type)
+        if declared is not None and declared.floor.queueing_enabled and \
+                declared.floor.override_allowed:
+            return []                        # reported at startup
+        return [{"setting": f"call_types[{request.call_type}].floor."
+                            "preemption_at_full_queue",
+                 "value": "deny", "ref": "FC-OP-07",
+                 "departs_from": "TS 24.380 6.3.4.4.7 item 2e",
+                 "consequence": "the floor policy enables queueing and override where "
+                                "the call type declares otherwise, so a pre-emptor "
+                                "meeting a full queue is denied queue-full, which the "
+                                "startup report does not list"}]
+
+    def _check_floor_policy_for(self, policy: FloorPolicy,
+                                request: SessionRequest) -> None:
+        """§5.3 POST-1..5, and POST-5 read as equality: the pre-emptor's
+        place is the call type's declared choice, so what the service reports
+        at startup is what runs (review of the 2026-10-16 settings)."""
+        self._check_floor_policy(policy)
+        declared = self._profile.call_type(request.call_type)
+        if declared is not None and policy.preemption_at_full_queue != \
+                declared.floor.preemption_at_full_queue:
+            raise HookContractViolation(
+                f"floor policy preemption_at_full_queue "
+                f"{policy.preemption_at_full_queue!r} is not the call type's declared "
+                f"{declared.floor.preemption_at_full_queue!r} (§5.3 POST-5)")
+
+    @staticmethod
+    def _first_members(members: Sequence[str], initiator: str,
+                       limit: int) -> Tuple[str, ...]:
+        """The `limit` participants of a group call over its limit.
+
+        TS 24.379 6.3.5.5 NOTE 2 counts the session's participants, so the
+        initiator, when a member, is one of them and always kept. The others
+        are taken in the resolver's order: the platform has no
+        <on-network-required> members, and which to prefer is otherwise
+        operator policy (NOTE 3), which the profile states in that order."""
+        keep = limit - 1 if initiator in members else limit
+        others = [m for m in members if m != initiator][:keep]
+        return tuple(m for m in members if m == initiator or m in others)
+
+    @staticmethod
+    def _check_comparison(result: int) -> None:
+        """§4.2: `compare` returns an integer; `True` is not one."""
+        if type(result) is not int:
+            raise HookContractViolation(
+                f"compare returned {type(result).__name__}, not an integer")
+
     @staticmethod
     def _check_floor_policy(policy: FloorPolicy) -> None:
         """PLT-ICD-001 §5.3 POST-1/2/3, checked on what the hook returned:
@@ -636,6 +932,12 @@ class SessionManager:
         if policy.queueing_enabled and depth < 1:
             raise HookContractViolation(
                 "floor policy enables queueing with max_queue_depth 0")
+        if type(policy.preemption_at_full_queue) is not str or \
+                policy.preemption_at_full_queue not in PREEMPTION_AT_FULL_QUEUE:
+            raise HookContractViolation(
+                f"floor policy preemption_at_full_queue "
+                f"{policy.preemption_at_full_queue!r} is not one of "
+                f"{', '.join(PREEMPTION_AT_FULL_QUEUE)}")
         if not isinstance(policy.timers_ms, Mapping):
             raise HookContractViolation(
                 f"floor policy timers_ms is a {type(policy.timers_ms).__name__}, "
@@ -717,7 +1019,7 @@ class SessionManager:
 
     def _located(self, request: SessionRequest) -> SessionRequest:
         """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains
-        the location attributes it stands for (e.g. track_section), which
+        the location attributes it stands for (e.g. an area the profile names), which
         is what functional identities are keyed on. Attributes the request
         already carries are kept: the map fills in, it does not overrule.
         An unmapped cell leaves the request as it is."""
@@ -761,7 +1063,14 @@ class SessionManager:
                    identity) is left out. ii: criteria go to the profile.
                    Neither a list nor criteria: nothing to determine, 187.
         Criteria that find more members than the limit are also 189: the
-        limit is on the call's size, whatever named its members.
+        limit is on the call's size, whatever named its members. That check
+        is the session decision's, after IF-SES `decide` (RES-OP-12).
+
+        Step 6 is the one place the core reads the call type's declared
+        limit rather than the session decision's: 17.4.2.2 checks the list
+        against the configured <max-no-participants> before step 12
+        determines the participants, and `decide` needs them (PLT-ICD-001
+        §5.2, "Checked and applied by the core").
         """
         listed = tuple(u for u in dict.fromkeys(request.participants)
                        if u != request.initiator)
@@ -815,9 +1124,6 @@ class SessionManager:
         if not members:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
                           "the criteria matched only the caller")
-        if limit is not None and len(members) > limit:
-            return None, (ADHOC_TOO_MANY_PARTICIPANTS,
-                          f"the criteria matched {len(members)}, limit {limit}")
         return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
                           group_id=group_id,
                           resolved_from=found.resolved_from or "adhoc:criteria"), None
@@ -848,7 +1154,9 @@ class SessionManager:
         # PLT-HOK-033: nothing is established, no invitation is sent.
         self._auditor.emit(RecordType.SESSION_REFUSED, cid,
                            call_type=request.call_type,
-                           initiator=request.initiator,
+                           # An asserted identity is the peer's text: bounded
+                           # (RES-OP-11 review; RES-OP-15 bounds the Call-ID).
+                           initiator=_bounded(request.initiator),
                            reason_code=reason_code, detail=detail)
         return None, (Signal(SignalType.RESPONSE_REJECT,
                              target=request.initiator,

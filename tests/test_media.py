@@ -1134,3 +1134,30 @@ def test_a_floor_revoke_uses_the_revoke_cause_namespace():
     # table (TS 24.380 8.2.10.2): #2, #4, #255 -- literals, not imports.
     assert {k.value: v for k, v in media._REVOKE_CAUSE.items()} == {
         "media-burst-too-long": 2, "media-burst-pre-empted": 4, "other": 255}
+
+
+def test_one_session_s_failing_floor_timer_does_not_stop_the_others():
+    """RES-OP-03 review: a floor transition whose audit record fails raises
+    out of MediaSession.tick. That must not skip the other sessions' timers
+    (nor, after the plane, the SIP timers SipCore.tick runs next)."""
+    from core.release import Release
+    from service.media import UdpMediaPlane
+
+    ticked, scopes = [], []
+
+    class Session:
+        def __init__(self, cid, fails):
+            self.cid, self.fails = cid, fails
+
+        def tick(self):
+            from service import logs
+            ticked.append(self.cid)
+            scopes.append(logs.current())          # RES-OP-04: in its scope
+            if self.fails:
+                raise OSError("audit store unavailable")
+
+    plane = UdpMediaPlane("127.0.0.1", None, lambda: 0, Release.REL_17)
+    plane._sessions.update({c: Session(c, c == "b") for c in ("a", "b", "c")})
+    plane.tick()
+    assert ticked == ["a", "b", "c"]
+    assert scopes == ["a", "b", "c"]

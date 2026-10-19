@@ -49,6 +49,104 @@ KNOWN_BEARERS = (BEARER_NONE, BEARER_STUB)
 # anyone having chosen to.
 STRICT_RELEASE_VALUES = {"true": True, "false": False}
 
+# Owner ruling 2026-10-16: the decisions taken as fixed behaviour become
+# deployment settings, each required with no default like the ones above. A
+# value that departs from the standard the original decision followed starts,
+# but is reported: logged at startup, listed in the health document and in the
+# startup audit record (service/runtime.py, `deviations`).
+#
+# SIP-OP-10: the status of a refusal for a service condition (capacity,
+# recording, QoS, gateway, partner; not resolver-unavailable, core/sip.py
+# KEEP_503). 503 is RFC 3261 21.5.4's; a
+# proxy that receives only a 503 sends 500 upstream and drops the Warning
+# (16.7 step 6). 480 crosses a proxy intact but says "temporarily
+# unavailable" of the callee, which is not what happened.
+SERVICE_REFUSAL_STATUSES = (503, 480)
+# SIP-OP-18 item 6: may a dialog move to a new connection that proves the same
+# party (a reconnecting client keeps its calls), or does it stay on the one it
+# was established on.
+DIALOG_TAKEOVER_VALUES = ("same-party", "never")
+# ADHOC-OP-03: read the client's location report (TS 24.379 annex F.3) or
+# ignore it. Ignored, a call to a location-dependent identity is refused
+# `no-location-binding`.
+LOCATION_REPORT_VALUES = ("read", "ignore")
+# RES-OP-05: HTTPS on the HTTP interface (HTTP-1, PLT-SRS 3.1), or plain HTTP.
+HTTP_TLS_VALUES = ("on", "off")
+# PLT-GEN-011 as amended 2026-10-18: every duration setting may be stated in
+# seconds or in milliseconds. Each seconds setting and its millisecond
+# setting; at least one is set; with both, the milliseconds apply and a
+# disagreement is reported at startup (service/runtime.py).
+SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}
+SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS",
+            "MCX_SESSION_EXPIRES_MS", "MCX_SESSION_EXPIRES")
+HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
+# RES-OP-14 (owner ruling 2026-10-16): a floor transition the audit store
+# cannot take is undone and not sent ("deny", PLT-FC-011 kept: the floor
+# stops while the store fails), or sent unrecorded and counted, the gap
+# written to the trail when the store recovers ("allow").
+FLOOR_UNRECORDED_VALUES = ("deny", "allow")
+# RES-OP-11 (owner ruling 2026-10-17): a caller outside the profile's
+# declared domains -- possible when a trusted SIP core asserts it -- is
+# refused 404 + 141 ("refuse", PLT-IDM-008) or served ("allow").
+FOREIGN_INITIATOR_VALUES = ("refuse", "allow")
+
+
+def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
+    """A required setting with no default, one of `values`."""
+    raw = (env.get(key) or "").strip().lower()
+    shown = " or ".join(repr(str(v)) for v in values)
+    if not raw:
+        raise StartupRefused(f"{key} is not set: {what} ({shown}); there is no default")
+    if raw not in {str(v) for v in values}:
+        raise StartupRefused(f"{key}={raw!r} must be {shown}")
+    return raw
+
+
+@dataclass(frozen=True)
+class HttpTlsConfig:
+    cert: Path
+    key: Path
+    ca: Optional[Path]
+    client_auth: str            # "required" | "optional" | "none"
+
+    @staticmethod
+    def from_env(env: Mapping[str, str]) -> Optional["HttpTlsConfig"]:
+        """None when MCX_HTTP_TLS=off. On, every file must be stated and
+        exist, and a CA is required unless client authentication is none."""
+        if _choice(env, "MCX_HTTP_TLS", HTTP_TLS_VALUES,
+                   "state whether the HTTP interface (health, group documents) "
+                   "uses TLS") == "off":
+            for key in ("MCX_HTTP_TLS_CERT", "MCX_HTTP_TLS_KEY", "MCX_HTTP_TLS_CA",
+                        "MCX_HTTP_CLIENT_AUTH"):
+                if (env.get(key) or "").strip():
+                    # Refused rather than ignored: whoever set it would believe
+                    # the interface is encrypted.
+                    raise StartupRefused(f"{key} is set but MCX_HTTP_TLS=off")
+            return None
+        paths = []
+        for key in ("MCX_HTTP_TLS_CERT", "MCX_HTTP_TLS_KEY"):
+            raw = (env.get(key) or "").strip()
+            if not raw:
+                raise StartupRefused(f"{key} is not set: MCX_HTTP_TLS=on requires it")
+            if not Path(raw).is_file():
+                raise StartupRefused(f"{key}: TLS file {raw} does not exist")
+            paths.append(Path(raw))
+        auth = _choice(env, "MCX_HTTP_CLIENT_AUTH", HTTP_CLIENT_AUTH_VALUES,
+                       "state whether HTTP clients must present a certificate")
+        raw_ca = (env.get("MCX_HTTP_TLS_CA") or "").strip()
+        if auth == "none":
+            if raw_ca:
+                raise StartupRefused("MCX_HTTP_TLS_CA is set but MCX_HTTP_CLIENT_AUTH=none")
+            return HttpTlsConfig(paths[0], paths[1], None, auth)
+        if not raw_ca:
+            raise StartupRefused(
+                f"MCX_HTTP_TLS_CA is not set: MCX_HTTP_CLIENT_AUTH={auth} cannot "
+                "verify a client certificate without a CA")
+        if not Path(raw_ca).is_file():
+            raise StartupRefused(f"MCX_HTTP_TLS_CA: CA file {raw_ca} does not exist")
+        return HttpTlsConfig(paths[0], paths[1], Path(raw_ca), auth)
+
+
 # Settings whose content moved into the network profile (NET-OP-01).
 MOVED_TO_NETWORK = ("MCX_CELLS_FILE", "MCX_SIP_TRUSTED_PEERS", "MCX_GROUPS_FILE")
 
@@ -65,6 +163,41 @@ def is_fqdn(name: str) -> bool:
             and all(_LABEL.fullmatch(label) for label in labels))
 
 
+def _session_interval(env: Mapping[str, str]) -> Tuple[int, Optional[int]]:
+    """SIP-OP-17, PLT-GEN-011 as amended 2026-10-18: the RFC 4028 session interval as
+    MCX_SESSION_EXPIRES_MS (milliseconds, a whole number of seconds, at
+    least 90000) or MCX_SESSION_EXPIRES (seconds, at least 90), or both; at
+    least one. Every value set must be valid. Returns (the interval in ms,
+    the seconds as stated or None); the milliseconds take priority."""
+    raw_ms = (env.get("MCX_SESSION_EXPIRES_MS") or "").strip()
+    raw_s = (env.get("MCX_SESSION_EXPIRES") or "").strip()
+    if not raw_ms and not raw_s:
+        raise StartupRefused(
+            "MCX_SESSION_EXPIRES_MS is not set (nor MCX_SESSION_EXPIRES, in "
+            "seconds): SIP is enabled and requires the RFC 4028 session "
+            "interval; there is no default")
+    ms = s = None
+    if raw_ms:
+        if not (raw_ms.isascii() and raw_ms.isdigit()) or len(raw_ms) > 9 or \
+                int(raw_ms) < MIN_SE_S * 1000 or int(raw_ms) % 1000:
+            raise StartupRefused(
+                f"MCX_SESSION_EXPIRES_MS={raw_ms[:32]!r}: give the RFC 4028 "
+                "session interval in milliseconds, a whole number of seconds "
+                f"(RFC 4028 counts in seconds), at least {MIN_SE_S * 1000}. It "
+                "bounds how long a call whose far end vanished without a BYE "
+                "stays up")
+        ms = int(raw_ms)
+    if raw_s:
+        if not (raw_s.isascii() and raw_s.isdigit()) or len(raw_s) > 6 or \
+                int(raw_s) < MIN_SE_S:
+            raise StartupRefused(
+                f"MCX_SESSION_EXPIRES={raw_s[:32]!r}: give the RFC 4028 session "
+                f"interval in whole seconds, at least {MIN_SE_S}. It bounds how "
+                "long a call whose far end vanished without a BYE stays up")
+        s = int(raw_s)
+    return (ms if ms is not None else s * 1000), s
+
+
 @dataclass(frozen=True)
 class SipConfig:
     host: str
@@ -78,10 +211,20 @@ class SipConfig:
     # The trusted SIP cores and their CA (ICD-OP-08, ICD-OP-10) are network
     # data: see service/network.py.
     # SIP-OP-17 / CA-20b (decided 2026-09-25): the RFC 4028 session interval
-    # the platform asks for and caps a longer request to, in seconds. It is
-    # how long a call whose far end vanished without a BYE can outlive it.
-    # Required, no default; at least 90 (RFC 4028's smallest Min-SE).
-    session_expires: int = 0
+    # the platform asks for and caps a longer request to. It is how long a
+    # call whose far end vanished without a BYE can outlive it. Required, no
+    # default; in milliseconds (PLT-GEN-011), a whole number of seconds since
+    # RFC 4028 counts in seconds, at least 90 s (RFC 4028's smallest Min-SE).
+    # PLT-GEN-011 as amended 2026-10-18: MCX_SESSION_EXPIRES_MS, or
+    # MCX_SESSION_EXPIRES in seconds, or both, the milliseconds applying.
+    session_expires_ms: int = 0
+    # MCX_SESSION_EXPIRES as stated, in seconds, or None: checked against
+    # session_expires_ms at startup when both are set.
+    session_expires_s: Optional[int] = None
+    # Owner ruling 2026-10-16 (see SERVICE_REFUSAL_STATUSES and the rest).
+    service_refusal_status: int = 503
+    dialog_takeover: str = "same-party"
+    location_reports: str = "read"
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -91,6 +234,12 @@ class SipConfig:
         client authentication."""
         listen = (env.get("MCX_SIP_LISTEN") or "").strip()
         if not listen:
+            for key in SIP_ONLY:
+                if (env.get(key) or "").strip():
+                    # Refused rather than ignored, like a TLS setting with
+                    # MCX_HTTP_TLS=off: whoever set it would believe it applies.
+                    raise StartupRefused(f"{key} is set but SIP is not enabled "
+                                         "(MCX_SIP_LISTEN)")
             return None
         host, _, port_s = listen.rpartition(":")
         try:
@@ -139,14 +288,21 @@ class SipConfig:
             raise StartupRefused(
                 "MCX_SIP_ROLES=participating alone is not supported: the "
                 "controlling function is not reachable remotely (SIP-OP-03)")
-        raw_se = need("MCX_SESSION_EXPIRES")
-        if not raw_se.isdigit() or len(raw_se) > 6 or int(raw_se) < MIN_SE_S:
-            raise StartupRefused(
-                f"MCX_SESSION_EXPIRES={raw_se!r}: give the RFC 4028 session "
-                f"interval in whole seconds, at least {MIN_SE_S}. It bounds how "
-                "long a call whose far end vanished without a BYE stays up")
+        expires_ms, expires_s = _session_interval(env)
+        status = _choice(env, "MCX_SERVICE_REFUSAL_STATUS", SERVICE_REFUSAL_STATUSES,
+                         "state the SIP status of a refusal for a service condition "
+                         "such as capacity (PLT-VP-R1 SIP-OP-10)")
+        takeover = _choice(env, "MCX_DIALOG_TAKEOVER", DIALOG_TAKEOVER_VALUES,
+                           "state whether a dialog may move to a new connection that "
+                           "proves the same party (SIP-OP-18 item 6)")
+        location = _choice(env, "MCX_LOCATION_REPORTS", LOCATION_REPORT_VALUES,
+                           "state whether the client's location report is read "
+                           "(ADHOC-OP-03)")
         return SipConfig(host, port, uri, cert, key, ca, auth, roles,
-                         session_expires=int(raw_se))
+                         session_expires_ms=expires_ms,
+                         session_expires_s=expires_s,
+                         service_refusal_status=int(status),
+                         dialog_takeover=takeover, location_reports=location)
 
 
 @dataclass(frozen=True)
@@ -202,8 +358,14 @@ class Config:
     # map, trusted SIP cores and their CA, and (SVC-OP-03, decided
     # 2026-09-26) the groups and users. Required, no default.
     network: Path
+    # RES-OP-14: "deny" or "allow". Required, no default.
+    floor_unrecorded: str = ""
+    # RES-OP-11: "refuse" or "allow". Required, no default.
+    foreign_initiator: str = ""
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
+    # RES-OP-05, owner ruling 2026-10-16: None is MCX_HTTP_TLS=off.
+    http_tls: Optional[HttpTlsConfig] = None
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
@@ -278,7 +440,7 @@ class Config:
                 "caller's participant list may hold (a positive integer); there "
                 "is no default, because an unbounded list is unbounded work "
                 "before any participant is resolved")
-        if not raw_max.isdigit() or int(raw_max) < 1:
+        if not (raw_max.isascii() and raw_max.isdigit()) or int(raw_max) < 1:
             raise StartupRefused(
                 f"MCX_ADHOC_LIST_MAX={raw_max!r} must be a whole number of at least 1")
 
@@ -303,6 +465,15 @@ class Config:
                 "cell map, trusted SIP cores and their CA, groups and users); there is no default, "
                 "and every audit record names the one in force")
 
+        floor_unrecorded = _choice(
+            env, "MCX_FLOOR_UNRECORDED", FLOOR_UNRECORDED_VALUES,
+            "state whether the floor may run unrecorded while the audit store is "
+            "failing (PLT-VP-R1 RES-OP-14)")
+        foreign_initiator = _choice(
+            env, "MCX_FOREIGN_INITIATOR", FOREIGN_INITIATOR_VALUES,
+            "state whether a caller outside the profile's declared domains is "
+            "served (PLT-VP-R1 RES-OP-11)")
+        http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
             profile_names=names,
@@ -318,6 +489,9 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             network=Path(network),
+            floor_unrecorded=floor_unrecorded,
+            foreign_initiator=foreign_initiator,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
+            http_tls=http_tls,
         )

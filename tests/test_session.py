@@ -26,10 +26,12 @@ from core.hooks import (  # noqa: E402
     SessionRequest,
 )
 from core.invoke import DeadlineMode, HookFailure, Invoker  # noqa: E402
+from core.floor import FloorState  # noqa: E402
 from core.session import (  # noqa: E402
     Platform,
     SessionManager,
     SessionState,
+    Signal,
     SignalType,
 )
 
@@ -166,7 +168,7 @@ def test_participant_limit_refuses_before_establishment(manager):
     session, signals, refusal = manager.establish(
         req(call_type="private", target="grp:alpha"))
     assert session is None
-    assert refusal.reason_code == "capacity-exhausted"
+    assert refusal.reason_code == "participant-limit-exceeded"
     assert SignalType.INVITE not in types(signals)
 
 
@@ -451,13 +453,14 @@ def test_ad_hoc_participants_outside_the_domains_are_a_contract_violation(manage
 # --------------------------------------------------------------------------
 
 
-def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
+def _altered(mcx, sink, *, floor=None, bearer=None, priority=None, decision=None,
+             profile=None, **manager_kw):
     """A manager whose in-tree hooks' answers are changed by `floor`,
     `bearer` or `priority` (functions of the in-tree answer): a substituted
     hook, as the core sees one."""
     import dataclasses as dc
     resolver = mcx.hooks.identity_resolver
-    for i in range(4):
+    for i in range(6):
         resolver.register_user(f"sip:u{i}@mcptt.example")
     resolver.register_group("grp:alpha", [f"sip:u{i}@mcptt.example" for i in range(4)])
     sp, bs, pp = (mcx.hooks.session_policy, mcx.hooks.bearer_selector,
@@ -470,6 +473,10 @@ def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
         def floor_policy(self, request, resolution):
             got = sp.floor_policy(request, resolution)
             return floor(got) if floor else got
+
+        def decide(self, request, resolution):
+            got = sp.decide(request, resolution)
+            return decision(got) if decision else got
 
     class Bearer:
         def __getattr__(self, n):
@@ -489,8 +496,9 @@ def _altered(mcx, sink, *, floor=None, bearer=None, priority=None):
 
     hooks = dc.replace(mcx.hooks, session_policy=Session(), bearer_selector=Bearer(),
                        priority_policy=Priority())
-    lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
-    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+    lp = loader.LoadedProfile(profile=profile or mcx.profile, hooks=hooks, source=mcx.source)
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()),
+                          **manager_kw)
 
 
 def _refused_as_violation(mgr, sink, interface):
@@ -666,6 +674,244 @@ def test_bearer_decisions_profile_validation_accepts_are_accepted(mcx, sink, cha
 
 
 # --------------------------------------------------------------------------
+# RES-OP-12 — the session decision is applied as decided (§5.2 INV-1)
+# --------------------------------------------------------------------------
+
+
+def _decide(**kw):
+    import dataclasses as dc
+    return lambda d: dc.replace(d, **kw)
+
+
+def _inverted(d):
+    """Every field the profile would not choose, the model aside (POST-1
+    ties it to the call type)."""
+    import dataclasses as dc
+    return dc.replace(d, auto_answer=not d.auto_answer,
+                      acknowledgement_required=not d.acknowledgement_required,
+                      recording_required=not d.recording_required,
+                      max_participants=4)
+
+
+@pytest.mark.vp("VP1-CC-006")
+@pytest.mark.parametrize("call_type", ["prearranged-group", "emergency-group",
+                                       "coordination-group"])
+def test_vp1_cc_006_the_hook_s_decision_is_applied_not_the_table_s(mcx, sink, call_type):
+    """Nothing is inferred from the call type: a decide() differing from the
+    profile in every field is what the session follows."""
+    declared = mcx.profile.call_type(call_type)
+    session, signals, refusal = _altered(mcx, sink, decision=_inverted).establish(
+        req(call_type=call_type))
+    assert refusal is None
+    assert session.decision.auto_answer is (not declared.auto_answer)
+    assert session.decision.max_participants == 4
+    invites = [s for s in signals if s.type is SignalType.INVITE]
+    assert invites
+    for invite in invites:
+        assert invite.detail["auto_answer"] is (not declared.auto_answer)
+        assert invite.detail["acknowledgement_required"] is \
+            (not declared.acknowledgement_required)
+    assert (SignalType.START_RECORDING in types(signals)) is (not declared.recording_required)
+
+
+@pytest.mark.vp("VP1-HOOK-033")
+@pytest.mark.parametrize("auto,ack", [(True, True), (True, False), (False, True),
+                                      (False, False)])
+def test_vp1_hook_033_every_answer_combination_is_signalled_as_decided(mcx, sink, auto, ack):
+    """Emergency group calls are auto-answered in the table; a decision saying
+    otherwise is followed, so nothing is inferred from urgency."""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(auto_answer=auto, acknowledgement_required=ack)
+    ).establish(req(call_type="emergency-group"))
+    assert refusal is None
+    invites = [s for s in signals if s.type is SignalType.INVITE]
+    assert len(invites) == 3
+    assert {(i.detail["auto_answer"], i.detail["acknowledgement_required"])
+            for i in invites} == {(auto, ack)}
+
+
+@pytest.mark.vp("VP1-HOOK-033")
+@pytest.mark.parametrize("required,established", [(True, False), (False, True)])
+def test_vp1_hook_033_recording_follows_the_decision_not_the_table(mcx, sink, required,
+                                                                  established):
+    """No recorder is available. The table requires recording for every mcx
+    call type; only the decision says whether this session does."""
+    mgr = _altered(mcx, sink, decision=_decide(recording_required=required),
+                   platform=Platform(recording_available=lambda: False))
+    session, signals, refusal = mgr.establish(req())
+    assert (session is not None) is established
+    if established:
+        assert SignalType.START_RECORDING not in types(signals)
+    else:
+        assert refusal.reason_code == "recording-unavailable"
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_vp1_cc_006_a_changed_table_changes_nothing_the_hook_decided(mcx, sink):
+    """The converse: the manager's profile says otherwise in every field the
+    decision carries, and the session still follows the hook."""
+    import dataclasses as dc
+    changed = dc.replace(mcx.profile, call_types=tuple(
+        dc.replace(ct, auto_answer=not ct.auto_answer,
+                   acknowledgement_required=not ct.acknowledgement_required,
+                   recording_required=not ct.recording_required, max_participants=1)
+        for ct in mcx.profile.call_types))
+    declared = mcx.profile.call_type("prearranged-group")
+    session, signals, refusal = _altered(mcx, sink, profile=changed).establish(req())
+    assert refusal is None and len(session.members) == 4
+    invite = [s for s in signals if s.type is SignalType.INVITE][0]
+    assert invite.detail["auto_answer"] is declared.auto_answer
+    assert invite.detail["acknowledgement_required"] is declared.acknowledgement_required
+    assert (SignalType.START_RECORDING in types(signals)) is declared.recording_required
+
+
+@pytest.mark.vp("VP1-CC-006", "VP1-HOOK-033")
+@pytest.mark.parametrize("limit,members", [
+    (3, ("sip:u0@mcptt.example", "sip:u1@mcptt.example", "sip:u2@mcptt.example")),
+    (2, ("sip:u0@mcptt.example", "sip:u1@mcptt.example")),
+])
+def test_vp1_cc_006_a_group_over_the_decided_limit_is_truncated(mcx, sink, limit, members):
+    """grp:alpha has 4 members, u0 the caller among them; the profile allows
+    200. TS 24.379 6.3.5.5: only `limit` participants take part, the caller
+    one of them, the rest in the resolver's order (RES-OP-12)."""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=limit)).establish(req())
+    assert refusal is None
+    assert session.members == members and session.truncated_from == 4
+    assert [s.target for s in signals if s.type is SignalType.INVITE] == [
+        m for m in members if m != "sip:u0@mcptt.example"]
+    established = sink.of_type(RecordType.SESSION_ESTABLISHED)[-1].detail
+    assert established["members"] == members and established["truncated_from"] == 4
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_limit_leaving_no_one_to_invite_is_refused(mcx, sink):
+    """A limit of 1 on a group the caller belongs to: truncation would keep
+    only the caller, and a call with no callee is not established (RES-OP-12
+    review; it used to be recorded as established and then answered 480)."""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=1)).establish(req())
+    assert session is None and refusal.reason_code == "participant-limit-exceeded"
+    assert refusal.detail == ("4 participants, the session decision allows 1, "
+                              "so no one else can be invited")
+    assert SignalType.INVITE not in types(signals)
+    assert not sink.of_type(RecordType.SESSION_ESTABLISHED)
+
+
+@pytest.mark.vp("VP1-CC-006")
+@pytest.mark.parametrize("limit", [4, None])
+def test_vp1_cc_006_a_group_within_the_decided_limit_is_whole(mcx, sink, limit):
+    session, _, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=limit)).establish(req())
+    assert refusal is None and len(session.members) == 4
+    assert session.truncated_from is None
+    assert sink.of_type(RecordType.SESSION_ESTABLISHED)[-1].detail["truncated_from"] is None
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_caller_outside_the_group_takes_no_participant_place(mcx, sink):
+    session, _, refusal = _altered(mcx, sink, decision=_decide(max_participants=2)).establish(
+        req(initiator="sip:u5@mcptt.example"))
+    assert refusal is None
+    assert session.members == ("sip:u0@mcptt.example", "sip:u1@mcptt.example")
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_private_call_over_the_limit_is_refused_not_made_a_group_call(mcx, sink):
+    """A private call whose target resolved to a group is not truncated to a
+    smaller group call: 6.3.5.5 is about group sessions."""
+    session, signals, refusal = _altered(mcx, sink).establish(
+        req(call_type="private", target="grp:alpha"))
+    assert session is None and refusal.reason_code == "participant-limit-exceeded"
+    assert refusal.detail == "4 participants, the session decision allows 2"
+    assert SignalType.INVITE not in types(signals)
+    assert SignalType.RESERVE_QOS not in types(signals)
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_group_call_type_with_no_signature_is_truncated_too(mcx, sink):
+    """coordination-group has no MCPTT signature (PRF-OP-01) but is a group
+    call: truncated, not refused."""
+    session, _, refusal = _altered(mcx, sink, decision=_decide(max_participants=2)).establish(
+        req(call_type="coordination-group"))
+    assert refusal is None and session.truncated_from == 4
+    assert session.members == ("sip:u0@mcptt.example", "sip:u1@mcptt.example")
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_broadcast_area_over_the_limit_is_refused_not_truncated(mcx, sink):
+    """6.3.5.5 truncates a group's members; a broadcast area is not a group,
+    and which of its members to drop is nobody's stated policy."""
+    import dataclasses as dc
+    resolver = mcx.hooks.identity_resolver
+    area = tuple(f"sip:u{i}@mcptt.example" for i in range(1, 4))
+
+    class Area:
+        def __getattr__(self, name):
+            return getattr(resolver, name)
+
+        def resolve(self, target, request):
+            return Resolution(kind=ResolutionKind.BROADCAST_AREA, members=area)
+
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=2))
+    mgr._hooks = dc.replace(mgr._hooks, identity_resolver=Area())
+    session, signals, refusal = mgr.establish(req(target="area:yard"))
+    assert session is None and refusal.reason_code == "participant-limit-exceeded"
+    assert SignalType.INVITE not in types(signals)
+    control = _altered(mcx, MemorySink(), decision=_decide(max_participants=3))
+    control._hooks = dc.replace(control._hooks, identity_resolver=Area())
+    session, _, refusal = control.establish(req(target="area:yard"))
+    assert refusal is None and session.members == area
+
+
+def test_a_session_decision_for_an_undeclared_call_type_is_a_violation(manager, mcx):
+    decision = mcx.hooks.session_policy.decide(
+        req(), Resolution(kind=ResolutionKind.USER, members=("x",)))
+    with pytest.raises(HookContractViolation, match="undeclared call type 'nope'"):
+        manager._check_decision(decision, req(call_type="nope"))
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_an_ad_hoc_call_over_the_decided_limit_is_warning_189(mcx, sink):
+    listed = tuple(f"sip:u{i}@mcptt.example" for i in (1, 2, 3))
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=2), adhoc_list_max=10)
+    session, _, refusal = mgr.establish(req(target="", adhoc=True, participants=listed))
+    assert session is None
+    assert refusal.reason_code == "adhoc-too-many-participants"
+    control = _altered(mcx, MemorySink(), decision=_decide(max_participants=3),
+                       adhoc_list_max=10)
+    session, _, refusal = control.establish(req(target="", adhoc=True, participants=listed))
+    assert refusal is None and session.members == listed
+
+
+def _model(name):
+    from core.hooks import ResolutionKind, SessionModel
+    return {"broadcast": SessionModel.BROADCAST, "pre": SessionModel.PRE_ESTABLISHED,
+            "kind": ResolutionKind.GROUP}[name]
+
+
+@pytest.mark.vp("VP1-CC-006")
+@pytest.mark.parametrize("change", [
+    lambda d: _decide(model=_model("broadcast"))(d),
+    lambda d: _decide(model=_model("pre"))(d),
+    lambda d: _decide(model=_model("kind"))(d),
+    _decide(max_participants=0),
+    _decide(max_participants=-1),
+    _decide(max_participants=True),
+    _decide(max_participants="4"),
+    _decide(auto_answer=1),
+    _decide(acknowledgement_required=None),
+    _decide(recording_required=0),
+    lambda d: None,
+], ids=["broadcast", "pre-established", "not-a-model", "limit-0", "limit-negative",
+        "limit-bool", "limit-str", "int-auto-answer", "none-ack", "int-recording", "none"])
+def test_an_inconsistent_session_decision_is_a_contract_violation(mcx, sink, change):
+    """§5.2 POST-1 (the call type's own model) and POST-2 (a limit of at
+    least 1, or none), and boolean flags (RES-OP-12)."""
+    _refused_as_violation(_altered(mcx, sink, decision=change), sink, "IF-SES")
+
+
+# --------------------------------------------------------------------------
 # VP1-HOOK-003/004 — audit
 # --------------------------------------------------------------------------
 
@@ -681,14 +927,311 @@ def test_vp1_hook_003_every_invocation_audited(manager, sink):
         assert r.correlation_id == "s1"
 
 
+def _returned_by(sink, interface, method):
+    [record] = [r for r in sink.of_type(RecordType.HOOK_INVOCATION)
+                if (r.detail["interface"], r.detail["method"]) == (interface, method)]
+    return record
+
+
 def test_vp1_hook_004_decisions_recorded_in_full(manager, sink):
+    """ICD-GEN-041: each decision is on its invocation's record, every field
+    of it, as the hook returned it (RES-OP-02)."""
     manager.establish(req())
-    admitted = sink.of_type(RecordType.SESSION_ADMITTED)[0]
-    assert admitted.detail["priority"]
-    assert admitted.detail["scope"]
-    assert admitted.detail["members"] == 4
-    established = sink.of_type(RecordType.SESSION_ESTABLISHED)[0]
-    assert established.detail["qos_identifier"] == 65
+    got = {(r.detail["interface"], r.detail["method"]): r.detail["returned"]
+           for r in sink.of_type(RecordType.HOOK_INVOCATION)}
+    assert got[("IF-PRI", "evaluate")] == {
+        "level": 20, "scope": "public-safety", "preemption_capability": False,
+        "preemption_vulnerability": True, "floor_priority": 80, "label": "normal"}
+    assert got[("IF-SES", "decide")] == {
+        "model": "on-demand", "auto_answer": False, "acknowledgement_required": False,
+        "recording_required": True, "max_participants": 200}
+    assert got[("IF-BER", "select")] == {
+        "qos_identifier": 65, "arp_level": 5, "arp_preemption_capability": False,
+        "arp_preemption_vulnerability": True, "redundancy": "single",
+        "paths": [{"path_id": "default", "transport": "udp", "primary": True,
+                   "weight": 1, "attributes": {}}]}
+    assert got[("IF-SES", "floor_policy")] == {
+        "initial_grant_to_initiator": True, "queueing_enabled": True,
+        "override_allowed": True, "max_queue_depth": 8,
+        "preemption_at_full_queue": "deny",
+        "timers_ms": {"T2": 4000, "T20": 100, "T3": 3000, "T8": 1000}}
+    assert got[("IF-IDR", "resolve")] == {
+        "kind": "group", "group_id": "grp:alpha", "resolved_from": None,
+        "members": [f"sip:u{i}@mcptt.example" for i in range(4)]}
+    assert got[("IF-SES", "authorise")] == got[("IF-SES", "admit")] == {
+        "permitted": True, "reason_code": ""}
+    assert got[("IF-IDR", "identities_of")] == []
+    # The session records keep their summary of the same decisions.
+    admitted = sink.of_type(RecordType.SESSION_ADMITTED)[0].detail
+    assert (admitted["priority"], admitted["scope"], admitted["members"]) == (
+        "normal", "public-safety", 4)
+    established = sink.of_type(RecordType.SESSION_ESTABLISHED)[0].detail
+    assert (established["qos_identifier"], established["recording"]) == (65, True)
+    assert established["members"] == tuple(f"sip:u{i}@mcptt.example" for i in range(4))
+
+
+def test_vp1_hook_004_every_field_of_every_decision_type(manager, sink):
+    """Nothing is picked: the record has exactly the value type's fields, so a
+    field added to a decision is recorded without touching the core."""
+    import dataclasses as dc
+    from core.hooks import BearerDecision, FloorPolicy, PriorityDecision, SessionDecision
+    manager.establish(req())
+    for (iface, method), cls in {("IF-PRI", "evaluate"): PriorityDecision,
+                                 ("IF-SES", "decide"): SessionDecision,
+                                 ("IF-SES", "floor_policy"): FloorPolicy,
+                                 ("IF-BER", "select"): BearerDecision}.items():
+        returned = _returned_by(sink, iface, method).detail["returned"]
+        assert set(returned) == {f.name for f in dc.fields(cls)}
+
+
+def test_vp1_hook_004_the_record_serialises_as_it_was_returned(manager, sink):
+    import json
+    manager.establish(req())
+    record = _returned_by(sink, "IF-BER", "select")
+    assert json.loads(record.to_json())["detail"]["returned"] == record.detail["returned"]
+    assert json.loads(record.to_json())["detail"]["returned"]["paths"][0]["primary"] is True
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_a_refused_decision_is_recorded_as_returned(mcx, sink):
+    """A decision its POST refused is on the record too: the trail shows what
+    the profile returned, not only that it was refused."""
+    mgr = _altered(mcx, sink, floor=_floor(queueing_enabled=False, max_queue_depth=2))
+    mgr.establish(req())
+    record = _returned_by(sink, "IF-SES", "floor_policy")
+    assert record.detail["outcome"] == "contract-violation"
+    assert record.detail["returned"]["queueing_enabled"] is False
+    assert record.detail["returned"]["max_queue_depth"] == 2
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_a_look_alike_is_named_not_rendered(mcx, sink):
+    mgr = _altered(mcx, sink, bearer=lambda b: _Shaped(b))
+    mgr.establish(req())
+    assert _returned_by(sink, "IF-BER", "select").detail["returned"] == {
+        "unrepresentable": "_Shaped"}
+
+
+def test_nothing_is_recorded_as_returned_when_the_hook_returned_nothing(sink):
+    inv = Invoker(Auditor(sink, "p/1/h"), "c1")
+
+    def raises():
+        raise ValueError("boom")
+
+    def violates():
+        raise HookContractViolation("the hook's own verdict")
+
+    for fn in (raises, violates):
+        with pytest.raises(HookFailure):
+            inv.call("IF-SES", "decide", fn)
+    assert [r.detail["outcome"] for r in sink.records] == ["error", "contract-violation"]
+    assert all("returned" not in r.detail for r in sink.records)
+
+
+class _LyingDict(dict):
+    def __getitem__(self, k):
+        return "not what the core reads"
+
+
+class _EvilInt(int):
+    def __deepcopy__(self, memo):
+        raise RuntimeError("profile code ran inside the audit")
+
+
+def _liar():
+    """A PriorityDecision subclass that reads one way, then another: frozen,
+    and so passes freeze(), but not the core's own class."""
+    from core.hooks import PriorityDecision
+
+    class Liar(PriorityDecision):
+        reads = [0]
+
+        def __getattribute__(self, name):
+            if name == "preemption_capability":
+                Liar.reads[0] += 1
+                return Liar.reads[0] > 1
+            return super().__getattribute__(name)
+
+    return Liar
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+@pytest.mark.parametrize("change,named", [
+    (lambda p: _Shaped(p), "_Shaped"),
+    (lambda p: _liar()(**{f: getattr(p, f) for f in (
+        "level", "scope", "preemption_capability", "preemption_vulnerability",
+        "floor_priority", "label")}), "Liar"),
+    (lambda p: __import__("dataclasses").replace(p, level=float("nan")), "float nan"),
+    (lambda p: __import__("dataclasses").replace(p, floor_priority=float("inf")), "float inf"),
+    (lambda p: __import__("dataclasses").replace(p, level=_EvilInt(20)), "_EvilInt"),
+], ids=["look-alike", "lying-subclass", "nan", "inf", "int-subclass"])
+def test_a_priority_decision_the_audit_cannot_record_is_refused(mcx, sink, change, named):
+    """ICD-GEN-041: a decision absent from the trail cannot be relied on, so
+    one the audit cannot record exactly is not acted on (RES-OP-02 review)."""
+    _refused_as_violation(_altered(mcx, sink, priority=change), sink, "IF-PRI")
+    record = _returned_by(sink, "IF-PRI", "evaluate")
+    assert record.detail["outcome"] == "contract-violation"
+    assert named in sink.of_type(RecordType.SESSION_FAILED)[-1].detail["detail"]
+    record.to_json()
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_a_session_decision_the_audit_cannot_record_is_refused(mcx, sink):
+    import dataclasses as dc
+    sp = mcx.hooks.session_policy
+
+    class Session:
+        def __getattr__(self, n):
+            return getattr(sp, n)
+
+        def decide(self, request, resolution):
+            return _Shaped(sp.decide(request, resolution))
+
+    lp = loader.LoadedProfile(profile=mcx.profile, source=mcx.source,
+                              hooks=dc.replace(mcx.hooks, session_policy=Session()))
+    resolver = mcx.hooks.identity_resolver
+    for i in range(4):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    resolver.register_group("grp:alpha", [f"sip:u{i}@mcptt.example" for i in range(4)])
+    mgr = SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+    session, _, refusal = mgr.establish(req())
+    assert session is None and refusal.reason_code == "hook-contract-violation"
+    assert _returned_by(sink, "IF-SES", "decide").detail["returned"] == {
+        "unrepresentable": "_Shaped"}
+
+
+def test_a_value_the_audit_cannot_render_is_refused_without_running_it(sink):
+    from collections.abc import Mapping as AbcMapping
+
+    class Hostile(AbcMapping):
+        def __getitem__(self, k):
+            raise RuntimeError("profile code ran inside the audit")
+
+        def __iter__(self):
+            raise RuntimeError("profile code ran inside the audit")
+
+        def __len__(self):
+            return 1
+
+    with pytest.raises(HookFailure) as exc:
+        Invoker(Auditor(sink, "p/1/h"), "c1").call("IF-SES", "decide", Hostile)
+    assert exc.value.reason_code == "hook-contract-violation"
+    assert "Hostile" in exc.value.detail
+    [record] = sink.records
+    assert record.detail["returned"] == {"unrepresentable": "Hostile"}
+
+
+def test_a_value_its_post_check_crashed_on_is_still_recorded(sink):
+    from core.hooks import Admission
+
+    def post(_):
+        raise AttributeError("the check itself broke")
+
+    with pytest.raises(HookFailure) as exc:
+        Invoker(Auditor(sink, "p/1/h"), "c1").call(
+            "IF-SES", "admit", lambda: Admission(permitted=True, reason_code=""), post=post)
+    assert exc.value.reason_code == "hook-error"
+    [record] = sink.records
+    assert record.detail["outcome"] == "error"
+    assert record.detail["returned"] == {"permitted": True, "reason_code": ""}
+
+
+def test_nothing_is_recorded_as_returned_on_a_timeout(sink):
+    import time as _t
+    inv = Invoker(Auditor(sink, "p/1/h"), "c1", budgets_ms={"IF-SES": 1},
+                  mode=DeadlineMode.ENFORCE)
+    with pytest.raises(HookFailure) as exc:
+        inv.call("IF-SES", "decide", lambda: _t.sleep(0.2))
+    assert exc.value.reason_code == "hook-timeout"
+    [record] = sink.records
+    assert record.detail["outcome"] == "timeout" and "returned" not in record.detail
+
+
+def test_every_interface_has_its_icd_deadline():
+    """ICD-GEN-010: IF-ICX had none (RES-OP-02 review)."""
+    from core.invoke import DEFAULT_BUDGETS_MS
+    assert dict(DEFAULT_BUDGETS_MS) == {"IF-IDR": 50, "IF-PRI": 5, "IF-SES": 5,
+                                        "IF-BER": 10, "IF-IWF": 20, "IF-ICX": 20}
+
+
+def test_render_keeps_only_exact_core_types():
+    from enum import Enum
+    from core.hooks import FrozenDict, PathSpec, SessionDecision, SessionModel
+    from core.invoke import plain, render
+
+    class Colour(Enum):
+        RED = "red"
+
+    class Str(str):
+        pass
+
+    assert render(None) == (None, ()) and render(True) == (True, ())
+    assert render(2.5) == (2.5, ()) and render(-3) == (-3, ())
+    assert plain(SessionModel.ON_DEMAND) == "on-demand"
+    assert plain((1, [2, (3,)])) == [1, [2, [3]]]
+    assert plain(frozenset({"b", "a", "c"})) == ["a", "b", "c"]
+    assert plain(FrozenDict({"k": (1,)})) == {"k": [1]} == plain({"k": [1]})
+    assert plain(PathSpec(path_id="p", transport="udp", primary=True)) == {
+        "path_id": "p", "transport": "udp", "primary": True, "weight": 1,
+        "attributes": {}}
+    for value, named in [(Colour.RED, "Colour"), (Str("x"), "Str"), (b"01", "bytes"),
+                         (1j, "complex"), (object(), "object"), (int, "type"),
+                         (SessionDecision, "type"), (float("nan"), "float nan"),
+                         ({1: "x"}, "mapping key of type int"), (_EvilInt(3), "_EvilInt"),
+                         (("ok", {"k": Str("y")}), "Str"),
+                         (__import__("collections").namedtuple("Pair", "a b")(1, 2), "Pair"),
+                         (__import__("core.hooks", fromlist=["Value"]).Value(), "Value"),
+                         (_LyingDict({"k": "v"}), "_LyingDict")]:
+        assert render(value)[1] == (named,), value
+    assert plain({"a": b"x", "b": 1})["a"] == {"unrepresentable": "bytes"}
+
+
+def test_a_value_too_deep_to_render_is_unreadable_not_a_crash(sink):
+    deep = ()
+    for _ in range(100000):
+        deep = (deep,)
+    with pytest.raises(HookFailure) as exc:
+        Invoker(Auditor(sink, "p/1/h"), "c1").call("IF-IDR", "identities_of", lambda: deep)
+    assert exc.value.reason_code == "hook-contract-violation"
+    assert sink.records[0].detail["returned"] == {"unrepresentable": "unreadable"}
+
+
+@pytest.mark.vp("VP1-HOOK-004")
+def test_each_comparison_is_an_audited_invocation(manager, sink, mcx):
+    """compare decided pre-emption victims with no record (RES-OP-02 review)."""
+    manager.establish(req(rid="normal-call"))
+    emergency = mcx.hooks.priority_policy.evaluate(
+        req(call_type="emergency-group"),
+        Resolution(kind=ResolutionKind.USER, members=("x",)))
+    sink.records.clear()
+    assert [v.correlation_id for v in manager.preemption_victims(emergency, "urgent")] == [
+        "normal-call"]
+    [record] = sink.of_type(RecordType.HOOK_INVOCATION)
+    assert (record.correlation_id, record.detail["interface"], record.detail["method"],
+            record.detail["outcome"]) == ("urgent", "IF-PRI", "compare", "ok")
+    assert record.detail["returned"] > 0
+
+
+@pytest.mark.parametrize("result", [True, "1", 1.0, None])
+def test_a_comparison_that_is_not_an_integer_is_a_contract_violation(manager, mcx, result):
+    import dataclasses as dc
+    manager.establish(req(rid="normal-call"))
+    emergency = mcx.hooks.priority_policy.evaluate(
+        req(call_type="emergency-group"),
+        Resolution(kind=ResolutionKind.USER, members=("x",)))
+    pp = mcx.hooks.priority_policy
+
+    class Priority:
+        def __getattr__(self, n):
+            return getattr(pp, n)
+
+        def compare(self, a, b):
+            return result
+
+    manager._hooks = dc.replace(mcx.hooks, priority_policy=Priority())
+    with pytest.raises(HookFailure) as exc:
+        manager.preemption_victims(emergency, "urgent")
+    assert exc.value.reason_code == "hook-contract-violation"
 
 
 def test_vp1_oam_001_profile_identity_on_every_record(manager, sink, mcx):
@@ -755,7 +1298,7 @@ def test_preemption_requires_capability(manager):
                             preemption_capability=False,
                             preemption_vulnerability=False,
                             floor_priority=255, label="weak")
-    assert manager.preemption_victims(weak) == ()
+    assert manager.preemption_victims(weak, "incoming") == ()
 
 
 def test_preemption_selects_vulnerable_lower_priority_sessions(manager, mcx):
@@ -763,7 +1306,7 @@ def test_preemption_selects_vulnerable_lower_priority_sessions(manager, mcx):
     emergency = mcx.hooks.priority_policy.evaluate(
         req(call_type="emergency-group"),
         Resolution(kind=ResolutionKind.USER, members=("x",)))
-    victims = manager.preemption_victims(emergency)
+    victims = manager.preemption_victims(emergency, "incoming")
     assert [v.correlation_id for v in victims] == ["normal-call"]
 
 
@@ -776,7 +1319,7 @@ def test_preemption_never_crosses_scopes(manager, mcx):
         Resolution(kind=ResolutionKind.USER, members=("x",)))
     assert rail_emergency.preemption_capability is True
     assert rail_emergency.level > 90
-    assert manager.preemption_victims(rail_emergency) == ()
+    assert manager.preemption_victims(rail_emergency, "incoming") == ()
 
 
 def test_non_vulnerable_session_is_never_a_victim(manager, mcx):
@@ -784,7 +1327,7 @@ def test_non_vulnerable_session_is_never_a_victim(manager, mcx):
     another = mcx.hooks.priority_policy.evaluate(
         req(call_type="emergency-group"),
         Resolution(kind=ResolutionKind.USER, members=("x",)))
-    assert manager.preemption_victims(another) == ()
+    assert manager.preemption_victims(another, "incoming") == ()
 
 
 def test_higher_priority_still_cannot_preempt_a_non_vulnerable_session(manager):
@@ -796,7 +1339,7 @@ def test_higher_priority_still_cannot_preempt_a_non_vulnerable_session(manager):
                                     preemption_capability=True,
                                     preemption_vulnerability=False,
                                     floor_priority=255, label="overwhelming")
-    assert manager.preemption_victims(overwhelming) == ()
+    assert manager.preemption_victims(overwhelming, "incoming") == ()
 
 
 def test_scope_check_is_a_backstop_for_a_broken_compare(mcx, sink):
@@ -837,7 +1380,7 @@ def test_scope_check_is_a_backstop_for_a_broken_compare(mcx, sink):
                                preemption_capability=True,
                                preemption_vulnerability=False,
                                floor_priority=255, label="foreign-emergency")
-    assert mgr.preemption_victims(foreign) == ()
+    assert mgr.preemption_victims(foreign, "incoming") == ()
 
 
 # --------------------------------------------------------------------------
@@ -1073,3 +1616,75 @@ def test_admit_sees_the_same_roles_and_the_capacity(mcx, sink):
     mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
                       attributes={"initiator.roles": "forged"}))
     assert seen["initiator.roles"] == "" and seen["core.active_sessions"] == "0"
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_floor_transitions_are_audited_under_the_session_and_after_it(manager, sink):
+    """RES-OP-03: the floor machine's transitions reach the audit trail,
+    under the session's correlation id, after its admitted and established
+    records; the release's own record follows the floor's last."""
+    manager.establish(req(rid="v1"))
+    manager.release("v1")
+    trail = [r for r in sink.for_session("v1") if r.type is not RecordType.HOOK_INVOCATION]
+    assert [r.type for r in trail] == [
+        RecordType.SESSION_ADMITTED, RecordType.SESSION_ESTABLISHED,
+        RecordType.FLOOR_TRANSITION, RecordType.FLOOR_TRANSITION,
+        RecordType.SESSION_RELEASED]
+    floors = [r.detail for r in trail if r.type is RecordType.FLOOR_TRANSITION]
+    assert [(d["trigger"]["type"], d["to_state"], d["holder"]) for d in floors] == [
+        ("session-established", "floor-taken", "sip:u0@mcptt.example"),
+        ("session-released", "released", None)]
+
+
+def test_a_data_session_has_no_floor_and_no_floor_records(manager, sink):
+    manager.establish(req(rid="d1", call_type="sds", media=(MediaKind.DATA,)))
+    assert not sink.of_type(RecordType.FLOOR_TRANSITION)
+
+
+class _SinkDown(MemorySink):
+    """A sink whose writes fail from `down` on."""
+
+    def __init__(self):
+        super().__init__()
+        self.down = False
+
+    def emit(self, record):
+        if self.down:
+            raise OSError("audit store unavailable")
+        super().emit(record)
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_a_release_completes_when_its_records_cannot_be_written(mcx, caplog):
+    """RES-OP-03 review: a failed floor record on release rolled the floor
+    back and left the session ESTABLISHED for good -- counted as active, a
+    pre-emption victim, its other legs never sent BYE. A release is never
+    undone by the audit trail; what could not be written is logged as lost."""
+    sink = _SinkDown()
+    mgr = _altered(mcx, sink)
+    session, _, _ = mgr.establish(req(rid="r1"))
+    sink.down = True
+    signals = mgr.release("r1")
+    assert session.state is SessionState.RELEASED
+    assert session.floor.state is FloorState.RELEASED
+    assert [s.target for s in signals if s.type is SignalType.BYE] == list(session.members)
+    assert SignalType.RELEASE_QOS in types(signals)
+    assert mgr.active == ()
+    lost = [r for r in caplog.records if r.name == "mcx.session"]
+    assert [r.getMessage() for r in lost] == [
+        "session r1: floor release not recorded; released anyway",
+        "session r1: session-released record lost; the session ended anyway"]
+    assert {r.correlation_id for r in lost} == {"r1"}           # RES-OP-04
+
+
+@pytest.mark.vp("VP1-FC-021")
+def test_an_abandon_completes_when_its_records_cannot_be_written(mcx, caplog):
+    sink = _SinkDown()
+    mgr = _altered(mcx, sink)
+    session, _, _ = mgr.establish(req(rid="r2"))
+    sink.down = True
+    assert mgr.abandon("r2", "no party answered") == (Signal(SignalType.RELEASE_QOS),)
+    assert mgr.session("r2") is None and session.floor.state is FloorState.RELEASED
+    assert [r.getMessage() for r in caplog.records if r.name == "mcx.session"] == [
+        "session r2: floor release not recorded; released anyway",
+        "session r2: session-failed record lost; the session ended anyway"]

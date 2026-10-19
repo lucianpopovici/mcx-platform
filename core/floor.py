@@ -24,9 +24,10 @@ machine's structure never depended on the mapping; only the names did.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 # --------------------------------------------------------------------------
 # Vocabulary
@@ -73,7 +74,6 @@ class DenyReason(Enum):
 
     QUEUEING_DISABLED = "queueing-disabled"
     QUEUE_FULL = "queue-full"
-    ALREADY_QUEUED = "already-queued"
     ALREADY_HOLDER = "already-holder"
     NO_SESSION = "no-session"
     LOWER_PRIORITY = "lower-priority"
@@ -158,6 +158,27 @@ class Transition:
     holder: Optional[str]
     queue: Tuple[str, ...]
 
+    def as_record(self) -> Dict[str, Any]:
+        """This transition as plain data for the audit trail (PLT-FC-011,
+        PLT-VP-R1 RES-OP-03): the trigger, when, the state before and after,
+        what was done, and the holder and queue it left. Enough, record by
+        record, to rebuild a call's floor from the trail alone."""
+        def value(v: Any) -> Any:
+            return v.value if isinstance(v, Enum) else v
+
+        return {
+            "sequence": self.sequence,
+            "floor_at_ms": self.at_ms,
+            "from_state": self.from_state.value,
+            "to_state": self.to_state.value,
+            "trigger": {f.name: value(getattr(self.event, f.name))
+                        for f in dataclasses.fields(self.event)},
+            "actions": [{f.name: value(getattr(a, f.name))
+                         for f in dataclasses.fields(a)} for a in self.actions],
+            "holder": self.holder,
+            "queue": list(self.queue),
+        }
+
 
 @dataclass(frozen=True)
 class QueueEntry:
@@ -181,6 +202,10 @@ class Policy:
     override_allowed: bool = False
     max_queue_depth: int = 0
     timers_ms: Mapping[str, int] = field(default_factory=dict)
+    # FC-OP-07, a profile setting since 2026-10-16: "insert" a pre-emptor in
+    # front of a queue already at its depth (6.3.4.4.7 item 2e, one entry
+    # beyond it), or "deny" it queue-full. The hook's value has no default.
+    preemption_at_full_queue: str = "deny"
 
     def timer(self, name: str) -> int:
         return self.timers_ms.get(name, DEFAULT_TIMERS_MS.get(name, 0))
@@ -194,6 +219,7 @@ class Policy:
             override_allowed=floor_policy.override_allowed,
             max_queue_depth=floor_policy.max_queue_depth,
             timers_ms=dict(floor_policy.timers_ms),
+            preemption_at_full_queue=floor_policy.preemption_at_full_queue,
         )
 
 
@@ -214,9 +240,14 @@ class FloorControl:
     to perform, and never blocks or performs I/O.
     """
 
-    def __init__(self, policy: Policy, clock: Optional[Callable[[], int]] = None):
+    def __init__(self, policy: Policy, clock: Optional[Callable[[], int]] = None,
+                 observer: Optional[Callable[[Transition], None]] = None):
         self._policy = policy
         self._now = clock or (lambda: 0)
+        # Told of each transition as it is recorded, so the host can write it
+        # to the audit trail (PLT-FC-011; RES-OP-03). The history below is
+        # the machine's own copy.
+        self._observer = observer
         self._state = FloorState.START_STOP
         self._holder: Optional[str] = None
         self._holder_priority: int = 0
@@ -256,8 +287,13 @@ class FloorControl:
 
     # -- entry point ----------------------------------------------------
 
-    def handle(self, event: Event) -> Tuple[Action, ...]:
+    def handle(self, event: Event, *, final: bool = False) -> Tuple[Action, ...]:
+        """Apply `event`. If the observer cannot take the transition, it is
+        undone and the error raised -- unless `final`: the session is ending,
+        which the audit trail cannot stop, so the transition stands and the
+        error is still raised for the caller to log (RES-OP-03)."""
         before = self._state
+        saved = self._snapshot()
         handler = self._DISPATCH.get((self._state, event.type))
         if handler is None:
             # An event with no transition in this state is ignored, not an
@@ -277,8 +313,35 @@ class FloorControl:
                         and all(a.type is ActionType.START_TIMER
                                 and a.timer == T_END_OF_MEDIA for a in actions))
         if not refresh_only:
-            self._record(before, event, actions)
+            transition = self._record(before, event, actions)
+            if self._observer is not None:
+                try:
+                    self._observer(transition)
+                except BaseException:
+                    if final:
+                        raise
+                    # The transition could not be written to the audit trail.
+                    # Undo it: its actions are never sent, so the floor must
+                    # stay as the participants last saw it rather than move on
+                    # unannounced (fail before reporting, as the store does).
+                    # A client retransmits its request or release; a timer
+                    # that expired is still due at the next tick (RES-OP-03).
+                    self._restore(saved)
+                    raise
         return actions
+
+    def _snapshot(self) -> Tuple[Any, ...]:
+        return (self._state, self._holder, self._holder_priority, list(self._queue),
+                set(self._participants), dict(self._running_timers),
+                len(self._history), self._sequence, self._arrivals, self._c20,
+                self._revoke_reason)
+
+    def _restore(self, saved: Tuple[Any, ...]) -> None:
+        (self._state, self._holder, self._holder_priority, queue, participants,
+         timers, history, self._sequence, self._arrivals, self._c20,
+         self._revoke_reason) = saved
+        self._queue, self._participants, self._running_timers = queue, participants, timers
+        del self._history[history:]
 
     # -- invariants -----------------------------------------------------
 
@@ -292,8 +355,13 @@ class FloorControl:
             raise FloorInvariantViolation(
                 f"state {self._state.value} must have no floor holder, "
                 f"found {self._holder!r}")
-        # PLT-FC-006: the queue never exceeds the declared depth.
-        if len(self._queue) > self._policy.max_queue_depth and \
+        # PLT-FC-006 as amended 2026-10-16 (VP1-FC-013): the queue never
+        # exceeds the declared depth, plus, where the profile chose "insert",
+        # the one pre-emptor held in front of a full queue (6.3.4.4.7 item 2e).
+        allowed = self._policy.max_queue_depth + (
+            1 if self._policy.preemption_at_full_queue == "insert" and
+            any(e.front for e in self._queue) else 0)
+        if len(self._queue) > allowed and \
                 self._policy.queueing_enabled:
             raise FloorInvariantViolation(
                 f"queue depth {len(self._queue)} exceeds declared maximum "
@@ -315,9 +383,9 @@ class FloorControl:
                 f"floor holder {self._holder!r} is also queued")
 
     def _record(self, before: FloorState, event: Event,
-                actions: Tuple[Action, ...]) -> None:
+                actions: Tuple[Action, ...]) -> Transition:
         self._sequence += 1
-        self._history.append(Transition(
+        transition = Transition(
             sequence=self._sequence,
             at_ms=self._now(),
             from_state=before,
@@ -326,7 +394,9 @@ class FloorControl:
             actions=actions,
             holder=self._holder,
             queue=self.queue,
-        ))
+        )
+        self._history.append(transition)
+        return transition
 
     def _apply_timer_actions(self, actions: Sequence[Action]) -> None:
         for a in actions:
@@ -430,10 +500,13 @@ class FloorControl:
         if not self._policy.queueing_enabled:
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.QUEUEING_DISABLED)]
-        if any(e.participant == participant for e in self._queue):
-            return [Action(ActionType.SEND_DENY, target=participant,
-                           reason=DenyReason.ALREADY_QUEUED)]
-        if len(self._queue) >= self._policy.max_queue_depth:
+        # With "insert", the pre-emptor held in front is the one entry beyond
+        # the depth (6.3.4.4.7 item 2e); the depth bounds the others, so a
+        # queued request that asks again at a new priority (6.3.5.4.4 item 8)
+        # keeps a place it already had (review of the 2026-10-16 settings).
+        occupied = len(self._queue) if self._policy.preemption_at_full_queue != "insert" \
+            else sum(1 for e in self._queue if not e.front)
+        if occupied >= self._policy.max_queue_depth:
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.QUEUE_FULL)]
         self._arrivals += 1
@@ -477,6 +550,28 @@ class FloorControl:
                                duration_ms=self._t2_remaining())]
             return [Action(ActionType.SEND_DENY, target=participant,
                            reason=DenyReason.ALREADY_HOLDER)]
+        # 6.3.5.4.4: a participant already queued that asks again.
+        queued = next((e for e in self._queue if e.participant == participant), None)
+        if queued is not None:
+            if queued.front or queued.floor_priority == event.floor_priority:
+                # Item 4: at the same effective priority its place is kept:
+                # Queue Position Info where queueing was negotiated, else
+                # nothing. Never a Deny: the request is still queued and will
+                # be granted (it used to be denied, then granted later).
+                # The pre-emptor held in front keeps its place at ANY priority
+                # it asks again with: an interpretation (FC-OP-07), where
+                # items 7 and 8 read literally would deny it or move it out of
+                # the place 6.3.4.4.7 item 2e gave it, after its talker was
+                # already revoked for it.
+                if not self._policy.queueing_enabled:
+                    return []
+                return [Action(ActionType.SEND_QUEUE_POSITION, target=participant,
+                               queue_position=self._queue.index(queued) + 1)]
+            # Item 8: at another priority, its position is updated: taken
+            # out, and the request handled afresh -- a pre-emption if it now
+            # outranks the talker (6.3.4.4.7 moves it to the front), else
+            # queued again behind its new peers.
+            self._queue = [e for e in self._queue if e.participant != participant]
         # PLT-FC-005 / PLT-FC-008: override is a policy decision using the floor
         # priority from IF-PRI. Strictly greater, so equal priority never
         # interrupts an active talker.
@@ -492,15 +587,17 @@ class FloorControl:
         if already queued (item 2e) -- whether or not queueing was
         negotiated. Queue Position Info only where it was (item 2f).
 
-        One case is refused rather than followed: a queue already at its
-        declared depth, with the pre-emptor not in it. Inserting would break
-        the depth the profile declared (PLT-FC-006); pre-empting without
-        inserting would revoke a talker for nobody, which is what this
-        machine used to do with queueing disabled. The request is then an
-        ordinary one and is denied as queue-full.
+        A queue already at its declared depth, with the pre-emptor not in
+        it, is the profile's choice (FC-OP-07, `preemption_at_full_queue`).
+        "insert" follows item 2e: the pre-emptor goes in front, one entry
+        beyond the declared depth. "deny", a recorded deviation, keeps the
+        depth (PLT-FC-006): pre-empting without inserting would revoke a
+        talker for nobody, so the request is an ordinary one and is denied
+        queue-full.
         """
         queued = any(e.participant == participant for e in self._queue)
         if not queued and self._policy.queueing_enabled and \
+                self._policy.preemption_at_full_queue != "insert" and \
                 len(self._queue) >= self._policy.max_queue_depth:
             return self._enqueue(participant, priority)
         self._arrivals += 1

@@ -234,6 +234,9 @@ class FloorPolicy(Value):
     queueing_enabled: bool
     override_allowed: bool
     max_queue_depth: int
+    # "insert" (TS 24.380 6.3.4.4.7 item 2e) or "deny" (a recorded deviation):
+    # a pre-emptor at a queue already at max_queue_depth (PLT-ICD-001 5.3).
+    preemption_at_full_queue: str
     # 24.380 timer overrides, name -> milliseconds. The engine owns the
     # state machine; the profile owns the constants.
     timers_ms: Mapping[str, int] = field(default_factory=dict)
