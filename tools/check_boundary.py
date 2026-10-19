@@ -1811,26 +1811,93 @@ def _target_name(node) -> str:
     return ""
 
 
-FORBIDDEN_IN_FLOOR = ("sip", "rtp", "rtcp", "socket", "requests", "http")
+# VP1-BND-015: what the floor state machine must not reach, directly or
+# through anything it imports: SIP, media, the network, the event loop.
+FLOOR_FORBIDDEN = ("core.sip", "core.rtcp", "core.codec", "core.mcinfo", "core.session",
+                   "core.loader", "service", "socket", "ssl", "asyncio", "selectors",
+                   "http", "urllib", "requests", "email", "select", "socketserver",
+                   "xmlrpc", "ftplib", "smtplib", "telnetlib", "profiles", "_socket", "_ssl",
+                   "multiprocessing", "subprocess", "httpx", "urllib3", "aiohttp",
+                   "websocket", "websockets", "zmq", "grpc", "concurrent",
+                   "logging.handlers", "logging.config")
+# Everything else outside the tree the closure may import: pure language
+# and data-structure modules. Anything not here is refused, so a module
+# this list never thought of (imaplib, wsgiref) cannot slip in.
+FLOOR_ALLOWED = ("__future__", "dataclasses", "enum", "typing", "abc", "collections",
+                 "functools", "itertools", "heapq", "bisect", "math", "operator", "types",
+                 "copy", "logging")
+
+
+def _imports_of(tree, module: str, is_package: bool = False) -> List[Tuple[int, str]]:
+    """(line, absolute module) for every import in `tree`, the module at
+    dotted path `module` (a package's __init__ when `is_package`); relative
+    imports resolved."""
+    out = []
+    package = module if is_package else module.rsplit(".", 1)[0]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out += [(node.lineno, a.name) for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = package.split(".")
+                parts = parts[:len(parts) - (node.level - 1)]
+                base = ".".join(parts + ([node.module] if node.module else []))
+            out.append((node.lineno, base))
+            out += [(node.lineno, f"{base}.{a.name}") for a in node.names if a.name != "*"]
+    return out
 
 
 def check_floor_machine_isolated(root: Path) -> List[str]:
-    """VP1-BND-015 / PLT-FC-004 — no dependency on SIP, media or the network."""
+    """VP1-BND-015 / PLT-FC-004 — no dependency on SIP, media or the network.
+
+    The transitive import closure of core/floor.py within the tree (each
+    first-party module it imports, and what those import, relative imports
+    resolved, `from pkg import mod` counted as importing pkg.mod) holds
+    nothing in `FLOOR_FORBIDDEN` (core.sip, core.rtcp, core.codec, the
+    service, profiles, sockets, TLS, the event loop, HTTP and mail), and
+    nothing from outside the tree but the pure modules `FLOOR_ALLOWED`
+    lists (dataclasses, enum, typing, collections and the like). A
+    dynamic import in core is refused by VP1-BND-002. A test imports
+    core.floor in a fresh interpreter and shows none of them loaded, and
+    the ENV-UNIT tests instantiate the machine with an injected clock.
+    """
     violations: List[str] = []
-    path = root / CORE / "floor.py"
-    for node in ast.walk(_parse(path)):
-        modules: List[str] = []
-        if isinstance(node, ast.ImportFrom) and node.module:
-            modules = [node.module]
-        elif isinstance(node, ast.Import):
-            modules = [a.name for a in node.names]
-        for module in modules:
-            leaf = module.split(".")[-1].lower()
-            if leaf in FORBIDDEN_IN_FLOOR:
-                violations.append(
-                    f"{path.relative_to(root)}:{node.lineno}: floor control "
-                    f"imports {module!r}")
-    return violations
+    start = root / CORE / "floor.py"
+    if not start.is_file():
+        return ["core/floor.py is missing"]
+    todo, seen = [("core.floor", start, [])], set()
+    while todo:
+        module, path, chain = todo.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        try:
+            tree = _parse(path)
+        except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+            violations.append(f"{path.relative_to(root)}: cannot be parsed, so this gate "
+                              "cannot clear it")
+            continue
+        for line, name in _imports_of(tree, module, path.name == "__init__.py"):
+            via = " -> ".join(chain + [module])
+            if any(name == f or name.startswith(f + ".") for f in FLOOR_FORBIDDEN):
+                violations.append(f"{path.relative_to(root)}:{line}: floor control reaches "
+                                  f"{name!r} ({via})")
+                continue
+            top = name.split(".")[0]
+            first_party = (root / top).is_dir() or (root / f"{top}.py").is_file()
+            if not first_party and not any(name == a or name.startswith(a + ".")
+                                           for a in FLOOR_ALLOWED):
+                violations.append(f"{path.relative_to(root)}:{line}: floor control reaches "
+                                  f"{name!r} ({via}), which is not among the modules it may "
+                                  "use (FLOOR_ALLOWED)")
+                continue
+            target = root.joinpath(*name.split("."))
+            for candidate in (target.with_suffix(".py"), target / "__init__.py"):
+                if candidate.is_file():
+                    todo.append((name, candidate, chain + [module]))
+                    break
+    return sorted(set(violations), key=_by_line)
 
 
 # --------------------------------------------------------------------------
@@ -1862,33 +1929,450 @@ def check_reference_point_naming(root: Path) -> List[str]:
 # --------------------------------------------------------------------------
 
 
+TABLE_INTERPRETER = ("profiles/common/tables.py", "TablePriorityPolicy")
+# The interpreter as reviewed: the syntax of TablePriorityPolicy and the
+# module functions it calls (`_matches`), docstrings left out. A change to
+# either fails VP1-BND-011 until it is reviewed and this is updated
+# (`interpreter_fingerprint`).
+INTERPRETER_FINGERPRINT = "ddaecef91a4953543ec09b3310817a29b11da80d9bc8b4b89c17e1d0a1dee0b4"
+# Literals the table interpreter may compare with or return: the match
+# wildcard, no value, and compare's three answers (PLT-ICD-001 §4.2 POST-1).
+STRUCTURAL_LITERALS = frozenset({"*", None, 0, 1, -1})
+
+
+def _bound_class(root: Path, spec: str):
+    """(path, class name, class node, module tree) the hook spec
+    `pkg.module:Name` binds, followed through `from x import Y [as Name]`
+    and `Name = Y` in that module and the modules it imports from within
+    the tree; the module's last binding of the name is the one the loader
+    gets. None when it cannot be followed (an opaque assignment included)."""
+    if ":" not in spec:
+        return None
+    module, name = spec.split(":", 1)
+    seen = set()
+    while (module, name) not in seen:
+        seen.add((module, name))
+        path = root.joinpath(*module.split(".")).with_suffix(".py")
+        if not path.is_file():
+            return None
+        try:
+            tree = _parse(path)
+        except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+            return None
+        rel = path.relative_to(root).as_posix()
+        # The module's last binding of the name is the one the loader gets.
+        nxt = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == name:
+                nxt = ("class", node)
+                continue
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if (a.asname or a.name) == name:
+                        base = node.module or ""
+                        if node.level:
+                            parts = module.split(".")[:-node.level]
+                            base = ".".join(parts + ([node.module] if node.module else []))
+                        nxt = (base, a.name)
+            elif isinstance(node, ast.Assign) and \
+                    any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+                nxt = (module, node.value.id) if isinstance(node.value, ast.Name) else \
+                    ("opaque", None)
+        if nxt is None or nxt[0] == "opaque":
+            return None
+        if nxt[0] == "class":
+            return rel, name, nxt[1], tree
+        module, name = nxt
+    return None
+
+
+def _without_docstrings(node):
+    import copy
+    node = copy.deepcopy(node)
+    for n in ast.walk(node):
+        body = getattr(n, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) and \
+                isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            n.body = body[1:] or [ast.Pass()]
+    return node
+
+
+def _interpreter_parts(tree):
+    """The interpreter class and the module functions it calls, transitively."""
+    functions = _module_functions(tree)
+    cls = next((n for n in tree.body if isinstance(n, ast.ClassDef)
+                and n.name == TABLE_INTERPRETER[1]), None)
+    if cls is None:
+        return []
+    parts, todo, done = [cls], [cls], {cls.name}
+    while todo:
+        for sub in ast.walk(todo.pop()):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and \
+                    sub.func.id in functions and sub.func.id not in done:
+                done.add(sub.func.id)
+                parts.append(functions[sub.func.id])
+                todo.append(functions[sub.func.id])
+    return parts
+
+
+def interpreter_fingerprint(root: Path) -> str:
+    """sha256 of the interpreter's syntax (TablePriorityPolicy and the module
+    functions it calls, transitively), docstrings left out."""
+    import hashlib
+    try:
+        tree = _parse(root / TABLE_INTERPRETER[0])
+    except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+        return ""
+    parts = _interpreter_parts(tree)
+    if not parts:
+        return ""
+    return hashlib.sha256("\n".join(ast.dump(_without_docstrings(p)) for p in parts)
+                          .encode()).hexdigest()
+
+
+def _chain(node) -> List[str]:
+    """The names along an attribute chain: `a.b.c` -> [a, b, c]."""
+    out = []
+    while isinstance(node, ast.Attribute):
+        out.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        out.append(node.id)
+    return out[::-1]
+
+
+def _interpreter_names(root: Path) -> set:
+    """The interpreter class and the module functions of tables.py it
+    calls, transitively: what a profile could replace to change it."""
+    found = _bound_class(root, "profiles.common.tables:TablePriorityPolicy")
+    names = {TABLE_INTERPRETER[1]}
+    if found is None:
+        return names
+    functions = _module_functions(found[3])
+    todo = [found[2]]
+    while todo:
+        for sub in ast.walk(todo.pop()):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and \
+                    sub.func.id in functions and sub.func.id not in names:
+                names.add(sub.func.id)
+                todo.append(functions[sub.func.id])
+    return names
+
+
+_OWN_ONLY = "a profile alters only its own instances (self)"
+
+
+def _names_a_type_in_place(node, parents) -> bool:
+    """`node` (a class name) is called, subclassed, read from, tested with
+    isinstance/issubclass (also inside a tuple there), or in an annotation."""
+    up = parents.get(node)
+    if isinstance(up, ast.Tuple):
+        node, up = up, parents.get(up)
+    if isinstance(up, ast.Call):
+        return up.func is node or (_chain(up.func)[-1:] in (["isinstance"], ["issubclass"])
+                                   and node in up.args[1:])
+    if isinstance(up, ast.Attribute) or isinstance(up, ast.ClassDef) and node in up.bases:
+        return True
+    while up is not None:
+        if isinstance(up, ast.arg) and up.annotation is not None or \
+                isinstance(up, ast.AnnAssign) and node is not up.value or \
+                isinstance(up, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                up.returns is not None and _contains(up.returns, node):
+            return True
+        if isinstance(up, (ast.Subscript, ast.Tuple)):   # Dict[str, Tuple[Profile, ...]]
+            node, up = up, parents.get(up)
+            continue
+        return False
+    return False
+
+
+def _contains(tree, node) -> bool:
+    return any(n is node for n in ast.walk(tree))
+
+
+def _own_instance(head: List[str], node, parents) -> bool:
+    """`head` is `self` or `cls` as a method's own first parameter: the
+    function enclosing `node` is defined in a class body, takes that name
+    first, and never rebinds it."""
+    if head not in (["self"], ["cls"]):
+        return False
+    fn = _enclosing_function(node, parents)
+    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or \
+            not isinstance(parents.get(fn), ast.ClassDef) or \
+            any(_chain(d)[-1:] == ["staticmethod"] for d in fn.decorator_list):
+        return False
+    params = fn.args.posonlyargs + fn.args.args
+    if not params or params[0].arg != head[0]:
+        return False
+    return not any(isinstance(n, ast.Name) and n.id == head[0] and
+                   isinstance(n.ctx, (ast.Store, ast.Del)) for n in _own_nodes(fn))
+
+
+def _interpreter_patched(root: Path) -> List[str]:
+    """Anywhere under profiles/, the interpreter or a helper it calls
+    (`_interpreter_names`) altered, replaced or held:
+      * stored or deleted by name or through any attribute chain
+        (`TablePriorityPolicy.evaluate = ...`, `_t.TablePriorityPolicy = ...`,
+        `_t._matches = ...`), aliases from `import ... as` included;
+      * set or deleted by setattr, delattr, or a `__setattr__`/`__delattr__`
+        call on it;
+      * held anywhere but a call, a base class or a plain module-level
+        alias (`Policy = TablePriorityPolicy`, which is followed), so a
+        change cannot go through a name the gate does not see;
+      * any use of globals(), vars() or `__dict__`, which reach every name;
+      * any other attribute store, del, setattr or delattr on anything but
+        `self.<attr>` or `cls.<attr>` itself, `self`/`cls` being a
+        method's own, never rebound first parameter (not a staticmethod's):
+        a profile alters only its own instances, never a core class the
+        interpreter calls (`Profile.call_type = ...`); and no core class
+        is handed to a call (but isinstance/issubclass), where it could
+        arrive as a method's `self` (`_X.go(Profile)`);
+    and in tables.py, each of these names bound once, by its definition."""
+    out: List[str] = []
+    protected = _interpreter_names(root)
+    for path in sorted((root / PROFILES).rglob("*.py")):
+        if any(p in CACHE_DIRS for p in path.parts):
+            continue
+        rel = path.relative_to(root).as_posix()
+        try:
+            tree = _parse(path)
+        except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+            continue
+        names = set(protected) | {a.asname for n in ast.walk(tree)
+                                  if isinstance(n, (ast.ImportFrom, ast.Import))
+                                  for a in n.names if a.asname and a.name in protected}
+        # A plain module-level alias (`Policy = TablePriorityPolicy`) is
+        # followed: it joins the names, so a change through it is seen.
+        aliases = set()
+        grew = True
+        while grew:
+            grew = False
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1 and \
+                        isinstance(node.targets[0], ast.Name) and \
+                        isinstance(node.value, (ast.Name, ast.Attribute)) and \
+                        _chain(node.value) and _chain(node.value)[-1] in names and \
+                        node.targets[0].id not in names:
+                    names.add(node.targets[0].id)
+                    aliases |= {id(node.value), id(node.targets[0])}
+                    grew = True
+        parents = _parent_map(tree)
+        # Classes the module imports from the core by name.
+        core_classes = {a.asname or a.name for n in ast.walk(tree)
+                        if isinstance(n, ast.ImportFrom) and not n.level
+                        and (n.module or "").split(".")[0] == CORE
+                        for a in n.names
+                        if a.name[:1].isupper() and not a.name.isupper()}
+        hit = set()
+
+        def report(node, what):
+            if (node.lineno, what) not in hit:
+                hit.add((node.lineno, what))
+                out.append(f"{rel}:{node.lineno}: {what}; the table interpreter is not "
+                           "altered by a profile")
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Name, ast.Attribute)) and \
+                    isinstance(node.ctx, (ast.Store, ast.Del)):
+                chain = _chain(node)
+                touched = [n for n in chain if n in names]
+                if touched and id(node) not in aliases and \
+                        not (isinstance(node, ast.Name) and rel == TABLE_INTERPRETER[0]):
+                    report(node, f"changes {'.'.join(chain)}")
+                elif isinstance(node, ast.Attribute) and (
+                        len(chain) != 2 or not _own_instance(chain[:1], node, parents)):
+                    # Only `self.<attr>` itself: `self.p.call_type` lands on
+                    # whatever `self.p` holds.
+                    # Anything else a profile changes from outside is another
+                    # module's: a core class the interpreter calls
+                    # (`Profile.call_type = ...`), or one held under a name.
+                    out.append(f"{rel}:{node.lineno}: changes {'.'.join(chain) or 'an object'} "
+                               "from outside it; " + _OWN_ONLY)
+            elif isinstance(node, ast.Call):
+                f = node.func
+                # A core class handed to another function could reach it as
+                # its `self` (`_X.go(Profile)`); a profile only uses them.
+                fname = f.id if isinstance(f, ast.Name) else \
+                    f.attr if isinstance(f, ast.Attribute) else ""
+                if fname in ("setattr", "delattr", "__setattr__", "__delattr__"):
+                    target = node.args[0] if node.args else None
+                    if not (isinstance(target, ast.Name) and
+                            _own_instance([target.id], node, parents)) and \
+                            not (target is not None and set(_chain(target)) & names) and \
+                            not (isinstance(f, ast.Attribute) and set(_chain(f.value)) & names):
+                        out.append(f"{rel}:{node.lineno}: {fname} on "
+                                   f"{'.'.join(_chain(target)) or 'an object'}; " + _OWN_ONLY)
+                    for chain in (_chain(target) if target is not None else [],
+                                  _chain(f.value) if isinstance(f, ast.Attribute) else []):
+                        if set(chain) & names:
+                            report(node, f"{fname} on {'.'.join(chain)}")
+                            break
+                if isinstance(f, ast.Name) and f.id in ("globals", "vars"):
+                    report(node, f"calls {f.id}(), which reaches every name")
+            elif isinstance(node, ast.Attribute) and node.attr == "__dict__":
+                report(node, "reads __dict__, which reaches every name")
+            # A core class is used where it is named: called, subclassed, read
+            # from, tested against, or in an annotation. Held or handed to a
+            # call, it could arrive as a method's `self` (`_X.go(Profile)`).
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and \
+                    node.id in core_classes and not _names_a_type_in_place(node, parents):
+                out.append(f"{rel}:{node.lineno}: hands the core class {node.id} on; "
+                           + _OWN_ONLY)
+            # Otherwise the interpreter is only called or subclassed (refused
+            # by the binding rule): held anywhere else, it could be patched
+            # through a name this gate does not follow.
+            if isinstance(node, (ast.Name, ast.Attribute)) and \
+                    isinstance(node.ctx, ast.Load) and id(node) not in aliases and \
+                    (node.id if isinstance(node, ast.Name) else node.attr) in names:
+                up = parents.get(node)
+                if isinstance(up, ast.Attribute) or \
+                        isinstance(up, ast.Call) and up.func is node or \
+                        isinstance(up, ast.ClassDef) and node in up.bases or \
+                        isinstance(up, ast.Call) and node in up.args and \
+                        _chain(up.func)[-1:] in (["setattr"], ["delattr"], ["__setattr__"],
+                                                 ["__delattr__"]):
+                    continue                    # reported above
+                report(node, f"holds {'.'.join(_chain(node)) or 'the interpreter'} "
+                             "in another name")
+        if rel == TABLE_INTERPRETER[0]:
+            # Every name the interpreter reads, not only its own: rebinding
+            # an import it uses (`HookContractViolation = RuntimeError`) or a
+            # constant changes it as surely as editing it.
+            referenced = protected | {n.id for part in _interpreter_parts(tree)
+                                      for n in ast.walk(part)
+                                      if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+            seen = set()
+            for node in tree.body:
+                bound = [node.name] if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                                          ast.AsyncFunctionDef)) else \
+                    [a.asname or a.name for a in node.names] \
+                    if isinstance(node, (ast.Import, ast.ImportFrom)) else []
+                for n in bound:
+                    if n in referenced and n in seen:
+                        out.append(f"{rel}:{node.lineno}: rebinds {n} after its definition; "
+                                   "the interpreter is the code as defined")
+                    seen.add(n)
+                for t in ast.walk(node) if isinstance(node, (ast.Assign, ast.AnnAssign,
+                                                              ast.AugAssign, ast.For, ast.With,
+                                                              ast.Delete)) else []:
+                    if isinstance(t, ast.Name) and isinstance(t.ctx, (ast.Store, ast.Del)) \
+                            and t.id in referenced and (t.id in seen or t.id in protected):
+                        out.append(f"{rel}:{node.lineno}: rebinds {t.id} after its "
+                                   "definition; the interpreter is the code as defined")
+                    if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store):
+                        seen.add(t.id)
+    return sorted(set(out), key=_by_line)
+
+
+def _module_functions(tree) -> Dict[str, ast.AST]:
+    return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _interpreter_logic(rel: str, cls, tree) -> List[str]:
+    """Imperative priority logic in the table interpreter and the module
+    functions it calls, transitively: a comparison with, or a return of, a
+    literal other than the structural ones, a match statement, an integer
+    other than 0 and +-1."""
+    out: List[str] = []
+    functions = _module_functions(tree)
+    todo, done = [cls], set()
+    while todo:
+        node = todo.pop()
+        if id(node) in done:
+            continue
+        done.add(id(node))
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and \
+                    sub.func.id in functions:
+                todo.append(functions[sub.func.id])
+            literals = []
+            if isinstance(sub, ast.Compare):
+                literals = [x for x in [sub.left] + sub.comparators
+                            if isinstance(x, ast.Constant)]
+                literals += [e for x in sub.comparators if isinstance(x, (ast.Tuple, ast.List,
+                                                                            ast.Set))
+                             for e in x.elts if isinstance(e, ast.Constant)]
+            elif isinstance(sub, ast.Return) and isinstance(sub.value, ast.Constant):
+                literals = [sub.value]
+            elif isinstance(sub, ast.Match):
+                out.append(f"{rel}:{sub.lineno}: the priority policy branches with match; "
+                           "priority is the profile's table")
+            for lit in literals:
+                if lit.value not in STRUCTURAL_LITERALS or isinstance(lit.value, bool):
+                    out.append(f"{rel}:{lit.lineno}: the priority policy decides on the "
+                               f"literal {lit.value!r}; priority is the profile's table")
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, int) and \
+                    not isinstance(sub.value, bool) and sub.value not in (0, 1, -1):
+                out.append(f"{rel}:{sub.lineno}: the priority policy contains the literal "
+                           f"{sub.value}")
+    return sorted(set(out), key=_by_line)
+
+
 def check_priority_table_declarative(root: Path) -> List[str]:
-    """VP1-BND-011 / PLT-HOK-023 — the table is data, not code."""
+    """VP1-BND-011 / PLT-HOK-023 / PLT-PRF-001 — the table is data, not code.
+
+    For every in-tree profile (the MCX profile among them):
+      * profile.yaml declares priority as `priority.rules`, each a
+        match/decision pair;
+      * the class its `profile.hooks.priority_policy` binds, followed
+        through imports and assignments, is the generic table interpreter
+        (`TABLE_INTERPRETER`) itself, not a subclass or another class: a
+        profile cannot add logic to it;
+    and the interpreter, with the module functions it calls, compares with
+    and returns only structural literals (the `*` wildcard, None, 0, +-1),
+    holds no other integer, and has no match statement: it reads the
+    table, it does not decide. It is also pinned as reviewed
+    (`INTERPRETER_FINGERPRINT`): any change to it, a base class, a helper
+    or a constant it reads included, fails until reviewed. Nothing under
+    profiles/ changes it or a helper it calls (`_interpreter_patched`: by
+    name or attribute chain, setattr and the like, a hidden alias,
+    globals(), vars(), __dict__), and tables.py binds each of those names
+    once; a binding follows the module's last assignment of the name.
+
+    Not followed: a binding the loader resolves another way than a
+    `module:Name` spec; the core accessors the interpreter calls
+    (core/model.py), which VP1-BND-013 covers; a change made from outside
+    profiles/.
+    """
     violations: List[str] = []
     import yaml
     for package in sorted((root / PROFILES).glob("*/profile.yaml")):
-        data = yaml.safe_load(package.read_text(encoding="utf-8"))
-        rules = (data.get("priority") or {}).get("rules")
-        if not rules:
-            violations.append(
-                f"{package.relative_to(root)}: no declarative priority rules")
+        rel = package.relative_to(root).as_posix()
+        try:
+            data = yaml.safe_load(package.read_text(encoding="utf-8")) or {}
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            violations.append(f"{rel}: cannot be read, so this gate cannot clear it")
             continue
-        for i, rule in enumerate(rules):
-            if "match" not in rule or "decision" not in rule:
-                violations.append(
-                    f"{package.relative_to(root)}: priority.rules[{i}] is not "
-                    "a match/decision pair")
-    # The shared implementation must not carry priority constants of its own.
-    tables = root / PROFILES / "common" / "tables.py"
-    if tables.is_file():
-        for node in ast.walk(_parse(tables)):
-            if isinstance(node, ast.ClassDef) and node.name == "TablePriorityPolicy":
-                for sub in ast.walk(node):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, int) \
-                            and sub.value not in (0, 1, -1):
-                        violations.append(
-                            f"{tables.relative_to(root)}:{sub.lineno}: priority "
-                            f"policy contains the literal {sub.value}")
+        rules = ((data.get("priority") or {}).get("rules")) if isinstance(data, dict) else None
+        if not rules or not isinstance(rules, list):
+            violations.append(f"{rel}: no declarative priority rules")
+        else:
+            for i, rule in enumerate(rules):
+                if not isinstance(rule, dict) or "match" not in rule or "decision" not in rule:
+                    violations.append(f"{rel}: priority.rules[{i}] is not a match/decision "
+                                      "pair")
+        spec = (((data.get("profile") or {}).get("hooks") or {}).get("priority_policy")
+                if isinstance(data, dict) else None)
+        bound = _bound_class(root, spec) if isinstance(spec, str) else None
+        if bound is None:
+            violations.append(f"{rel}: profile.hooks.priority_policy ({spec!r}) does not "
+                              "resolve to a class in the tree")
+            continue
+        brel, name, _, _ = bound
+        if (brel, name) != TABLE_INTERPRETER:
+            violations.append(f"{rel}: priority_policy binds {brel}:{name}, not the table "
+                              f"interpreter {TABLE_INTERPRETER[0]}:{TABLE_INTERPRETER[1]}; "
+                              "priority logic belongs in the profile's table")
+    found = _bound_class(root, "profiles.common.tables:TablePriorityPolicy")
+    if found is None:
+        violations.append(f"{TABLE_INTERPRETER[0]}: the table interpreter "
+                          f"{TABLE_INTERPRETER[1]} is missing")
+    else:
+        if interpreter_fingerprint(root) != INTERPRETER_FINGERPRINT:
+            violations.append(f"{TABLE_INTERPRETER[0]}: the table interpreter has changed "
+                              "since it was reviewed; review it and update "
+                              "INTERPRETER_FINGERPRINT")
+        violations += _interpreter_logic(found[0], found[2], found[3])
+    violations += _interpreter_patched(root)
     return violations
 
 
@@ -2011,26 +2495,755 @@ def check_no_qos_mapping_in_core(root: Path) -> List[str]:
     return violations
 
 
+_PRIORITY_VALUE_WORDS = frozenset({"priority", "prio", "pri", "level", "urgency", "scope",
+                                   "label", "capability", "vulnerability"})
+# Comparisons written as calls.
+_COMPARE_CALLS = frozenset({"lt", "le", "gt", "ge", "eq", "ne", "__lt__", "__le__", "__gt__",
+                            "__ge__", "__eq__", "__ne__", "__cmp__"})
+# Request fields an ordering might be taken from instead of IF-PRI.
+_ORDERING_FIELDS = frozenset({"call_type", "application", "urgency"})
+_ORDERING_CALLS = frozenset({"sorted", "sort", "min", "max", "heappush", "heapify",
+                             "insort", "insort_left", "insort_right", "nlargest", "nsmallest"})
+# Where the core compares or orders priority values, each reviewed: the
+# function (Class.method), the priority names it may compare, and why the
+# values come from IF-PRI or the comparison only checks a declaration or a
+# hook's answer. A comparison anywhere else, or of other names there, fails.
+PRIORITY_USES: Dict[Tuple[str, str], Tuple[frozenset, str]] = {
+    ("core/floor.py", "FloorControl._enqueue"): (frozenset({"floor_priority"}),
+        "queue order by the floor_priority IF-PRI decided (PLT-FC-005), arrival breaking ties"),
+    ("core/floor.py", "FloorControl._on_request_taken"): (
+        frozenset({"floor_priority", "_holder_priority"}),
+        "a request's IF-PRI floor_priority against the holder's (TS 24.380 6.3.4.4.x)"),
+    ("core/session.py", "SessionManager.preemption_victims"): (frozenset({"scope"}),
+        "IF-PRI decisions' scopes (PLT-ICD-001 4.2 POST-1), then IF-PRI compare"),
+    ("core/session.py", "SessionManager._check_bearer"): (
+        frozenset({"arp_level", "priority", "preemption_capability"}),
+        "IF-BRG's ARP level against the TS 23.501 range, and its pre-emption request "
+        "against IF-PRI's decision (contract checks)"),
+    ("core/validation.py", "_priority_totality"): (frozenset({"urgency"}),
+        "checks at load that the declared table covers every call type"),
+    ("core/validation.py", "_bearer_totality"): (frozenset(),
+        "checks at load that the declared bearer table covers every call type and medium"),
+    ("core/validation.py", "_partner_inbound"): (
+        frozenset({"max_level", "to_level", "from_label", "seen_labels"}),
+        "checks at load the bounds of a partner's declared level mapping"),
+}
+# Load-time checks of declared tables: they may hold and compare levels.
+_VALIDATING = frozenset(k for k in PRIORITY_USES if k[0] == "core/validation.py")
+
+
+def _priority_value(name: str) -> bool:
+    return any(p.lower() in _PRIORITY_VALUE_WORDS for p in _NAME_PARTS.findall(name or ""))
+
+
+def _names_of(node) -> List[str]:
+    """Names, attributes, and the fields named as text: to attrgetter,
+    itemgetter or getattr, or as a subscript (`attributes['urgency']`)."""
+    out = []
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Name, ast.Attribute)):
+            out.append(n.id if isinstance(n, ast.Name) else n.attr)
+        elif isinstance(n, ast.Call) and isinstance(n.func, (ast.Name, ast.Attribute)):
+            fname = n.func.id if isinstance(n.func, ast.Name) else n.func.attr
+            if fname in ("attrgetter", "itemgetter"):
+                out += [a.value for a in n.args if isinstance(a, ast.Constant)
+                        and isinstance(a.value, str)]
+            elif fname == "getattr" and len(n.args) >= 2 and \
+                    isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str):
+                out.append(n.args[1].value)
+        elif isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and \
+                isinstance(n.slice.value, str):
+            out.append(n.slice.value)
+    return out
+
+
+def _qualified(node, parents) -> str:
+    """Class.method, or function, enclosing `node`; "" at module level."""
+    names = []
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(node.name)
+    return ".".join(reversed(names))
+
+
+def _number(node):
+    """The value of a numeric literal (int or float, signed), or None."""
+    sign = 1
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        sign = -1 if isinstance(node.op, ast.USub) else 1
+        node = node.operand
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and \
+            not isinstance(node.value, bool):
+        return sign * node.value
+    return None
+
+
+def _literals(node) -> List:
+    """Literal values in `node` that could carry a priority: strings and
+    numbers but 0 (not None, booleans), also in collections and
+    conditionals; a signed number counted once, with its sign."""
+    signed = {id(n.operand) for n in ast.walk(node)
+              if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.USub, ast.UAdd))}
+    out = []
+    for n in ast.walk(node):
+        if id(n) in signed:
+            continue
+        v = _number(n)
+        if v is not None:
+            if v != 0:
+                out.append(v)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, (str, bytes)):
+            out.append(n.value)
+    return out
+
+
+_REQUEST_FIELDS = frozenset({"call_type", "application", "urgency"})
+# Reading a field by key is not testing it against the key.
+_LOOKUPS = frozenset({"get", "setdefault", "__getitem__", "pop"})
+# SessionRequest fields named like much else in the platform (a config's
+# `location_reports`, a rule's `media`, a SIP `target`): followed by name
+# they would be everything. Their literal comparisons are not judged; a
+# bare branch on them still is.
+_COMMON_ATTRIBUTES = frozenset({"attributes", "media", "location", "target", "request_id",
+                                "initiator", "participants"})
+
+
+def _functions_of(tree):
+    return [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _assigned(fn):
+    """(target names, value) for each binding in `fn`, its own nodes only:
+    assignments (a tuple target against a tuple value paired position by
+    position), and the targets of for, with and comprehensions against
+    what they iterate or enter."""
+    def names(x):
+        return [t.id for t in ast.walk(x) if isinstance(t, ast.Name)]
+    for n in _own_nodes(fn):
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.AugAssign)) and \
+                n.value is not None:
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            for t in targets:
+                if isinstance(t, (ast.Tuple, ast.List)) and \
+                        isinstance(n.value, (ast.Tuple, ast.List)) and \
+                        len(t.elts) == len(n.value.elts):
+                    for te, ve in zip(t.elts, n.value.elts):
+                        yield names(te), ve
+                else:
+                    yield names(t), n.value
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            yield names(n.target), n.iter
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    yield names(item.optional_vars), item.context_expr
+
+
+# What may build a label table from literals.
+_TABLE_BUILDERS = frozenset({"dict", "zip", "enumerate", "range", "tuple", "list"})
+# Functions that test text against a pattern or member.
+_MATCH_CALLS = frozenset({"match", "fullmatch", "search", "findall", "finditer", "fnmatch",
+                          "fnmatchcase", "contains", "sub", "subn", "split", "countOf",
+                          "indexOf"})
+# Calls that make text of a value: the value is still the same label.
+_TEXT_CALLS = frozenset({"str", "repr", "format"})
+
+
+def _carries(value, names: set) -> bool:
+    """`value` is one of `names`, or made from one without a lookup: an
+    attribute, subscript, text made of it (`.lower()`, str(), an f-string),
+    a choice among values (`or`, a conditional), a tuple or list of them, a
+    sum. Not a value looked up with it (`profile.call_type(r.call_type)`)."""
+    if isinstance(value, (ast.Name, ast.Attribute, ast.Subscript)):
+        return bool(set(_names_of(value)) & names)
+    if isinstance(value, ast.Call):
+        f = value.func
+        if isinstance(f, ast.Attribute) and f.attr in _STRING_METHODS:
+            return _carries(f.value, names)
+        if isinstance(f, ast.Name) and f.id in _TEXT_CALLS:
+            return any(_carries(a, names) for a in value.args)
+        if _chain(f) == ["getattr"]:
+            return bool(set(_names_of(value)) & names)
+        return False
+    if isinstance(value, ast.BoolOp):
+        return any(_carries(v, names) for v in value.values)
+    if isinstance(value, ast.IfExp):
+        return _carries(value.body, names) or _carries(value.orelse, names)
+    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        return any(_carries(v, names) for v in value.elts)
+    if isinstance(value, ast.JoinedStr):
+        return any(_carries(v.value, names) for v in value.values
+                   if isinstance(v, ast.FormattedValue))
+    if isinstance(value, ast.BinOp):
+        return _carries(value.left, names) or _carries(value.right, names)
+    return False
+
+
+def _field_locals(fn, fields=_REQUEST_FIELDS) -> set:
+    """Names `fn` binds from a request field, directly or through another
+    such name (`_carries`): `ct = r.call_type or ''` makes `ct` one."""
+    tainted: set = set()
+    grew = True
+    while grew:
+        grew = False
+        for names, value in _assigned(fn):
+            if _carries(value, fields | tainted):
+                for n in names:
+                    if n not in tainted:
+                        tainted.add(n)
+                        grew = True
+    return tainted
+
+
+def _folded(node):
+    """The value of an expression made only of literals (numbers and text,
+    signed, summed or multiplied, a method called on a literal:
+    `'EMERGENCY'.lower()`, `4 + 5`), or None."""
+    v = _number(node)
+    if v is not None:
+        return v
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp):
+        a, b = _folded(node.left), _folded(node.right)
+        if a is not None and b is not None:
+            try:
+                return {ast.Add: lambda: a + b, ast.Sub: lambda: a - b,
+                        ast.Mult: lambda: a * b}.get(type(node.op), lambda: None)()
+            except TypeError:
+                return None
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and \
+            node.func.attr in _STRING_METHODS and not node.args:
+        base = _folded(node.func.value)
+        if isinstance(base, str):
+            return getattr(base, node.func.attr)()
+    return None
+
+
+def _literal_locals(fn) -> set:
+    """Names `fn` binds to a literal number other than 0, also through a
+    conditional, a boolean choice or arithmetic on literals:
+    `n = 9 if r.adhoc else 1`, `n = 4 + 5`."""
+    out = set()
+    for names, value in _assigned(fn):
+        folded = _folded(value)
+        if (folded is not None and not isinstance(folded, str) and folded != 0) or \
+                isinstance(value, (ast.IfExp, ast.BoolOp)) and \
+                any(not isinstance(v, (str, bytes)) for v in _literals(value)):
+            out |= set(names)
+    return out
+
+
+def _constant_collections(tree) -> Dict[str, List]:
+    """Module-level names bound to literals: a number or text (folded), or
+    a literal tuple, list, set, frozenset(...) or dict: name -> its literal
+    members (keys and values)."""
+    out = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            v = node.value
+            if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and \
+                    v.func.id in ("frozenset", "set", "tuple") and v.args:
+                v = v.args[0]
+            if isinstance(v, ast.Call) and _chain(v.func)[-1:] == ["compile"] and v.args:
+                v = v.args[0]                    # re.compile('emerg'): the pattern
+            folded = _folded(v)
+            lits = [folded] if folded not in (None, 0, "") else \
+                _literals(v) if isinstance(v, (ast.Tuple, ast.List, ast.Set, ast.Dict)) else []
+            if lits:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        out[t.id] = lits
+    return out
+
+
+def _module_bindings(tree):
+    """(name, value) for each plain module-level binding."""
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            for t in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                if isinstance(t, ast.Name):
+                    yield t.id, node.value
+
+
+def _is_table(v, known: frozenset = frozenset()) -> bool:
+    """A literal mapping of text keys onto constants or tuples of them:
+    `{'emergency': 9}`, `{'emergency': (9, 'national')}`, `dict(emergency=9)`."""
+    def const(x):
+        return _folded(x) is not None or isinstance(x, ast.Constant) or \
+            isinstance(x, ast.Tuple) and all(const(e) for e in x.elts)
+    if isinstance(v, ast.Dict):
+        return bool(v.keys) and all(isinstance(k, ast.Constant) and isinstance(k.value, str)
+                                    for k in v.keys) and all(const(x) for x in v.values)
+    if isinstance(v, ast.Call) and _chain(v.func) == ["dict"] and not v.args and v.keywords:
+        return all(k.arg is not None and const(k.value) for k in v.keywords)
+    if isinstance(v, ast.DictComp) or isinstance(v, ast.Call) and _chain(v.func) == ["dict"]:
+        # Built from literals alone (`dict(zip(('emergency',), (9,)))`,
+        # `{k: 9 for k in ('emergency',)}`): no name but the builders and the
+        # comprehension's own variables.
+        bound = {n.id for g in ast.walk(v) if isinstance(g, ast.comprehension)
+                 for n in ast.walk(g.target) if isinstance(n, ast.Name)}
+        loads = {n.id for n in ast.walk(v) if isinstance(n, ast.Name)}
+        return bool(loads) and loads <= bound | _TABLE_BUILDERS | known and \
+            (any(isinstance(c, ast.Constant) and isinstance(c.value, str) for c in ast.walk(v))
+             or bool(loads & known))
+    return False
+
+
+def _key_functions(tree) -> Dict[str, ast.AST]:
+    return {n.name: n for n in _functions_of(tree)}
+
+
+def _returned_names(fn) -> set:
+    return {x for n in ast.walk(fn) if isinstance(n, (ast.Return, ast.Lambda))
+            for x in _names_of(n.value if isinstance(n, ast.Return) else n.body)
+            if n is not None and (n.value if isinstance(n, ast.Return) else n.body) is not None}
+
+
+def _request_attributes(root: Path) -> frozenset:
+    """The fields of SessionRequest (core/hooks.py)."""
+    try:
+        tree = _parse(root / CORE / "hooks.py")
+    except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+        return frozenset()
+    return frozenset(n.target.id for c in tree.body
+                     if isinstance(c, ast.ClassDef) and c.name == "SessionRequest"
+                     for n in c.body if isinstance(n, ast.AnnAssign)
+                     and isinstance(n.target, ast.Name))
+
+
+def _priority_decisions_outside_if_pri(rel: str, tree,
+                                       request_attributes: frozenset = frozenset()
+                                       ) -> List[str]:
+    """VP1-BND-013 over one runtime module (see check_no_priority_table_in_core)."""
+    out: List[str] = []
+    parents = _parent_map(tree)
+    # Every field the request carries (VP1-BND-013 round 5): a branch, a
+    # comparison or a table keyed on any of them is a priority derived
+    # from the request.
+    fields_all = _REQUEST_FIELDS | (request_attributes - _COMMON_ATTRIBUTES)
+    constants = _constant_collections(tree)
+    collections = {n for n, node in _module_bindings(tree)
+                   if isinstance(node, (ast.Tuple, ast.List, ast.Set, ast.Call))
+                   and n in constants}
+    for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+        for n, v in _constant_collections(ast.Module(body=cls.body, type_ignores=[])).items():
+            constants[f"{cls.name}.{n}"] = v
+    known = frozenset(constants)
+    tables = {t.id for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+              and node.value is not None and _is_table(node.value, known)
+              for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+              if isinstance(t, ast.Name)}
+    # A module dict filled with literals at module level: `_T['emergency'] = 9`.
+    tables |= {t.value.id for node in tree.body if isinstance(node, ast.Assign)
+               for t in node.targets if isinstance(t, ast.Subscript)
+               and isinstance(t.value, ast.Name) and isinstance(t.slice, ast.Constant)
+               and isinstance(t.slice.value, str) and _folded(node.value) is not None}
+    functions = _key_functions(tree)
+    fields_in: Dict[int, set] = {}
+    literal_in: Dict[int, set] = {}
+    members_in: Dict[int, Dict[str, str]] = {}
+    for fn in _functions_of(tree):
+        fields_in[id(fn)] = _field_locals(fn, fields_all)
+        literal_in[id(fn)] = _literal_locals(fn)
+        # Names a loop takes from a literal collection: `for k, v in PAIRS`.
+        members_in[id(fn)] = {
+            t.id: (n.iter.id if isinstance(n.iter, ast.Name) else "written inline")
+            for n in _own_nodes(fn) if isinstance(n, (ast.For, ast.comprehension))
+            and (isinstance(n.iter, ast.Name) and n.iter.id in collections or
+                 isinstance(n.iter, (ast.Tuple, ast.List, ast.Set)) and _literals(n.iter))
+            for t in ast.walk(n.target) if isinstance(t, ast.Name)}
+
+    def _side_literals(x):
+        """The literals a compared side or argument stands for: written,
+        folded, or a module-level literal constant."""
+        if isinstance(x, ast.Name):
+            return constants.get(x.id, [])
+        if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name):
+            return constants.get(f"{x.value.id}.{x.attr}", [])
+        folded = _folded(x)
+        if folded is not None:
+            return [folded] if folded not in (0, "") else []
+        if isinstance(x, (ast.Constant, ast.UnaryOp, ast.Tuple, ast.List, ast.Set, ast.Dict)):
+            return _literals(x)
+        return []
+
+    def _request_reads(x) -> set:
+        """Fields read from what is plainly the request: `request.<f>`,
+        `<x>.request.<f>`, or a parameter annotated SessionRequest. The common
+        names (`_COMMON_ATTRIBUTES`) are judged here, where the base says
+        they are the request's, though not followed by name alone."""
+        fn = _enclosing_function(x, parents)
+        typed = {a.arg for a in (fn.args.args + fn.args.kwonlyargs)
+                 if a.annotation is not None and "SessionRequest" in ast.unparse(a.annotation)} \
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) else set()
+        out = set()
+        for n in ast.walk(x):
+            if isinstance(n, ast.Attribute) and n.attr in request_attributes:
+                base = n.value
+                if isinstance(base, ast.Name) and (base.id == "request" or base.id in typed) or \
+                        isinstance(base, ast.Attribute) and base.attr == "request":
+                    out.add(n.attr)
+        return out
+
+    def _table_name(x):
+        """`x` names a module-level label table, or a table assigned in the
+        function, or is one written inline."""
+        if isinstance(x, ast.Name) and (x.id in tables or x.id in collections):
+            return x.id
+        fn = _enclosing_function(x, parents)
+        if isinstance(x, ast.Name) and fn is not None and any(
+                x.id in names and _is_table(value, known) for names, value in _assigned(fn)):
+            return x.id
+        if _is_table(x, known) or isinstance(x, (ast.Tuple, ast.List, ast.Set)) and \
+                any(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in x.elts):
+            return "written inline"
+        return ""
+
+    def _asked(node):
+        """The request fields a bare test reads (`if r.flag`, `if alert`, `if r.flag
+        is True`), or nothing when the test compares with a value or calls:
+        those are the rules above."""
+        test = node.test
+        bare = not any(isinstance(n, ast.Call) for n in ast.walk(test)) and all(
+            all(isinstance(c, ast.Constant) and c.value in (True, False, None)
+                for c in [n.left] + n.comparators if isinstance(c, ast.Constant)) and
+            any(isinstance(c, ast.Constant) for c in [n.left] + n.comparators)
+            for n in ast.walk(test) if isinstance(n, ast.Compare))
+        if not bare:
+            return []
+        local_fields, _ = scope(node)
+        return sorted({n.attr for n in ast.walk(test)
+                       if isinstance(n, ast.Attribute) and n.attr in request_attributes} |
+                      {n.id for n in ast.walk(test) if isinstance(n, ast.Name)
+                       and n.id in local_fields})
+
+    def _adjusting_number(x):
+        """A level number `x` works into a value: `base + 5`, `max(base, 9)`."""
+        if not isinstance(x, (ast.BinOp, ast.Call)):
+            return None
+        for n in ast.walk(x):
+            if n is not x and (isinstance(n, ast.Constant) or isinstance(n, ast.Name)):
+                v = _chosen_number(n)
+                if v is not None:
+                    return v
+        return None
+
+    def _chosen_number(x):
+        """The number `x` is, written, folded or a constant, if it could be a
+        level: not 0, not a status code (100-699, SIP and HTTP)."""
+        v = _folded(x)
+        if v is None and isinstance(x, (ast.Name, ast.Attribute)):
+            v = next(iter(_side_literals(x)), None)
+        if v is None or isinstance(v, (str, bytes)) or v == 0 or \
+                isinstance(v, int) and 100 <= v <= 699:
+            return None
+        return v
+
+    def scope(node):
+        fn = _enclosing_function(node, parents)
+        return (fields_in.get(id(fn), set()), literal_in.get(id(fn), set())) \
+            if fn is not None else (set(), set())
+
+    def compared(node, sides, where, allowed, validating):
+        local_fields, _ = scope(node)
+        valued = {n for x in sides for n in _names_of(x) if _priority_value(n)}
+        fields = {n for x in sides for n in _names_of(x)
+                  if n in fields_all or n in local_fields} | \
+            {n for x in sides for n in _request_reads(x)}
+        if valued and not valued <= allowed:
+            out.append(f"{rel}:{node.lineno}: compares a priority value in "
+                       f"{where or 'module'}; priority decisions are IF-PRI's "
+                       "(PRIORITY_USES lists the reviewed comparisons)")
+        if (valued or fields) and not validating:
+            what = "a priority value" if valued else "a request field"
+            fn = _enclosing_function(node, parents)
+            members = members_in.get(id(fn), {}) if fn is not None else {}
+            for x in sides:
+                if isinstance(x, ast.Name) and x.id in members:
+                    out.append(f"{rel}:{node.lineno}: compares {what} with a member of the "
+                               f"literal collection {members[x.id]}; a priority is IF-PRI's, "
+                               "not derived from a label or number")
+                lits = _side_literals(x)
+                for v in lits:
+                    out.append(f"{rel}:{node.lineno}: compares {what} with the literal "
+                               f"{v!r}; a priority is IF-PRI's, not derived from a "
+                               "label or number")
+
+    for node in ast.walk(tree):
+        where = _qualified(node, parents)
+        use = PRIORITY_USES.get((rel, where))
+        validating = (rel, where) in _VALIDATING
+        allowed = use[0] if use else frozenset()
+        if isinstance(node, ast.Compare):
+            compared(node, [node.left] + node.comparators, where, allowed, validating)
+        elif isinstance(node, ast.BinOp) and not validating and \
+                isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor, ast.Sub)):
+            local_fields, _ = scope(node)
+            for a, b in ((node.left, node.right), (node.right, node.left)):
+                if _carries(a, fields_all | local_fields) or \
+                        isinstance(a, ast.Set) and any(_carries(e, fields_all |
+                                                                 local_fields) for e in a.elts):
+                    for v in _side_literals(b):
+                        out.append(f"{rel}:{node.lineno}: tests a request field against the "
+                                   f"literal {v!r} (a set operation); a priority is IF-PRI's, "
+                                   "not derived from a label")
+        elif isinstance(node, ast.If) and not validating and request_attributes:
+            # A number chosen by what the request carries (`if r.adhoc_alert_group:
+            # return 9`) is a priority table with one row.
+            # A test that compares or calls is judged by the rules above.
+            asked = _asked(node)
+            if asked:
+                for st in node.body + node.orelse:
+                    value = st.value if isinstance(st, (ast.Return, ast.Assign, ast.AugAssign)) \
+                        else None
+                    v = (_chosen_number(value) or _adjusting_number(value)) \
+                        if value is not None else None
+                    if v is not None:
+                        what = "returns" if isinstance(st, ast.Return) else "sets"
+                        out.append(f"{rel}:{st.lineno}: {what} {v!r} chosen by the request's "
+                                   f"{', '.join(asked)}; a priority is IF-PRI's")
+        elif isinstance(node, ast.IfExp) and not validating and request_attributes:
+            asked = _asked(node)
+            if asked:
+                for branch in (node.body, node.orelse):
+                    v = _chosen_number(branch) or _adjusting_number(branch)
+                    if v is not None:
+                        out.append(f"{rel}:{node.lineno}: chooses {v!r} by the request's "
+                                   f"{', '.join(asked)}; a priority is IF-PRI's")
+                        break
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult) and \
+                not validating and request_attributes:
+            for a, b in ((node.left, node.right), (node.right, node.left)):
+                asked = sorted({n.attr for n in ast.walk(a) if isinstance(n, ast.Attribute)
+                                and n.attr in request_attributes})
+                if asked and _chosen_number(b) is not None:
+                    out.append(f"{rel}:{node.lineno}: scales {_chosen_number(b)!r} by the "
+                               f"request's {', '.join(asked)}; a priority is IF-PRI's")
+        elif isinstance(node, ast.Match) and not validating:
+            local_fields, _ = scope(node)
+            subject = set(_names_of(node.subject))
+            if subject & (fields_all | local_fields) or \
+                    any(_priority_value(n) for n in subject):
+                out.append(f"{rel}:{node.lineno}: branches on a request field or priority "
+                           "value with match; a priority is IF-PRI's")
+        elif isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute)):
+            name = node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+            local_fields, local_literals = scope(node)
+            if name in _COMPARE_CALLS:
+                sides = list(node.args) + ([node.func.value]
+                                           if isinstance(node.func, ast.Attribute)
+                                           and name.startswith("__") else [])
+                compared(node, sides, where, allowed, validating)
+            if isinstance(node.func, ast.Attribute) and _table_name(node.func.value) \
+                    and not validating and \
+                    {n for a in node.args for n in _names_of(a)} & (fields_all |
+                                                                    local_fields):
+                out.append(f"{rel}:{node.lineno}: looks up a request field in the label table "
+                           f"{_table_name(node.func.value)}; a priority is IF-PRI's")
+            elif isinstance(node.func, ast.Attribute) and not validating and \
+                    name not in _COMPARE_CALLS and name not in _LOOKUPS and \
+                    (set(_names_of(node.func.value)) & (fields_all | local_fields) or
+                     _request_reads(node.func.value)):
+                for v in [v for a in node.args for v in _side_literals(a)]:
+                    out.append(f"{rel}:{node.lineno}: tests a request field against the "
+                               f"literal {v!r} ({name}); a priority is IF-PRI's, not derived "
+                               "from a label")
+            if name in _MATCH_CALLS and not validating and \
+                    isinstance(node.func, ast.Attribute) and \
+                    isinstance(node.func.value, ast.Name) and node.func.value.id in constants \
+                    and any(_carries(a, fields_all | local_fields) for a in node.args):
+                for v in constants[node.func.value.id]:
+                    out.append(f"{rel}:{node.lineno}: tests a request field against the "
+                               f"literal {v!r} ({name}); a priority is IF-PRI's, not derived "
+                               "from a label")
+            elif name in _MATCH_CALLS and not validating and \
+                    any(_carries(a, fields_all | local_fields) for a in node.args):
+                for v in [v for a in node.args for v in _side_literals(a)]:
+                    out.append(f"{rel}:{node.lineno}: tests a request field against the "
+                               f"literal {v!r} ({name}); a priority is IF-PRI's, not derived "
+                               "from a label")
+            if name in _ORDERING_CALLS:
+                args = list(node.args) + [k.value for k in node.keywords]
+                keyed = {n for a in args for n in _names_of(a)
+                         if _priority_value(n) or n in (_ORDERING_FIELDS | fields_all)}
+                for a in [k.value for k in node.keywords if k.arg == "key"]:
+                    target = a.id if isinstance(a, ast.Name) else \
+                        a.attr if isinstance(a, ast.Attribute) else None
+                    called = [target] + ([c.func.id if isinstance(c.func, ast.Name) else
+                                          c.func.attr for c in ast.walk(a)
+                                          if isinstance(c, ast.Call) and
+                                          isinstance(c.func, (ast.Name, ast.Attribute))]
+                                         if isinstance(a, ast.Lambda) else [])
+                    for t in called:
+                        if t in functions:
+                            keyed |= {n for n in _returned_names(functions[t])
+                                      if _priority_value(n) or n in (_ORDERING_FIELDS | fields_all)}
+                if keyed and not keyed <= allowed:
+                    out.append(f"{rel}:{node.lineno}: orders by a priority value or request "
+                               f"field in {where or 'module'}; the order is IF-PRI's")
+            if name == "PriorityDecision" and not validating:
+                for a in list(node.args) + [k.value for k in node.keywords]:
+                    v = _number(a)
+                    named = [c for c in _side_literals(a) if not isinstance(c, (str, bytes))
+                             and c != 0] if isinstance(a, (ast.Name, ast.Attribute)) else []
+                    if (v is not None and v != 0) or isinstance(a, ast.IfExp) or named or \
+                            isinstance(a, ast.Name) and a.id in local_literals:
+                        out.append(f"{rel}:{node.lineno}: builds a PriorityDecision from "
+                                   "literals or a condition; a priority is IF-PRI's")
+                        break
+                if any(k.arg is None for k in node.keywords):
+                    out.append(f"{rel}:{node.lineno}: builds a PriorityDecision from an "
+                               "unpacked mapping; a priority is IF-PRI's, field by field")
+            if name == "replace" and not validating:
+                for k in node.keywords:
+                    if k.arg is None or _priority_value(k.arg) and (
+                            not isinstance(k.value, (ast.Name, ast.Attribute)) or
+                            {a.attr for a in ast.walk(k.value) if isinstance(a, ast.Attribute)}
+                            & request_attributes):
+                        out.append(f"{rel}:{node.lineno}: replaces "
+                                   f"{k.arg or 'fields from a mapping'} with a computed value; "
+                                   "a priority is IF-PRI's as decided")
+        elif isinstance(node, ast.Dict) and not validating and len(node.keys) >= 2 and \
+                not (isinstance(parents.get(node), (ast.Assign, ast.AnnAssign)) and
+                     parents.get(parents.get(node)) is tree) and \
+                all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in node.keys) \
+                and all(_number(v) is not None for v in node.values) and \
+                len({_number(v) for v in node.values}) > 1:
+            # Counters start alike ({"accepted": 0, ...}); levels differ.
+            # Module-level tables are named and reviewed (the marker check
+            # below, and the lookups next); one written inline is not.
+            out.append(f"{rel}:{node.lineno}: maps labels onto numbers inline; a "
+                       "label-to-level mapping is a priority table")
+        elif isinstance(node, ast.Subscript) and _table_name(node.value) and \
+                not validating and \
+                set(_names_of(node.slice)) & (fields_all | scope(node)[0]):
+            out.append(f"{rel}:{node.lineno}: looks up a request field in the label table "
+                       f"{_table_name(node.value)}; a priority is IF-PRI's")
+        if validating:
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            named = [n for t in targets for n in _names_of(t) if _priority_value(n)]
+            # An all-capitals name holding text is a reason code or message
+            # (LOWER_PRIORITY = "lower-priority"), not a priority value.
+            constant = named and all(n.isupper() for n in named)
+            value = node.value
+            if isinstance(value, ast.Call) and _chain(value.func) == ["getattr"] and \
+                    len(value.args) == 3:
+                value = value.args[2]            # the default is what it sets
+            if named and \
+                    isinstance(value, (ast.Constant, ast.UnaryOp, ast.IfExp, ast.BoolOp)):
+                for v in _literals(value):
+                    if constant and isinstance(v, (str, bytes)):
+                        continue
+                    out.append(f"{rel}:{node.lineno}: sets a priority value to {v!r}; a "
+                               "priority is IF-PRI's")
+        elif isinstance(node, ast.keyword) and node.arg and _priority_value(node.arg):
+            v = _number(node.value)
+            if v is None and isinstance(node.value, (ast.Name, ast.Attribute)):
+                v = next((c for c in _side_literals(node.value)
+                          if not isinstance(c, (str, bytes)) and c != 0), None)
+            if v is not None and v != 0:
+                out.append(f"{rel}:{node.value.lineno}: passes {node.arg}={v}; a priority "
+                           "is IF-PRI's")
+    return out
+
+
 def check_no_priority_table_in_core(root: Path) -> List[str]:
-    """VP1-BND-013 / PLT-HOK-021 — HEURISTIC.
+    """VP1-BND-013 / PLT-HOK-021 — every priority decision is IF-PRI's.
 
     Comparing a floor priority the profile supplied is required by PLT-FC-005,
-    so comparison itself cannot be forbidden. What is forbidden is the core
-    DERIVING a priority: a lookup table mapping labels onto levels.
+    so comparison itself cannot be forbidden. "The core" is the platform
+    the profile plugs into: every module the process runs (core/, the
+    interface definitions core/hooks.py included, and service/, where the
+    floor's priorities are fetched from IF-PRI).
+      * A comparison of (also written as operator.lt and the rest, or a
+        comparison dunder), or an ordering (sorted, sort, min, max, heapq,
+        bisect; attrgetter, itemgetter and a key function of the module
+        followed) by, a priority value (a name with priority, prio, pri,
+        level, urgency, scope, label, capability or vulnerability in it;
+        for orderings also any request field but the common ones) is allowed only in
+        the functions `PRIORITY_USES` lists, by Class.method, and only of
+        the names listed for each: each use is reviewed, its values coming
+        from IF-PRI or it checking a declaration or a hook's answer.
+      * Outside the load-time checks of declared tables (`_VALIDATING`):
+        a priority value or a request field (call_type, application,
+        urgency; also named as getattr text or a subscript, and any local
+        bound from one, `ct = r.call_type`) is never compared with a
+        literal other than 0 and None, signed and float numbers and the
+        members of a module-level literal collection included; never
+        tested by a method with a literal argument (`.startswith('emerg')`);
+        never the subject of a match; never looked up in a module-level
+        label-to-number table. A priority value is never set to a literal
+        (a number other than 0; text, unless the name is an all-capitals
+        constant), also through a conditional; no keyword passes one a
+        number other than 0; no PriorityDecision is built from numeric
+        literals, a conditional, a local bound to either, or an unpacked
+        mapping; no `replace` gives a priority field a computed value: a
+        priority derived by label is a priority table.
+      * No dict written inline maps two or more labels onto differing
+        numbers; at module level, none does under a priority-like name.
 
-    Two discriminators, both needed. Uniformity: a priority table maps string
-    keys onto integer levels and nothing else, where a defaults or accumulator
-    dict holds mixed types — flagging those made this check cry wolf on the
-    validator's own scaffolding. And context: the giveaway is usually the name
-    it is bound to, not the literal, so the assignment target is inspected too.
+    Literals include module-level text and number constants and values
+    folded from literals (`'EMERGENCY'.lower()`, `4 + 5`); a request field
+    is followed into locals through `or`, conditionals, str(), f-strings,
+    tuples (by position), for and with targets; a label table is any
+    literal mapping of text onto constants or tuples of them, dict(k=...)
+    too, module-level or inline, or built from literals alone (dict(zip(...)),
+    a comprehension); a literal list or tuple is one too (`.index`), and a
+    loop over one yields its members as literals (`for k, v in PAIRS`).
+    Module and class constants (`NINE`, `K.N`) count as literals in a
+    PriorityDecision and a priority keyword; a pattern function (re,
+    fnmatch, operator.contains) or a set operation testing a field against
+    a literal is refused; and a number returned from a branch on any
+    SessionRequest field tested bare (`if r.adhoc_alert_group`, a local
+    holding it, `is True`), returned, assigned or chosen in a conditional
+    expression, written or a constant, or a number scaled by such a field,
+    is a priority table with one row (status codes 100-699 excepted).
+    Every SessionRequest field is followed into locals and comparisons but
+    the commonly named ones (`_COMMON_ATTRIBUTES`); compiled patterns
+    (`re.compile('emerg')`), dicts filled with literals at module level,
+    tables zipped from constants and inline literal collections count as
+    literals and tables. A key lambda's calls are followed.
+
+    The common field names are judged where the base is plainly the
+    request (`request.<f>`, `<x>.request.<f>`, a parameter annotated
+    SessionRequest); a branch's arm may not work a level into a value
+    (`base + 5`, `max(base, 9)`, `n += 5`); `replace` may not set a
+    priority field from a request field; a table assigned in a function
+    counts as one.
+
+    Not followed (recorded residue, VP1-BND-013 reviews): a value held
+    under a name with none of those words (`rank = 9`) and set from a
+    non-literal; a field or decision passed through another function
+    (`_lvl(r.call_type)`); a table built at run time from non-literals; a
+    flag on an object not plainly the request (`s.emergency`); a level
+    that happens to lie in 100-699 (taken as a status code); comparisons
+    by hash or other computed identity; a decision made under neutral names
+    with no literal (victims chosen by a request flag); a local alias of a
+    common request field (`attrs = request.attributes`). Fails safe, for
+    review: a literal test of a common field that is not about priority
+    (`'audio' in request.media`), a counter bumped under a request flag.
     """
     violations: List[str] = []
     markers = ("priority", "level", "urgency", "preempt")
-    for path in _iter_python(root, CORE):
-        if path.name == "hooks.py":
+    attributes = _request_attributes(root)
+    paths = [p for package in RUNTIME for p in _iter_python(root, package)]
+    for path in paths:
+        if any(p in CACHE_DIRS for p in path.parts):
             continue
-        source = path.read_text(encoding="utf-8")
-        for node in ast.walk(_parse(path)):
+        rel = path.relative_to(root).as_posix()
+        try:
+            source = path.read_text(encoding="utf-8")
+            tree = _parse(path)
+        except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+            violations.append(f"{rel}: cannot be parsed, so this gate cannot clear it")
+            continue
+        violations += _priority_decisions_outside_if_pri(rel, tree, attributes)
+        for node in ast.walk(tree):
             dicts: List[Tuple[ast.Dict, str]] = []
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
                 names = " ".join(_target_name(x) for x in node.targets)
@@ -2053,37 +3266,284 @@ def check_no_priority_table_in_core(root: Path) -> List[str]:
                             (ast.get_source_segment(source, d) or "")).lower()
                 if any(m in haystack for m in markers):
                     violations.append(
-                        f"{path.relative_to(root)}:{d.lineno}: core contains a "
-                        "label-to-level mapping, which is a priority table")
-    return violations
+                        f"{rel}:{d.lineno}: core contains a label-to-level mapping, which "
+                        "is a priority table")
+    return sorted(set(violations), key=_by_line)
 
 
-# --------------------------------------------------------------------------
-# VP1-BND-014 — resolver context
-# --------------------------------------------------------------------------
+_IN_PLACE_REASON = "values, the request among them, are not altered in place"
+# Methods that change a mapping in place.
+_MUTATORS = frozenset({"update", "pop", "popitem", "clear", "setdefault", "__setitem__",
+                       "__delitem__", "__ior__"})
+# VP1-BND-014: the core's own helpers that add to the request before the
+# resolver sees it, and nothing else: the location the cell map stands for
+# (PLT-ICD-001 2.8) and the initiator's roles (ICD-OP-09).
+REQUEST_ENRICHERS = frozenset({"_located", "_with_roles"})
+# Where a request is born rather than handed on: the function, and the call
+# it is bound from once (IF-IWF map_inbound makes an inbound request).
+REQUEST_ORIGINS: Dict[Tuple[str, str], str] = {
+    ("core/session.py", "SessionManager.receive_inbound"): "map_inbound"}
+# The resolver methods that receive the request.
+RESOLVER_REQUEST_METHODS = frozenset({"resolve", "determine_participants"})
+
+
+def _resolver_method(node) -> bool:
+    """`<hooks>.identity_resolver.<method>` for a method that takes the request."""
+    return isinstance(node, ast.Attribute) and node.attr in RESOLVER_REQUEST_METHODS and \
+        isinstance(node.value, ast.Attribute) and node.value.attr == "identity_resolver"
+
+
+def _resolve_calls(tree):
+    """(call, the request it passes) for every call of a resolver method that
+    takes the request: direct (`...identity_resolver.resolve(target,
+    request)`) or through the invoker (`invoker.call("IF-IDR", "resolve",
+    <method>, target, request, ...)`); the request is the argument after the
+    target, or the `request` keyword."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _resolver_method(node.func):
+            args = list(node.args)
+        else:
+            at = next((i for i, a in enumerate(node.args) if _resolver_method(a)), None)
+            if at is None:
+                continue
+            args = list(node.args[at + 1:])
+        keyword = next((k.value for k in node.keywords if k.arg == "request"), None)
+        yield node, (args[1] if len(args) > 1 else keyword)
+
+
+def _params(fn) -> List[str]:
+    a = fn.args
+    return [p.arg for p in a.posonlyargs + a.args + a.kwonlyargs]
+
+
+def _own_nodes(fn):
+    """The nodes of `fn` that are its own: nested functions, lambdas and
+    classes left out (their names are their own)."""
+    todo = list(ast.iter_child_nodes(fn))
+    while todo:
+        node = todo.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                                 ast.ClassDef)):
+            todo.extend(ast.iter_child_nodes(node))
+
+
+def _call_name(call) -> str:
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+
+
+def _enrichment(node) -> bool:
+    """`request = self.<enricher>(request, ...)`: one of REQUEST_ENRICHERS,
+    the core's own method, adding to the request it is given first."""
+    v = getattr(node, "value", None)
+    return isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(v, ast.Call) and \
+        isinstance(v.func, ast.Attribute) and isinstance(v.func.value, ast.Name) and \
+        v.func.value.id == "self" and v.func.attr in REQUEST_ENRICHERS and \
+        bool(v.args) and isinstance(v.args[0], ast.Name) and v.args[0].id == "request" and \
+        _single_request_target(node)
+
+
+def _born_from(node, origin: str) -> bool:
+    """`request = invoker.call(..., "<origin>", ...)`: the request bound from
+    the hook operation it is born from."""
+    return isinstance(node, (ast.Assign, ast.AnnAssign)) and \
+        isinstance(node.value, ast.Call) and _single_request_target(node) and any(
+            isinstance(a, ast.Constant) and a.value == origin for a in node.value.args)
+
+
+def _single_request_target(node) -> bool:
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return len(targets) == 1 and isinstance(targets[0], ast.Name) and \
+        targets[0].id == "request"
+
+
+def _rebinds_request(fn, origin: str = "") -> List[ast.AST]:
+    """Every place `fn` rebinds or alters its `request` other than through
+    the core's adding helpers (`REQUEST_ENRICHERS`) or, in a reviewed origin,
+    the one call it is born from: any store to the name (assignment, tuple,
+    for, with, comprehension, walrus, del), a store to one of its
+    attributes, setattr / object.__setattr__ on it, and vars(request) or
+    request.__dict__, which reach its fields. Nested functions and lambdas
+    are their own."""
+    allowed = {id(n.targets[0] if isinstance(n, ast.Assign) else n.target)
+               for n in _own_nodes(fn)
+               if _enrichment(n) or (origin and _born_from(n, origin))}
+    out = []
+    for node in _own_nodes(fn):
+        if isinstance(node, ast.Name) and node.id == "request" and \
+                isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in allowed:
+            out.append(node)
+        elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Name) and \
+                node.args[0].id == "request" and (
+                    isinstance(node.func, ast.Name) and node.func.id in ("setattr", "delattr",
+                                                                         "vars")
+                    or isinstance(node.func, ast.Attribute) and
+                    node.func.attr in ("__setattr__", "__delattr__")):
+            out.append(node)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and \
+                node.value.id == "request" and (
+                    node.attr == "__dict__" or isinstance(node.ctx, (ast.Store, ast.Del))):
+            out.append(node)
+    return out
+
+
+def _call_argument(call, fn, name: str):
+    """The argument `call` passes for parameter `name` of `fn` (a method:
+    the first parameter is bound), or None."""
+    params = _params(fn)
+    if params and params[0] in ("self", "cls"):
+        params = params[1:]
+    for k in call.keywords:
+        if k.arg == name:
+            return k.value
+    if name in params and params.index(name) < len(call.args):
+        return call.args[params.index(name)]
+    return None
+
+
+def _gets_request(fn) -> bool:
+    return fn is not None and not isinstance(fn, ast.Lambda) and "request" in _params(fn)
 
 
 def check_resolver_receives_context(root: Path) -> List[str]:
-    """VP1-BND-014 / PLT-HOK-011 — the whole request reaches the resolver."""
+    """VP1-BND-014 / PLT-HOK-011 — the whole request reaches the resolver.
+
+    Over every core module, each call of the resolver methods that receive
+    the request (`RESOLVER_REQUEST_METHODS`: resolve, determine_participants),
+    direct or through the invoker, passes as the request the enclosing
+    function's own `request` parameter; that function rebinds or alters
+    `request` only through the core's adding helpers (`REQUEST_ENRICHERS`:
+    the mapped location, the initiator's roles), never by assignment,
+    tuple, for, with, comprehension, setattr or object.__setattr__; and so,
+    transitively, does every function of the module that calls it: each
+    call passes its caller's own `request`, unrebuilt, or is a reviewed
+    origin (`REQUEST_ORIGINS`) binding it once from the call it is born
+    from (IF-IWF map_inbound). `vars(request)`, `request.__dict__` and a
+    store to one of its attributes count as altering it, and nowhere in
+    the core is an object's field table (vars(), __dict__) written to or
+    held, so neither an alias nor a helper can alter the request in place
+    (object.__setattr__ is VP1-BND-008's). The resolver is
+    reached only as `<hooks>.identity_resolver.<method>`, called there or
+    handed straight to the invoker; a function that reaches it, and an
+    enricher, is referred to only by calling it (not held, not looked up
+    with getattr), so every caller is seen. At least one call site exists.
+    The trace stays within a module: the service builds the request it
+    hands SessionManager, and what reaches the resolver from there is the
+    spy tests' to show. A spy-resolver test shows at run time that the
+    initiator, call type, application and location arrive as the
+    originating request carried them, for a private, a group and an ad hoc
+    call by list and by criteria; the enrichers' bodies are left to it.
+    """
     violations: List[str] = []
-    path = root / CORE / "session.py"
-    source = path.read_text(encoding="utf-8")
-    if "identity_resolver.resolve" not in source:
-        violations.append(f"{path.relative_to(root)}: no resolve call site found")
-        return violations
-    for node in ast.walk(_parse(path)):
-        if not isinstance(node, ast.Call):
+    calls = 0
+    for path in _iter_python(root, CORE):
+        if any(p in CACHE_DIRS for p in path.parts):
             continue
-        args = [ast.get_source_segment(source, a) or "" for a in node.args]
-        if not any("identity_resolver.resolve" in a for a in args):
+        rel = path.relative_to(root).as_posix()
+        try:
+            tree = _parse(path)
+        except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+            violations.append(f"{rel}: cannot be parsed, so this gate cannot clear it")
             continue
-        # The call passes the target and the request itself, which carries
-        # initiator, call type, application and location.
-        if not any(a.strip() == "request" for a in args):
-            violations.append(
-                f"{path.relative_to(root)}:{node.lineno}: resolve call does not "
-                "pass the full request")
-    return violations
+        parents = _parent_map(tree)
+        for node in ast.walk(tree):
+            # The resolver is reached only as `<hooks>.identity_resolver.<method>`,
+            # called there or handed straight to the invoker's call.
+            held = isinstance(node, ast.Call) and _chain(node.func) == ["getattr"] and \
+                len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and \
+                node.args[1].value == "identity_resolver"
+            if isinstance(node, ast.Attribute) and node.attr == "identity_resolver":
+                method = parents.get(node)
+                use = parents.get(method)
+                held = not (isinstance(method, ast.Attribute) and isinstance(use, ast.Call) and (
+                    use.func is method or method in use.args and
+                    _chain(use.func)[-1:] == ["call"]))
+            if held:
+                violations.append(f"{rel}:{node.lineno}: the resolver is held in a name; "
+                                  "call it where it is, so its request can be seen")
+        # An object's field table, written to or held, alters any value in
+        # place, the request among them, whoever holds it under whatever
+        # name (`r = request; vars(r).update(...)`, a helper's own argument).
+        for node in ast.walk(tree):
+            up = parents.get(node)
+            if isinstance(node, ast.Name) and node.id == "vars" and \
+                    not (isinstance(up, ast.Call) and up.func is node) or \
+                    isinstance(node, ast.Call) and _chain(node.func) == ["getattr"] and \
+                    len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and \
+                    node.args[1].value == "__dict__":
+                violations.append(f"{rel}:{node.lineno}: reaches an object's field table "
+                                  "through another name; " + _IN_PLACE_REASON)
+                continue
+            if not (isinstance(node, ast.Call) and _chain(node.func) == ["vars"] or
+                    isinstance(node, ast.Attribute) and node.attr == "__dict__"):
+                continue
+            written = isinstance(up, ast.Attribute) and up.attr in _MUTATORS or \
+                isinstance(up, ast.Subscript) and isinstance(up.ctx, (ast.Store, ast.Del)) or \
+                isinstance(up, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Return))
+            if written:
+                violations.append(f"{rel}:{node.lineno}: writes or holds an object's field "
+                                  "table (vars, __dict__); " + _IN_PLACE_REASON)
+        reached = []          # functions whose `request` reaches the resolver
+        for call, request in _resolve_calls(tree):
+            calls += 1
+            fn = _enclosing_function(call, parents)
+            if not (isinstance(request, ast.Name) and request.id == "request"
+                    and _gets_request(fn)):
+                violations.append(f"{rel}:{call.lineno}: the resolver is not given the request "
+                                  "the function received; it must see the whole request")
+                continue
+            reached.append(fn)
+        done = set()
+        while reached:
+            fn = reached.pop()
+            if id(fn) in done:
+                continue
+            done.add(id(fn))
+            origin = REQUEST_ORIGINS.get((rel, _qualified(fn.body[0], parents)), "")
+            for node in _rebinds_request(fn, origin):
+                violations.append(f"{rel}:{node.lineno}: the request is rebuilt before the "
+                                  "resolver sees it; only the core's adding helpers "
+                                  "(REQUEST_ENRICHERS) may change it")
+            for call in ast.walk(tree):
+                if not isinstance(call, ast.Call):
+                    continue
+                f = call.func
+                callee = f.attr if isinstance(f, ast.Attribute) and \
+                    isinstance(f.value, ast.Name) and f.value.id in ("self", "cls") else \
+                    f.id if isinstance(f, ast.Name) else None
+                if callee != fn.name:
+                    continue
+                arg = _call_argument(call, fn, "request")
+                caller = _enclosing_function(call, parents)
+                born = caller is not None and not isinstance(caller, ast.Lambda) and \
+                    (rel, _qualified(call, parents)) in REQUEST_ORIGINS
+                if not (isinstance(arg, ast.Name) and arg.id == "request"
+                        and (_gets_request(caller) or born)):
+                    violations.append(f"{rel}:{call.lineno}: {fn.name} reaches the resolver and "
+                                      "is not given its caller's request")
+                    continue
+                reached.append(caller)
+        # A function that reaches the resolver, or an enricher, is only
+        # called by name: held or looked up, its callers cannot be traced.
+        traced = {f.name for f in _functions_of(tree) if id(f) in done} | REQUEST_ENRICHERS
+        for node in ast.walk(tree):
+            name = node.id if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) \
+                else node.attr if isinstance(node, ast.Attribute) else None
+            up = parents.get(node)
+            if name in traced and not (isinstance(up, ast.Call) and up.func is node):
+                violations.append(f"{rel}:{node.lineno}: {name} is referred to other than by "
+                                  "a call; its callers must be seen to pass the request")
+            if isinstance(node, ast.Call) and _chain(node.func) == ["getattr"] and \
+                    len(node.args) >= 2 and isinstance(node.args[1], ast.Constant) and \
+                    node.args[1].value in traced:
+                violations.append(f"{rel}:{node.lineno}: {node.args[1].value} is looked up "
+                                  "by name; its callers must be seen to pass the request")
+    if calls == 0:
+        violations.append("core: no identity_resolver.resolve call site found")
+    return sorted(set(violations), key=_by_line)
 
 
 # --------------------------------------------------------------------------
@@ -2269,7 +3729,8 @@ def _audit_keys(call) -> List[Tuple[int, str]]:
 def _by_line(v: str):
     path, _, rest = v.partition(":")
     line, _, text = rest.partition(":")
-    return (path, int(line) if line.isdigit() else 0, text)
+    # The whole message breaks ties, so the order never depends on a set's.
+    return (path, int(line) if line.isdigit() else 0, v)
 
 
 def check_time_discipline(root: Path) -> List[str]:

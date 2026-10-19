@@ -1688,3 +1688,98 @@ def test_an_abandon_completes_when_its_records_cannot_be_written(mcx, caplog):
     assert [r.getMessage() for r in caplog.records if r.name == "mcx.session"] == [
         "session r2: floor release not recorded; released anyway",
         "session r2: session-failed record lost; the session ended anyway"]
+
+
+# --------------------------------------------------------------------------
+# VP1-BND-014 — the resolver sees the whole request (spy resolver)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("call_type,target", [("private", "sip:u1@mcptt.example"),
+                                              ("prearranged-group", "grp:alpha")],
+                         ids=["private", "group"])
+def test_the_resolver_sees_initiator_call_type_application_and_location(
+        manager, mcx, monkeypatch, call_type, target):
+    """PLT-HOK-011: what the resolver receives is the request as the caller
+    sent it, the four named items included."""
+    from core.hooks import LocationContext
+    resolver = mcx.hooks.identity_resolver
+    seen = []
+    real = resolver.resolve
+    monkeypatch.setattr(resolver, "resolve",
+                        lambda t, request: (seen.append((t, request)), real(t, request))[1])
+    location = LocationContext(cell_id="cell-9", tracking_area="ta-3",
+                               attributes={"area": "south"})
+    session, _, refusal = manager.establish(
+        req(call_type=call_type, target=target, application="coordination",
+            urgency="normal", location=location))
+    assert refusal is None and session is not None
+    assert [t for t, _ in seen] == [target]
+    got = seen[0][1]
+    assert got.request_id == "s1"
+    assert (got.initiator, got.call_type, got.application, got.urgency, got.location) == (
+        "sip:u0@mcptt.example", call_type, "coordination", "normal", location)
+    assert (got.location.cell_id, got.location.tracking_area,
+            dict(got.location.attributes)) == ("cell-9", "ta-3", {"area": "south"})
+
+
+@pytest.mark.vp("VP1-BND-014")
+def test_the_resolver_sees_the_whole_request_for_ad_hoc_criteria(mcx, sink, monkeypatch):
+    """The criteria path hands IF-IDR determine_participants the request as
+    the caller sent it (TS 24.379 17.4.2.2 step 12 ii)."""
+    from core.hooks import LocationContext
+    resolver = mcx.hooks.identity_resolver
+    seen = []
+    found = Resolution(kind=ResolutionKind.GROUP,
+                       members=("sip:u1@mcptt.example", "sip:u2@mcptt.example"),
+                       resolved_from="adhoc:criteria")
+    monkeypatch.setattr(resolver, "determine_participants",
+                        lambda criteria, request: (seen.append((criteria, request)), found)[1])
+    location = LocationContext(cell_id="cell-9", tracking_area="ta-3",
+                               attributes={"area": "south"})
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=3), adhoc_list_max=10)
+    original = req(target="", adhoc=True, participant_criteria="team-a",
+                   application="coordination", urgency="normal", location=location)
+    session, _, refusal = mgr.establish(original)
+    assert refusal is None and session is not None
+    assert len(seen) == 1
+    criteria, got = seen[0]
+    assert criteria == "team-a"
+    assert got.request_id == original.request_id
+    assert (got.initiator, got.call_type, got.application, got.urgency, got.location,
+            got.participant_criteria) == (
+        "sip:u0@mcptt.example", "prearranged-group", "coordination", "normal", location,
+        "team-a")
+    # The location by value: an object altered in place would still be `location`.
+    assert (got.location.cell_id, got.location.tracking_area,
+            dict(got.location.attributes)) == ("cell-9", "ta-3", {"area": "south"})
+
+
+@pytest.mark.vp("VP1-BND-014")
+def test_the_resolver_sees_the_whole_request_for_an_ad_hoc_list(mcx, sink, monkeypatch):
+    """The ad hoc path resolves each listed participant with the request as
+    the caller sent it (TS 24.379 17.4.2.2)."""
+    from core.hooks import LocationContext
+    resolver = mcx.hooks.identity_resolver
+    seen = []
+    real = resolver.resolve
+    monkeypatch.setattr(resolver, "resolve",
+                        lambda t, request: (seen.append((t, request)), real(t, request))[1])
+    listed = tuple(f"sip:u{i}@mcptt.example" for i in (1, 2))
+    location = LocationContext(cell_id="cell-9", tracking_area="ta-3",
+                               attributes={"area": "south"})
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=3), adhoc_list_max=10)
+    original = req(target="", adhoc=True, participants=listed, application="coordination",
+                   urgency="normal", location=location)
+    session, _, refusal = mgr.establish(original)
+    assert refusal is None and session is not None
+    assert [t for t, _ in seen] == list(listed)
+    for _, got in seen:
+        assert (got.initiator, got.call_type, got.application, got.urgency,
+                got.location, got.participants) == (
+            "sip:u0@mcptt.example", "prearranged-group", "coordination", "normal",
+            location, listed)
+        assert (got.location.cell_id, got.location.tracking_area,
+                dict(got.location.attributes)) == ("cell-9", "ta-3", {"area": "south"})
+        assert got.request_id == original.request_id

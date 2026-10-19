@@ -2144,3 +2144,1016 @@ def test_bnd_016_a_paired_field_must_hold_a_declared_form(tmp_path):
     assert gate.check_time_discipline(root) == _lines(root, [
         "core/model.py:{L:hold_timeout_s}: field 'hold_timeout_s' counts seconds; durations "
         "are in milliseconds"])
+
+
+# --------------------------------------------------------------------------
+# RES-OP-09 batch C: VP1-BND-011, 013, 014, 015
+# --------------------------------------------------------------------------
+
+
+def _with_profiles(tmp_path, files=None, patches=None):
+    """`_runtime` with the profile packages whole (their hooks too)."""
+    import shutil
+    root = _runtime(tmp_path)
+    shutil.rmtree(root / "profiles")
+    shutil.copytree(ROOT / "profiles", root / "profiles",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    for rel, (old, new) in (patches or {}).items():
+        path = root / rel
+        text = path.read_text(encoding="utf-8")
+        assert text.count(old) == 1, (rel, old)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+    for rel, text in (files or {}).items():
+        dst = root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(text, encoding="utf-8")
+    return root
+
+
+@pytest.mark.vp("VP1-BND-011", "VP1-BND-013", "VP1-BND-014", "VP1-BND-015")
+@pytest.mark.parametrize("fn", [gate.check_priority_table_declarative,
+                                gate.check_no_priority_table_in_core,
+                                gate.check_resolver_receives_context,
+                                gate.check_floor_machine_isolated],
+                         ids=["011", "013", "014", "015"])
+def test_batch_c_gates_pass_the_unchanged_copy(tmp_path, fn):
+    assert fn(_with_profiles(tmp_path)) == []
+
+
+_EVALUATE = '''    def evaluate(self, request: SessionRequest,
+                 resolution: Resolution) -> PriorityDecision:
+'''
+_INTERPRETER_CHANGED = ("profiles/common/tables.py: the table interpreter has changed since "
+                        "it was reviewed; review it and update INTERPRETER_FINGERPRINT")
+_BINDS = ("not the table interpreter profiles/common/tables.py:TablePriorityPolicy; priority "
+          "logic belongs in the profile's table")
+_DECIDES = "priority is the profile's table"
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"profiles/mcx/hooks.py": ("    TableSessionPolicy,\n)\n",
+                                    "    TableSessionPolicy,\n)\n\n\nclass MyPolicy("
+                                    "TablePriorityPolicy):\n    pass\n"),
+          "profiles/mcx/profile.yaml": ("profiles.mcx.hooks:TablePriorityPolicy",
+                                        "profiles.mcx.hooks:MyPolicy")},
+     [f"profiles/mcx/profile.yaml: priority_policy binds profiles/mcx/hooks.py:MyPolicy, {_BINDS}"]),
+    ({}, {"profiles/mcx/profile.yaml": ("profiles.mcx.hooks:TablePriorityPolicy",
+                                        "profiles.mcx.hooks:Missing")},
+     ["profiles/mcx/profile.yaml: profile.hooks.priority_policy ('profiles.mcx.hooks:Missing') "
+      "does not resolve to a class in the tree"]),
+    ({}, {"profiles/common/tables.py": (_EVALUATE, _EVALUATE +
+                                        "        if request.call_type == 'emergency':\n"
+                                        "            return None\n")},
+     [f"profiles/common/tables.py:{{L:== 'emergency'}}: the priority policy decides on the "
+      f"literal 'emergency'; {_DECIDES}"]),
+    ({}, {"profiles/common/tables.py": (_EVALUATE, _EVALUATE +
+                                        "        match request.call_type:\n"
+                                        "            case _:\n                pass\n")},
+     [f"profiles/common/tables.py:{{L:match request.call_type}}: the priority policy branches "
+      f"with match; {_DECIDES}"]),
+    ({}, {"profiles/common/tables.py": (_EVALUATE, _EVALUATE + "        boost = 9\n")},
+     ["profiles/common/tables.py:{L:boost = 9}: the priority policy contains the literal 9"]),
+], ids=["subclass-bound", "binding-unresolved", "literal-compare", "match", "integer"])
+def test_bnd_011_catches_the_variants(tmp_path, files, patches, expected):
+    root = _with_profiles(tmp_path, files, patches)
+    if "profiles/common/tables.py" in patches:      # the reviewed interpreter changed too
+        expected = [_INTERPRETER_CHANGED] + expected
+    assert gate.check_priority_table_declarative(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_follows_an_alias_of_the_interpreter(tmp_path):
+    root = _with_profiles(tmp_path, patches={
+        "profiles/mcx/hooks.py": ("    TableSessionPolicy,\n)\n",
+                                  "    TableSessionPolicy,\n)\nPolicy = TablePriorityPolicy\n"),
+        "profiles/mcx/profile.yaml": ("profiles.mcx.hooks:TablePriorityPolicy",
+                                      "profiles.mcx.hooks:Policy")})
+    assert gate.check_priority_table_declarative(root) == []
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("old,new", [
+    ("class TablePriorityPolicy:\n", "class TablePriorityPolicy(object):\n"),
+    (_EVALUATE, _EVALUATE + "        request = request\n"),
+    (_EVALUATE, _EVALUATE + "        urgency_text = str(request.urgency).lower()\n"),
+    (_EVALUATE, _EVALUATE + "        table = {}\n        table.get(request.call_type)\n"),
+    (_EVALUATE, _EVALUATE + "        from profiles.common.decide import decide\n"
+                            "        decide(request)\n"),
+], ids=["base-class", "rebinding", "string-method", "dict-lookup", "imported-helper"])
+def test_bnd_011_any_change_to_the_interpreter_needs_review(tmp_path, old, new):
+    root = _with_profiles(tmp_path, patches={"profiles/common/tables.py": (old, new)})
+    assert _INTERPRETER_CHANGED in gate.check_priority_table_declarative(root)
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_the_interpreters_name_is_not_rebound(tmp_path):
+    root = _with_profiles(tmp_path)
+    path = root / "profiles/common/tables.py"
+    path.write_text(path.read_text() + "\n\nclass _Evil(TablePriorityPolicy):\n    pass\n\n\n"
+                    "TablePriorityPolicy = _Evil\n")
+    line = len(path.read_text().splitlines())
+    got = gate.check_priority_table_declarative(root)
+    assert (f"profiles/common/tables.py:{line}: rebinds TablePriorityPolicy after its "
+            "definition; the interpreter is the code as defined") in got
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_a_docstring_is_not_a_change():
+    import ast as _ast
+    src = (ROOT / "profiles/common/tables.py").read_text()
+    assert gate.interpreter_fingerprint(ROOT) == gate.INTERPRETER_FINGERPRINT
+    assert '"""First-match evaluation' in src
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text,expected", [
+    ("PRIORITY_LEVELS = {'emergency': 9, 'private': 5}\n",
+     ["1: core contains a label-to-level mapping, which is a priority table"]),
+    ("def f(a, b):\n    return a.level > b.level\n",
+     ["2: compares a priority value in f; priority decisions are IF-PRI's (PRIORITY_USES lists "
+      "the reviewed comparisons)"]),
+    ("def f(rs):\n    return sorted(rs, key=lambda r: r.urgency)\n",
+     ["2: orders by a priority value or request field in f; the order is IF-PRI's"]),
+    ("from core.hooks import PriorityDecision\ndef d():\n    return PriorityDecision(level=9)\n",
+     ["3: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's",
+      "3: passes level=9; a priority is IF-PRI's"]),
+], ids=["named-table", "compare-outside-uses", "order-by-urgency", "decision-literal"])
+def test_bnd_013_catches_the_variants(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_no_priority_table_in_core(root) == [f"core/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-013")
+def test_bnd_013_the_reviewed_uses_are_these():
+    assert {k: sorted(v[0]) for k, v in gate.PRIORITY_USES.items()} == {
+        ("core/floor.py", "FloorControl._enqueue"): ["floor_priority"],
+        ("core/floor.py", "FloorControl._on_request_taken"): ["_holder_priority",
+                                                               "floor_priority"],
+        ("core/session.py", "SessionManager.preemption_victims"): ["scope"],
+        ("core/session.py", "SessionManager._check_bearer"): [
+            "arp_level", "preemption_capability", "priority"],
+        ("core/validation.py", "_priority_totality"): ["urgency"],
+        ("core/validation.py", "_bearer_totality"): [],
+        ("core/validation.py", "_partner_inbound"): ["from_label", "max_level", "seen_labels",
+                                                     "to_level"],
+    }
+
+
+_RESOLVE = "                resolution = invoker.call(\"IF-IDR\", \"resolve\",\n"
+
+
+@pytest.mark.vp("VP1-BND-014")
+def test_bnd_014_needs_a_call_site(tmp_path):
+    root = _with_profiles(tmp_path)
+    p = root / "core/session.py"
+    p.write_text(p.read_text().replace("identity_resolver.resolve,", "identity_resolver.lookup,")
+                 .replace("identity_resolver.determine_participants,",
+                          "identity_resolver.choose,"))
+    assert gate.check_resolver_receives_context(root) == [
+        "core: no identity_resolver.resolve call site found"]
+
+
+@pytest.mark.vp("VP1-BND-015")
+def test_bnd_015_resolves_a_two_level_relative_import():
+    import ast as _ast
+    tree = _ast.parse("from ..x import y\nfrom . import z\n")
+    assert gate._imports_of(tree, "core.pkg.mod") == [
+        (1, "core.x"), (1, "core.x.y"), (2, "core.pkg"), (2, "core.pkg.z")]
+    assert gate._imports_of(tree, "core.pkg", is_package=True) == [
+        (1, "core.x"), (1, "core.x.y"), (2, "core.pkg"), (2, "core.pkg.z")]
+
+
+# -- batch C, the independent review's probes (round 1) ------------------------
+
+
+_MINE = "def _mine(self, request, resolution):\n    return None\n"
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("where", ["profiles/mcx/hooks.py", "profiles/common/tables.py"])
+@pytest.mark.parametrize("how, message", [
+    ("TablePriorityPolicy.evaluate = _mine\n", "changes TablePriorityPolicy.evaluate"),
+    ("setattr(TablePriorityPolicy, 'evaluate', _mine)\n", "setattr on TablePriorityPolicy"),
+    ("del TablePriorityPolicy.compare\n", "changes TablePriorityPolicy.compare"),
+], ids=["assign", "setattr", "del"])
+def test_bnd_011_the_interpreter_is_not_patched(tmp_path, where, how, message):
+    root = _with_profiles(tmp_path, {})
+    path = root / where
+    path.write_text(path.read_text() + "\n\n" + _MINE + how)
+    line = len(path.read_text().splitlines())
+    assert gate.check_priority_table_declarative(root) == [
+        f"{where}:{line}: {message}; the table interpreter is not altered by a profile"]
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text,expected", [
+    ("def lvl(r):\n    if r.call_type == 'emergency':\n        return 9\n"
+     "    elif r.call_type == 'private':\n        return 5\n    return 1\n",
+     ["2: compares a request field with the literal 'emergency'; a priority is IF-PRI's, "
+      "not derived from a label or number",
+      "4: compares a request field with the literal 'private'; a priority is IF-PRI's, not "
+      "derived from a label or number"]),
+    ("from operator import attrgetter\ndef o(rs):\n    return sorted(rs, key=attrgetter('urgency'))\n",
+     ["3: orders by a priority value or request field in o; the order is IF-PRI's"]),
+    ("from core.hooks import PriorityDecision\ndef d():\n"
+     "    return PriorityDecision(9, 's', True, False, 9, 'em')\n",
+     ["3: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's"]),
+    ("from core.hooks import PriorityDecision\ndef d(high, low, urgent):\n"
+     "    return PriorityDecision(high if urgent else low, 's', True, False, 0, 'em')\n",
+     ["3: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's"]),
+    ("def f():\n    level = -5\n    floor_priority = 5.0\n",
+     ["2: sets a priority value to -5; a priority is IF-PRI's",
+      "3: sets a priority value to 5.0; a priority is IF-PRI's"]),
+    ("def f(r):\n    label = 'emergency' if r.x else 'normal'\n",
+     ["2: sets a priority value to 'emergency'; a priority is IF-PRI's",
+      "2: sets a priority value to 'normal'; a priority is IF-PRI's"]),
+    ("def f(active, incoming):\n"
+     "    return [s for s in active if incoming.call_type == 'emergency-group']\n",
+     ["2: compares a request field with the literal 'emergency-group'; a priority is IF-PRI's, "
+      "not derived from a label or number"]),
+], ids=["if-elif-returns", "attrgetter", "positional-decision", "conditional-decision",
+        "signed-and-float",
+        "conditional-label", "comprehension"])
+def test_bnd_013_review_probes(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_no_priority_table_in_core(root) == [f"core/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("rel, old, new, expected", [
+    ("core/session.py", "            if candidate.scope != incoming.scope:\n",
+     "            order = sorted(self.active, key=lambda s: s.request.call_type)\n"
+     "            if candidate.scope != incoming.scope:\n",
+     ["core/session.py:{L:order = sorted}: orders by a priority value or request field in "
+      "SessionManager.preemption_victims; the order is IF-PRI's"]),
+    ("core/session.py", "            if candidate.scope != incoming.scope:\n",
+     "            if candidate.request.urgency != incoming.label:\n                continue\n"
+     "            if candidate.scope != incoming.scope:\n",
+     ["core/session.py:{L:candidate.request.urgency != incoming.label}: compares a priority "
+      "value in SessionManager.preemption_victims; priority decisions are IF-PRI's "
+      "(PRIORITY_USES lists the reviewed comparisons)"]),
+    ("core/floor.py", "class FloorControl:\n",
+     "class _Other:\n    def _enqueue(self, a, b):\n        return a.urgency > b.urgency\n\n\n"
+     "class FloorControl:\n",
+     ["core/floor.py:{L:return a.urgency > b.urgency}: compares a priority value in "
+      "_Other._enqueue; priority decisions are IF-PRI's (PRIORITY_USES lists the reviewed "
+      "comparisons)"]),
+    ("core/validation.py", "def _priority_totality(",
+     "def level_for(label):\n    if label == 'emergency':\n        return 9\n    return 1\n\n\n"
+     "def _priority_totality(",
+     ["core/validation.py:{L:if label == 'emergency'}: compares a priority value in level_for; "
+      "priority decisions are IF-PRI's (PRIORITY_USES lists the reviewed comparisons)",
+      "core/validation.py:{L:if label == 'emergency'}: compares a priority value with the "
+      "literal 'emergency'; a priority is IF-PRI's, not derived from a label or number"]),
+], ids=["sort-in-reviewed-function", "other-names-in-reviewed-function", "same-name-other-class",
+        "new-function-in-validation"])
+def test_bnd_013_reviewed_uses_are_narrow(tmp_path, rel, old, new, expected):
+    root = _with_profiles(tmp_path, patches={rel: (old, new)})
+    assert gate.check_no_priority_table_in_core(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-013")
+def test_bnd_013_reads_the_interface_definitions_too(tmp_path):
+    root = _with_profiles(tmp_path)
+    path = root / "core/hooks.py"
+    path.write_text(path.read_text() + "\n\ndef level_for(label):\n"
+                    "    return 9 if label == 'emergency' else 1\n")
+    line = len(path.read_text().splitlines())
+    assert gate.check_no_priority_table_in_core(root) == [
+        f"core/hooks.py:{line}: compares a priority value in level_for; priority decisions are "
+        "IF-PRI's (PRIORITY_USES lists the reviewed comparisons)",
+        f"core/hooks.py:{line}: compares a priority value with the literal 'emergency'; a "
+        "priority is IF-PRI's, not derived from a label or number"]
+
+
+_ADHOC = "                resolution, refusal = self._adhoc_members(invoker, request)\n"
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"core/session.py": (_ADHOC, "                resolution, refusal = self._adhoc_members("
+                                      "invoker, dataclasses.replace(request, location=None))\n")},
+     ["core/session.py:{L:self._adhoc_members(invoker, dataclasses}: _adhoc_members reaches the "
+      "resolver and is not given its caller's request"]),
+    ({}, {"core/session.py": (_RESOLVE, "                request, _ = dataclasses.replace("
+                                        "request), 0\n" + _RESOLVE)},
+     ["core/session.py:{L:request, _ = }: the request is rebuilt before the resolver sees it; "
+      "only the core's adding helpers (REQUEST_ENRICHERS) may change it"]),
+    ({}, {"core/session.py": (_RESOLVE, "                for request in (request,):\n"
+                                        "                    pass\n" + _RESOLVE)},
+     ["core/session.py:{L:for request in}: the request is rebuilt before the resolver sees it; "
+      "only the core's adding helpers (REQUEST_ENRICHERS) may change it"]),
+    ({}, {"core/session.py": (_RESOLVE, "                object.__setattr__(request, 'location', "
+                                        "None)\n" + _RESOLVE)},
+     ["core/session.py:{L:object.__setattr__(request}: the request is rebuilt before the "
+      "resolver sees it; only the core's adding helpers (REQUEST_ENRICHERS) may change it"]),
+    ({"core/sample.py": "class M:\n    def find(self, target, request):\n"
+      "        r = self._hooks.identity_resolver\n        return r.resolve(target, None)\n"}, {},
+     ["core/sample.py:3: the resolver is held in a name; call it where it is, so its request "
+      "can be seen"]),
+    ({"core/sample.py": "class M:\n    def find(self, target, request):\n"
+      "        fn = self._hooks.identity_resolver.resolve\n        return fn(target, None)\n"}, {},
+     ["core/sample.py:3: the resolver is held in a name; call it where it is, so its request "
+      "can be seen"]),
+    ({"core/sample.py": "class M:\n    def find(self, target, request):\n"
+      "        def inner(request=None):\n"
+      "            return self._hooks.identity_resolver.resolve(target, request)\n"
+      "        return inner()\n"}, {},
+     ["core/sample.py:5: inner reaches the resolver and is not given its caller's request"]),
+    ({"core/sample.py": "class M:\n    def find(self, criteria, request):\n"
+      "        return self._hooks.identity_resolver.determine_participants(criteria, None)\n"},
+     {}, ["core/sample.py:3: the resolver is not given the request the function received; it "
+          "must see the whole request"]),
+    ({"core/sample.py": "class M:\n    def a(self, target, request):\n"
+      "        return self._hooks.identity_resolver.resolve(target, request)\n"
+      "    def b(self, target, request):\n        return self.a(target, request)\n"
+      "    def c(self, target, request):\n        request = None\n"
+      "        return self.b(target, request)\n"}, {},
+     ["core/sample.py:7: the request is rebuilt before the resolver sees it; only the core's "
+      "adding helpers (REQUEST_ENRICHERS) may change it"]),
+    ({"core/sample.py": "request = None\nclass M:\n    def a(self, target, request):\n"
+      "        return self._hooks.identity_resolver.resolve(target, request)\n"
+      "    def c(self, target):\n        return self.a(target, request)\n"}, {},
+     ["core/sample.py:6: a reaches the resolver and is not given its caller's request"]),
+], ids=["adhoc-caller-strips", "tuple", "for", "object-setattr", "aliased-resolver",
+        "aliased-method", "nested-shadow", "determine-participants", "two-callers-up",
+        "module-request"])
+def test_bnd_014_review_probes(tmp_path, files, patches, expected):
+    root = _with_profiles(tmp_path, files, patches)
+    assert gate.check_resolver_receives_context(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-014")
+def test_bnd_014_the_reviewed_origins_are_these():
+    assert gate.REQUEST_ORIGINS == {
+        ("core/session.py", "SessionManager.receive_inbound"): "map_inbound"}
+
+
+@pytest.mark.vp("VP1-BND-015")
+@pytest.mark.parametrize("files, expected", [
+    ({"core/pkg/__init__.py": "from .. import sip\n"},
+     ["core/pkg/__init__.py:1: floor control reaches 'core.sip' (core.floor -> core.pkg)"]),
+    ({"core/pkg/__init__.py": "from . import net\n", "core/pkg/net.py": "import _socket\n"},
+     ["core/pkg/net.py:1: floor control reaches '_socket' (core.floor -> core.pkg -> "
+      "core.pkg.net)"]),
+], ids=["package-up", "package-down"])
+def test_bnd_015_follows_packages(tmp_path, files, expected):
+    anchor = "from dataclasses import dataclass, field, replace\n"
+    root = _with_profiles(tmp_path, files, {"core/floor.py": (anchor,
+                                                              anchor + "from core import pkg\n")})
+    assert gate.check_floor_machine_isolated(root) == expected
+
+
+@pytest.mark.vp("VP1-BND-015")
+def test_bnd_015_the_forbidden_modules_are_these():
+    assert gate.FLOOR_FORBIDDEN == (
+        "core.sip", "core.rtcp", "core.codec", "core.mcinfo", "core.session", "core.loader",
+        "service", "socket", "ssl", "asyncio", "selectors", "http", "urllib", "requests",
+        "email", "select", "socketserver", "xmlrpc", "ftplib", "smtplib", "telnetlib",
+        "profiles", "_socket", "_ssl", "multiprocessing", "subprocess", "httpx", "urllib3",
+        "aiohttp", "websocket", "websockets", "zmq", "grpc", "concurrent", "logging.handlers",
+        "logging.config")
+    assert gate.FLOOR_ALLOWED == (
+        "__future__", "dataclasses", "enum", "typing", "abc", "collections", "functools",
+        "itertools", "heapq", "bisect", "math", "operator", "types", "copy", "logging")
+
+
+@pytest.mark.vp("VP1-BND-015")
+@pytest.mark.parametrize("module", ["imaplib", "wsgiref.simple_server", "time", "os"])
+def test_bnd_015_refuses_what_it_is_not_allowed(tmp_path, module):
+    anchor = "from dataclasses import dataclass, field, replace\n"
+    root = _with_profiles(tmp_path, {}, {"core/floor.py": (anchor,
+                                                           anchor + f"import {module}\n")})
+    line = (root / "core/floor.py").read_text().splitlines().index(f"import {module}") + 1
+    assert gate.check_floor_machine_isolated(root) == [
+        f"core/floor.py:{line}: floor control reaches {module!r} (core.floor), which is not "
+        "among the modules it may use (FLOOR_ALLOWED)"]
+
+
+@pytest.mark.vp("VP1-BND-015")
+@pytest.mark.parametrize("module", ["multiprocessing", "subprocess", "concurrent.futures",
+                                    "aiohttp"])
+def test_bnd_015_refuses_processes_and_other_networking(tmp_path, module):
+    anchor = "from dataclasses import dataclass, field, replace\n"
+    root = _with_profiles(tmp_path, {}, {"core/floor.py": (anchor,
+                                                           anchor + f"import {module}\n")})
+    line = (root / "core/floor.py").read_text().splitlines().index(f"import {module}") + 1
+    assert gate.check_floor_machine_isolated(root) == [
+        f"core/floor.py:{line}: floor control reaches {module!r} (core.floor)"]
+
+
+@pytest.mark.vp("VP1-BND-015")
+@pytest.mark.parametrize("files,line,expected", [
+    ({}, "from core import sip\n", ["'core.sip' (core.floor)"]),
+    ({}, "from service.media import MediaPlane\n",
+     ["'service.media' (core.floor)", "'service.media.MediaPlane' (core.floor)"]),
+    ({}, "import asyncio, ssl\n", ["'asyncio' (core.floor)", "'ssl' (core.floor)"]),
+    ({}, "from . import rtcp\n", ["'core.rtcp' (core.floor)"]),
+    ({}, "from .codec import Codec\n", ["'core.codec' (core.floor)",
+                                       "'core.codec.Codec' (core.floor)"]),
+    ({"core/helper.py": "import socket\n"}, "from . import helper\n",
+     ["'socket' (core.floor -> core.helper)"]),
+], ids=["core-sip", "service-media", "asyncio-ssl", "relative-rtcp", "relative-codec",
+        "transitive"])
+def test_bnd_015_catches_the_variants(tmp_path, files, line, expected):
+    anchor = "from dataclasses import dataclass, field, replace\n"
+    root = _with_profiles(tmp_path, files, {"core/floor.py": (anchor, anchor + line)})
+    floor_line = next(n for n, l in enumerate((root / "core/floor.py").read_text().splitlines(), 1)
+                      if l == line.rstrip("\n"))
+    where = {"socket": "core/helper.py:1"}
+    assert gate.check_floor_machine_isolated(root) == [
+        f"{where.get(e.split(chr(39))[1], f'core/floor.py:{floor_line}')}: floor control "
+        f"reaches {e}" for e in expected]
+
+
+# -- batch C, the independent review's probes (round 2) ------------------------
+
+_HOOKS = "profiles/mcx/hooks.py"
+_TABLES = "profiles/common/tables.py"
+_NOT_ALTERED = "the table interpreter is not altered by a profile"
+_OWN = "a profile alters only its own instances (self)"
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("where,text,expected", [
+    (_HOOKS, "import profiles.common.tables as _t\n_t.TablePriorityPolicy.evaluate = _mine\n",
+     ["{L:_t.TablePriorityPolicy.evaluate =}: changes _t.TablePriorityPolicy.evaluate"]),
+    (_HOOKS, "_k = TablePriorityPolicy\n_k.evaluate = _mine\n",
+     ["{L:_k.evaluate =}: changes _k.evaluate"]),
+    (_HOOKS, "def _p():\n    k = TablePriorityPolicy\n    k.evaluate = None\n",
+     ["{L:k = TablePriorityPolicy}: holds TablePriorityPolicy in another name",
+      "{L:k.evaluate = None}: changes k.evaluate from outside it"]),
+    (_HOOKS, "a, b = TablePriorityPolicy, 1\na.evaluate = None\n",
+     ["{L:a, b = }: holds TablePriorityPolicy in another name",
+      "{L:a.evaluate = None}: changes a.evaluate from outside it"]),
+    (_HOOKS, "type.__setattr__(TablePriorityPolicy, 'evaluate', _mine)\n",
+     ["{L:type.__setattr__}: __setattr__ on TablePriorityPolicy"]),
+    (_HOOKS, "import profiles.common.tables as _t\nsetattr(_t.TablePriorityPolicy, 'evaluate', 1)\n",
+     ["{L:setattr(_t.}: setattr on _t.TablePriorityPolicy"]),
+    (_HOOKS, "import profiles.common.tables as _t\n_t._matches = lambda r, a: True\n",
+     ["{L:_t._matches =}: changes _t._matches"]),
+    (_HOOKS, "import profiles.common.tables as _t\nclass _E(TablePriorityPolicy):\n    pass\n"
+             "_t.TablePriorityPolicy = _E\n",
+     ["{L:_t.TablePriorityPolicy = _E}: changes _t.TablePriorityPolicy"]),
+    (_HOOKS, "X = vars()\n", ["{L:X = vars()}: calls vars(), which reaches every name"]),
+    (_HOOKS, "X = TablePriorityPolicy.__dict__\n",
+     ["{L:X = TablePriorityPolicy.__dict__}: reads __dict__, which reaches every name"]),
+    (_TABLES, "globals()['TablePriorityPolicy'] = type('X', (), {})\n",
+     ["{L:globals()[}: calls globals(), which reaches every name"]),
+], ids=["through-module", "alias", "local-alias", "tuple-alias", "type-setattr",
+        "setattr-through-module", "helper-from-profile", "class-replaced", "vars", "dict",
+        "globals"])
+def test_bnd_011_review_probes_round_2(tmp_path, where, text, expected):
+    root = _with_profiles(tmp_path)
+    path = root / where
+    path.write_text(path.read_text() + "\n\n" + _MINE + text)
+    got = gate.check_priority_table_declarative(root)
+    assert [v for v in got if v != _INTERPRETER_CHANGED] == _lines(
+        root, [f"{where}:{e}; {_OWN if e.endswith('from outside it') else _NOT_ALTERED}"
+               for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_helpers_are_bound_once(tmp_path):
+    root = _with_profiles(tmp_path)
+    path = root / _TABLES
+    path.write_text(path.read_text() + "\n\n_matches = lambda r, a: True\n")
+    line = len(path.read_text().splitlines())
+    # The fingerprint hashes the def, which is unchanged: only this rule sees it.
+    assert gate.check_priority_table_declarative(root) == [
+        f"{_TABLES}:{line}: rebinds _matches after its definition; the interpreter is the code "
+        "as defined"]
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_the_interpreter_names_are_these():
+    assert gate._interpreter_names(ROOT) == {"TablePriorityPolicy", "_matches"}
+
+
+_LIT = "a priority is IF-PRI's, not derived from a label or number"
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("rel,text,expected", [
+    ("core/sample.py", "def f(r):\n    ct = r.call_type\n    if ct == 'emergency':\n"
+     "        return 9\n", [f"3: compares a request field with the literal 'emergency'; {_LIT}"]),
+    ("core/sample.py", "def f(r):\n    ct = r.call_type.lower()\n    c2 = ct\n"
+     "    return c2 == 'emergency'\n",
+     [f"4: compares a request field with the literal 'emergency'; {_LIT}"]),
+    ("core/sample.py", "EMERGENCY_TYPES = ('emergency',)\ndef f(r):\n"
+     "    if r.call_type in EMERGENCY_TYPES:\n        return 9\n",
+     [f"3: compares a request field with the literal 'emergency'; {_LIT}"]),
+    ("core/sample.py", "def f(r):\n    return 9 if r.call_type.startswith('emerg') else 1\n",
+     ["2: tests a request field against the literal 'emerg' (startswith); a priority is "
+      "IF-PRI's, not derived from a label"]),
+    ("core/sample.py", "def f(r):\n    match r.call_type:\n        case 'emergency':\n"
+     "            return 9\n",
+     ["2: branches on a request field or priority value with match; a priority is IF-PRI's"]),
+    ("core/sample.py", "def f(r):\n    return getattr(r, 'call_type') == 'emergency'\n",
+     [f"2: compares a request field with the literal 'emergency'; {_LIT}"]),
+    ("core/sample.py", "def f(r):\n    return r.attributes['urgency'] == 'high'\n",
+     ["2: compares a priority value in f; priority decisions are IF-PRI's (PRIORITY_USES "
+      "lists the reviewed comparisons)",
+      f"2: compares a priority value with the literal 'high'; {_LIT}"]),
+    ("core/sample.py", "def f(r):\n    return {'emergency': 9, 'private': 5}.get(r.call_type, 1)\n",
+     ["2: looks up a request field in the label table written inline; a priority is IF-PRI's",
+      "2: maps labels onto numbers inline; a label-to-level mapping is a priority table"]),
+    ("core/sample.py", "RANKS = {'emergency': 9, 'private': 5}\ndef f(r):\n"
+     "    return RANKS.get(r.call_type, 1)\ndef g(r):\n    return RANKS[r.call_type]\n",
+     ["3: looks up a request field in the label table RANKS; a priority is IF-PRI's",
+      "5: looks up a request field in the label table RANKS; a priority is IF-PRI's"]),
+    ("core/sample.py", "def _rank(s):\n    return s.request.urgency\ndef f(xs):\n"
+     "    return sorted(xs, key=_rank)\n",
+     ["4: orders by a priority value or request field in f; the order is IF-PRI's"]),
+    ("core/sample.py", "import operator\ndef f(a, b):\n    return operator.gt(a.level, b.level)\n",
+     ["3: compares a priority value in f; priority decisions are IF-PRI's (PRIORITY_USES "
+      "lists the reviewed comparisons)"]),
+    ("core/sample.py", "def f(a, b):\n    return b.level.__lt__(a.level)\n",
+     ["2: compares a priority value in f; priority decisions are IF-PRI's (PRIORITY_USES "
+      "lists the reviewed comparisons)"]),
+    ("core/sample.py", "from core.hooks import PriorityDecision\ndef f(r):\n"
+     "    n = 9 if r.adhoc else 1\n    return PriorityDecision(level=n, floor_priority=n)\n",
+     ["3: chooses 9 by the request's adhoc; a priority is IF-PRI's",
+      "4: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's"]),
+    ("core/sample.py", "from core.hooks import PriorityDecision\ndef f():\n"
+     "    return PriorityDecision(**{'level': 9})\n",
+     ["3: builds a PriorityDecision from an unpacked mapping; a priority is IF-PRI's, field "
+      "by field"]),
+    ("core/sample.py", "import dataclasses\ndef f(d):\n"
+     "    return dataclasses.replace(d, floor_priority=d.floor_priority + 5)\n",
+     ["3: replaces floor_priority with a computed value; a priority is IF-PRI's as decided"]),
+    ("core/sample.py", "def f():\n    prio = 9\n",
+     ["2: sets a priority value to 9; a priority is IF-PRI's"]),
+    ("service/sample.py", "def lvl(r):\n    if r.call_type == 'emergency':\n        return 9\n"
+     "    return 1\n", [f"2: compares a request field with the literal 'emergency'; {_LIT}"]),
+], ids=["local-field", "local-chain", "constant-collection", "startswith", "match", "getattr",
+        "subscript", "inline-table", "named-table-lookup", "key-function", "operator",
+        "dunder", "literal-local-decision", "unpacked-decision", "replace", "prio",
+        "service"])
+def test_bnd_013_review_probes_round_2(tmp_path, rel, text, expected):
+    root = _with_profiles(tmp_path, {rel: text})
+    assert gate.check_no_priority_table_in_core(root) == [f"{rel}:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text", [
+    "def f():\n    return {'accepted': 0, 'refused': 0}\n",
+    "def f(p, r):\n    t = p.call_type(r.call_type)\n    return t.session_type == 'private'\n",
+    "BUDGETS = {'IF-IDR': 50, 'IF-PRI': 5}\n",
+], ids=["counters", "declared-lookup", "module-constant"])
+def test_bnd_013_accepts_counters_and_declarations(tmp_path, text):
+    assert gate.check_no_priority_table_in_core(_with_profiles(tmp_path,
+                                                                {"core/sample.py": text})) == []
+
+
+_ADHOC_CRITERIA = '        found = invoker.call("IF-IDR", "determine_participants",\n'
+_REBUILT = ("the request is rebuilt before the resolver sees it; only the core's adding "
+            "helpers (REQUEST_ENRICHERS) may change it")
+_IN_PLACE = ("writes or holds an object's field table (vars, __dict__); values, the request "
+             "among them, are not altered in place")
+_HELD = "the resolver is held in a name; call it where it is, so its request can be seen"
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"core/session.py": (_ADHOC, "                _m = self._adhoc_members\n"
+                                      "                resolution, refusal = _m(invoker, request)\n")},
+     ["core/session.py:{L:_m = self._adhoc_members}: _adhoc_members is referred to other than "
+      "by a call; its callers must be seen to pass the request"]),
+    ({}, {"core/session.py": (_ADHOC, "                resolution, refusal = getattr(self, "
+                                      "'_adhoc_members')(invoker, request)\n")},
+     ["core/session.py:{L:getattr(self, '_adhoc_members')}: _adhoc_members is looked up by "
+      "name; its callers must be seen to pass the request"]),
+    ({}, {"core/session.py": (_ADHOC_CRITERIA, "        vars(request).update(location=None)\n"
+                                               + _ADHOC_CRITERIA)},
+     ["core/session.py:{L:vars(request).update}: " + _REBUILT,
+      "core/session.py:{L:vars(request).update}: " + _IN_PLACE]),
+    ({}, {"core/session.py": (_ADHOC_CRITERIA, "        request.__dict__['location'] = None\n"
+                                               + _ADHOC_CRITERIA)},
+     ["core/session.py:{L:request.__dict__}: " + _REBUILT,
+      "core/session.py:{L:request.__dict__}: " + _IN_PLACE]),
+    ({"core/sample.py": "class M:\n    def f(self, t, request):\n"
+      "        (r,) = (self._hooks.identity_resolver,)\n        return r.resolve(t, request)\n"},
+     {}, ["core/sample.py:3: " + _HELD]),
+    ({"core/sample.py": "class M:\n    def f(self, t, request):\n"
+      "        return getattr(self._hooks, 'identity_resolver').resolve(t, request)\n"},
+     {}, ["core/sample.py:3: " + _HELD]),
+    ({"core/sample.py": "class M:\n    def f(self, t, request):\n"
+      "        rs = [self._hooks.identity_resolver.resolve]\n        return rs[0](t, request)\n"},
+     {}, ["core/sample.py:3: " + _HELD]),
+], ids=["alias-caller", "getattr-caller", "vars-update", "dict-store", "tuple-held",
+        "getattr-held", "list-held"])
+def test_bnd_014_review_probes_round_2(tmp_path, files, patches, expected):
+    root = _with_profiles(tmp_path, files, patches)
+    assert gate.check_resolver_receives_context(root) == _lines(root, expected)
+
+
+# -- batch C, the independent review's probes (round 3) ------------------------
+
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("text,expected", [
+    ("from core.model import Profile as _P\n_orig = _P.call_type\n"
+     "def _ct(self, cid):\n    return _orig(self, cid)\n_P.call_type = _ct\n",
+     f"{{L:_P.call_type = _ct}}: changes _P.call_type from outside it; {_OWN}"),
+    ("from core.hooks import PriorityDecision as _PD\n_PD.__init__ = lambda *a: None\n",
+     f"{{L:_PD.__init__ =}}: changes _PD.__init__ from outside it; {_OWN}"),
+    ("from core.model import Profile\na, b = Profile, 1\nsetattr(a, 'call_type', None)\n",
+     [f"{{L:a, b = Profile}}: hands the core class Profile on; {_OWN}",
+      f"{{L:setattr(a, 'call_type'}}: setattr on a; {_OWN}"]),
+    ("TablePriorityPolicy.__delattr__('compare')\n",
+     f"{{L:TablePriorityPolicy.__delattr__}}: __delattr__ on TablePriorityPolicy; "
+     f"{_NOT_ALTERED}"),
+], ids=["core-class-patched", "decision-init-patched", "setattr-through-tuple", "dunder-on-class"])
+def test_bnd_011_review_probes_round_3(tmp_path, text, expected):
+    root = _with_profiles(tmp_path)
+    path = root / _HOOKS
+    path.write_text(path.read_text() + "\n\n" + text)
+    expected = expected if isinstance(expected, list) else [expected]
+    assert gate.check_priority_table_declarative(root) == _lines(
+        root, [f"{_HOOKS}:{e}" for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_a_profile_may_set_its_own_instances(tmp_path):
+    root = _with_profiles(tmp_path)
+    path = root / _HOOKS
+    path.write_text(path.read_text() + "\n\nclass _Z:\n    def __init__(self):\n"
+                    "        self.x = 1\n        object.__setattr__(self, 'y', 2)\n")
+    assert gate.check_priority_table_declarative(root) == []
+
+
+_FIELD = f"compares a request field with the literal 'emergency'; {_LIT}"
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text,expected", [
+    ("EMERG = 'emergency'\ndef f(r):\n    if r.call_type == EMERG:\n        return 9\n"
+     "def g(r):\n    return r.call_type.startswith(EMERG)\n",
+     [f"3: {_FIELD}", "6: tests a request field against the literal 'emergency' (startswith); "
+      "a priority is IF-PRI's, not derived from a label"]),
+    ("def f(r):\n    ct = r.call_type or ''\n    return ct == 'emergency'\n", [f"3: {_FIELD}"]),
+    ("def f(r):\n    ct = str(r.call_type)\n    return ct == 'emergency'\n", [f"3: {_FIELD}"]),
+    ("def f(r):\n    ct = f'{r.call_type}'\n    return ct == 'emergency'\n", [f"3: {_FIELD}"]),
+    ("def f(r):\n    ct, n = r.call_type, 1\n    return ct == 'emergency'\n", [f"3: {_FIELD}"]),
+    ("def f(r):\n    for ct in (r.call_type,):\n        return ct == 'emergency'\n",
+     [f"3: {_FIELD}"]),
+    ("def f(r):\n    with r.call_type as ct:\n        return ct == 'emergency'\n",
+     [f"3: {_FIELD}"]),
+    ("def f(r):\n    return r.call_type == 'EMERGENCY'.lower()\n", [f"2: {_FIELD}"]),
+    ("TABLE = {'emergency': (9, 'national'), 'private': (5, 'local')}\ndef f(r):\n"
+     "    return TABLE[r.call_type]\n",
+     ["3: looks up a request field in the label table TABLE; a priority is IF-PRI's"]),
+    ("TABLE = dict(emergency=9, private=5)\ndef f(r):\n    return TABLE.get(r.call_type, 1)\n",
+     ["3: looks up a request field in the label table TABLE; a priority is IF-PRI's"]),
+    ("def f(r):\n    return {'emergency': 9}.get(r.call_type, 1)\n",
+     ["2: looks up a request field in the label table written inline; a priority is IF-PRI's"]),
+    ("def _rank(s):\n    return s.request.urgency\ndef f(xs):\n"
+     "    return sorted(xs, key=lambda s: _rank(s))\n",
+     ["4: orders by a priority value or request field in f; the order is IF-PRI's"]),
+    ("from core.hooks import PriorityDecision\ndef f():\n    n = 4 + 5\n"
+     "    return PriorityDecision(level=n)\n",
+     ["4: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's"]),
+    ("def f():\n    t = {'emergency': 9, 'private': 5}\n    return t\n",
+     ["2: maps labels onto numbers inline; a label-to-level mapping is a priority table"]),
+    ("def f(a, x):\n    return a.level.__gt__(x)\n",
+     ["2: compares a priority value in f; priority decisions are IF-PRI's (PRIORITY_USES "
+      "lists the reviewed comparisons)"]),
+], ids=["text-constant", "or-default", "str", "f-string", "tuple-unpacking", "for-target",
+        "with-target", "folded-literal", "tuple-valued-table", "dict-call-table",
+        "one-key-inline-table", "lambda-calls-key", "folded-decision", "table-in-function",
+        "dunder-on-the-value"])
+def test_bnd_013_review_probes_round_3(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_no_priority_table_in_core(root) == [f"core/sample.py:{e}" for e in expected]
+
+
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"core/session.py": (_ADHOC_CRITERIA, "        r = request\n"
+                                               "        vars(r).update(application=None)\n"
+                                               + _ADHOC_CRITERIA)},
+     ["core/session.py:{L:vars(r).update}: " + _IN_PLACE]),
+    ({"core/sample.py": "def _scrub(req):\n    vars(req)['location'] = None\n"}, {},
+     ["core/sample.py:2: " + _IN_PLACE]),
+    ({"core/sample.py": "def _scrub(req):\n    d = req.__dict__\n    d.clear()\n"}, {},
+     ["core/sample.py:2: " + _IN_PLACE]),
+    ({"core/sample.py": "def _names(m):\n    return [k for k in vars(m)]\n"}, {}, []),
+    ({}, {"core/session.py": (_ADHOC_CRITERIA, "        request.location = None\n"
+                                               + _ADHOC_CRITERIA)},
+     ["core/session.py:{L:request.location = None}: " + _REBUILT]),
+    ({"core/sample.py": "class M:\n    def f(self, t, request):\n"
+      "        self._keep(self._hooks.identity_resolver.resolve)\n"}, {},
+     ["core/sample.py:3: " + _HELD,
+      "core/sample.py:3: the resolver is not given the request the function received; it "
+      "must see the whole request"]),
+], ids=["alias", "helper", "held", "read-only", "attribute-store", "handed-to-another-call"])
+def test_bnd_014_review_probes_round_3(tmp_path, files, patches, expected):
+    root = _with_profiles(tmp_path, files, patches)
+    assert gate.check_resolver_receives_context(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("text", ["def _matches(rule, value):\n    return rule is value\n",
+                                  "from profiles.common.base import _matches\n"],
+                         ids=["def", "import"])
+def test_bnd_011_a_helper_is_not_redefined(tmp_path, text):
+    root = _with_profiles(tmp_path)
+    path = root / _TABLES
+    path.write_text(path.read_text() + "\n\n" + text)
+    line = len(path.read_text().splitlines()) - text.count("\n") + 1
+    got = gate.check_priority_table_declarative(root)
+    assert [v for v in got if v != _INTERPRETER_CHANGED] == [
+        f"{_TABLES}:{line}: rebinds _matches after its definition; the interpreter is the code "
+        "as defined"]
+
+
+# -- batch C, the independent review's probes (round 4) ------------------------
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("text,expected", [
+    ("from core.model import Profile as _P\nclass _X:\n    def go(self):\n        self = _P\n"
+     "        self.call_type = lambda s, c: None\n",
+     ["{L:self = _P}: hands the core class _P on",
+      "{L:self.call_type = lambda}: changes self.call_type from outside it"]),
+    ("from core.model import Profile as _P\nclass _X:\n    @classmethod\n    def go(cls):\n"
+     "        cls = _P\n        cls.call_type = None\n",
+     ["{L:cls = _P}: hands the core class _P on",
+      "{L:cls.call_type = None}: changes cls.call_type from outside it"]),
+    ("from core.model import Profile as _P\ndef _go(self):\n    self.call_type = None\n"
+     "_go(_P)\n", ["{L:self.call_type = None}: changes self.call_type from outside it",
+                    "{L:_go(_P)}: hands the core class _P on"]),
+    ("def _go(self):\n    setattr(self, 'call_type', None)\n",
+     ["{L:setattr(self, 'call_type'}: setattr on self"]),
+], ids=["self-rebound", "cls-rebound", "self-in-a-function", "setattr-self-in-a-function"])
+def test_bnd_011_review_probes_round_4(tmp_path, text, expected):
+    root = _with_profiles(tmp_path)
+    path = root / _HOOKS
+    path.write_text(path.read_text() + "\n\n" + text)
+    assert gate.check_priority_table_declarative(root) == _lines(
+        root, [f"{_HOOKS}:{e}; {_OWN}" for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text,expected", [
+    ("from core.hooks import PriorityDecision\nNINE = 9\ndef f():\n"
+     "    return PriorityDecision(NINE, 's', True, False, NINE, 'x')\n",
+     ["4: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's"]),
+    ("from core.hooks import PriorityDecision\nclass K:\n    N = 9\ndef f():\n"
+     "    return PriorityDecision(level=K.N)\n",
+     ["5: builds a PriorityDecision from literals or a condition; a priority is IF-PRI's",
+      "5: passes level=9; a priority is IF-PRI's"]),
+    ("ORDER = ['private', 'group', 'emergency']\ndef f(r):\n    return ORDER.index(r.call_type)\n",
+     ["3: looks up a request field in the label table ORDER; a priority is IF-PRI's"]),
+    ("PAIRS = (('emergency', 9), ('private', 5))\ndef f(r):\n    for k, v in PAIRS:\n"
+     "        if k == r.call_type:\n            return v\n",
+     ["4: compares a request field with a member of the literal collection PAIRS; a priority "
+      "is IF-PRI's, not derived from a label or number"]),
+    ("TABLE = dict(zip(('emergency', 'private'), (9, 5)))\ndef f(r):\n"
+     "    return TABLE[r.call_type]\n",
+     ["3: looks up a request field in the label table TABLE; a priority is IF-PRI's"]),
+    ("def f(r):\n    return {k: 9 for k in ('emergency',)}.get(r.call_type, 1)\n",
+     ["2: looks up a request field in the label table written inline; a priority is IF-PRI's"]),
+    ("import re\ndef f(r):\n    return re.match('emerg', r.call_type)\n",
+     ["3: tests a request field against the literal 'emerg' (match); a priority is IF-PRI's, "
+      "not derived from a label"]),
+    ("def f(r):\n    return {r.call_type} & {'emergency'}\n",
+     ["2: tests a request field against the literal 'emergency' (a set operation); a priority "
+      "is IF-PRI's, not derived from a label"]),
+    ("def f(r):\n    if r.adhoc_alert_group:\n        return 9\n    return 1\n",
+     ["3: returns 9 chosen by the request's adhoc_alert_group; a priority is IF-PRI's"]),
+    ("def f(d):\n    level = getattr(d, 'nothing', 9)\n",
+     ["2: sets a priority value to 9; a priority is IF-PRI's"]),
+    ("def f(r):\n    ct = r.call_type if r else ''\n    return ct == 'emergency'\n",
+     [f"3: {_FIELD}"]),
+    ("def f(r):\n    n, ct = 1, r.call_type\n    return ct == 'emergency'\n", [f"3: {_FIELD}"]),
+    ("def f(r, x):\n    ct, n = r.call_type, x\n    return n == 'other'\n", []),
+], ids=["module-constant-decision", "class-constant-decision", "list-index", "pairs-loop",
+        "zip-table", "comprehension-table", "re-match", "set-operation", "request-flag",
+        "getattr-default", "conditional-taint", "second-of-a-pair", "untainted-neighbour"])
+def test_bnd_013_review_probes_round_4(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_no_priority_table_in_core(root) == [f"core/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-013")
+def test_bnd_013_the_request_attributes_are_read_from_the_interface():
+    attributes = gate._request_attributes(ROOT)
+    assert {"call_type", "application", "urgency", "adhoc_alert_group", "initiator",
+            "location"} <= attributes
+
+
+_OTHER_NAME = ("reaches an object's field table through another name; values, the request "
+               "among them, are not altered in place")
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("text,line", [
+    ("def f(request):\n    v = vars\n    v(request).update(application=None)\n", 2),
+    ("def f(request):\n    getattr(request, '__dict__').update(application=None)\n", 2),
+], ids=["vars-held", "getattr-dict"])
+def test_bnd_014_review_probes_round_4(tmp_path, text, line):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_resolver_receives_context(root) == [f"core/sample.py:{line}: {_OTHER_NAME}"]
+
+
+# -- batch C, the independent review's probes (round 5) ------------------------
+
+
+@pytest.mark.vp("VP1-BND-011")
+@pytest.mark.parametrize("text,expected", [
+    ("from core.model import Profile as _P\nclass _X:\n    def go(self):\n"
+     "        self.call_type = None\n_X.go(_P)\n",
+     ["{L:_X.go(_P)}: hands the core class _P on"]),
+    ("class _X:\n    @staticmethod\n    def go(self):\n        self.call_type = None\n",
+     ["{L:self.call_type = None}: changes self.call_type from outside it"]),
+    ("class _X:\n    def go(self):\n        self.p.call_type = None\n",
+     ["{L:self.p.call_type}: changes self.p.call_type from outside it"]),
+    ("from core.model import Profile as _P\nclass _X:\n    def go(self):\n"
+     "        self.call_type = None\nx = _P\n_X.go(x)\n",
+     ["{L:x = _P}: hands the core class _P on"]),
+], ids=["class-called-with-core-class", "staticmethod-self", "chain-through-self",
+        "core-class-aliased"])
+def test_bnd_011_review_probes_round_5(tmp_path, text, expected):
+    root = _with_profiles(tmp_path)
+    path = root / _HOOKS
+    path.write_text(path.read_text() + "\n\n" + text)
+    assert gate.check_priority_table_declarative(root) == _lines(
+        root, [f"{_HOOKS}:{e}; {_OWN}" for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_a_profile_may_name_core_classes_in_place(tmp_path):
+    root = _with_profiles(tmp_path)
+    path = root / _HOOKS
+    path.write_text(path.read_text() + "\n\nfrom typing import Dict, Optional, Tuple\n"
+                    "from core.model import Profile as _P\n"
+                    "def _f(x: Optional[_P]) -> _P:\n    y: Dict[str, Tuple[_P, ...]] = {}\n"
+                    "    return isinstance(x, (_P, int)) and _P.call_type\n")
+    assert gate.check_priority_table_declarative(root) == []
+
+
+_CHOSEN = "a priority is IF-PRI's"
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text,expected", [
+    ("def f(r):\n    return 9 if r.adhoc_alert_group else 1\n",
+     [f"2: chooses 9 by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("def f(r):\n    n = 1\n    if r.adhoc_alert_group:\n        n = 9\n    return n\n",
+     [f"4: sets 9 chosen by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("HIGH = 9\ndef f(r):\n    if r.adhoc_alert_group:\n        return HIGH\n",
+     [f"4: returns 9 chosen by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("def f(r):\n    alert = r.adhoc_alert_group\n    if alert:\n        return 9\n",
+     [f"4: returns 9 chosen by the request's alert; {_CHOSEN}"]),
+    ("def f(r):\n    if r.adhoc_alert_group is True:\n        return 9\n",
+     [f"3: returns 9 chosen by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("def f(r):\n    return 1 + 8 * r.adhoc_alert_group\n",
+     [f"2: scales 8 by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("import re\n_E = re.compile('emerg')\ndef f(r):\n    return _E.match(r.call_type)\n",
+     ["4: looks up a request field in the label table _E; a priority is IF-PRI's",
+      "4: tests a request field against the literal 'emerg' (match); a priority is IF-PRI's, "
+      "not derived from a label"]),
+    ("_T = {}\n_T['emergency'] = 9\ndef f(r):\n    return _T.get(r.call_type, 1)\n",
+     ["4: looks up a request field in the label table _T; a priority is IF-PRI's"]),
+    ("KEYS = ('emergency', 'private')\nVALS = (9, 5)\nTABLE = dict(zip(KEYS, VALS))\n"
+     "def f(r):\n    return TABLE[r.call_type]\n",
+     ["5: looks up a request field in the label table TABLE; a priority is IF-PRI's"]),
+    ("def f(r):\n    return ('private', 'group', 'emergency').index(r.call_type)\n",
+     ["2: looks up a request field in the label table written inline; a priority is IF-PRI's"]),
+    ("def f(r):\n    if r.adhoc:\n        return 404\n    return 200\n", []),
+], ids=["conditional-expression", "assigned-in-branch", "constant-returned", "flag-in-a-local",
+        "is-true", "scaled-by-flag", "compiled-pattern", "filled-table", "zip-of-constants",
+        "inline-index", "status-codes-are-not-levels"])
+def test_bnd_013_review_probes_round_5(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_no_priority_table_in_core(root) == [f"core/sample.py:{e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-013")
+def test_bnd_013_the_common_attributes_are_these():
+    assert gate._COMMON_ATTRIBUTES == {"attributes", "media", "location", "target", "request_id",
+                                       "initiator", "participants"}
+
+
+# -- batch C, the independent review's probes (round 6) ------------------------
+
+
+@pytest.mark.vp("VP1-BND-013")
+@pytest.mark.parametrize("text,expected", [
+    ("def f(request):\n    if request.attributes.get('emergency') == 'true':\n        return 9\n",
+     [f"2: compares a request field with the literal 'true'; {_LIT}"]),
+    ("VIPS = ('sip:chief@x',)\ndef f(s):\n    return 9 if s.request.initiator in VIPS else 1\n",
+     [f"3: compares a request field with the literal 'sip:chief@x'; {_LIT}"]),
+    ("from core.hooks import SessionRequest\ndef f(r: SessionRequest):\n"
+     "    if 'video' in r.media:\n        return 9\n",
+     [f"3: compares a request field with the literal 'video'; {_LIT}"]),
+    ("def f(request):\n    if request.target.startswith('sip:emergency'):\n        return 9\n",
+     ["2: tests a request field against the literal 'sip:emergency' (startswith); a priority "
+      "is IF-PRI's, not derived from a label"]),
+    ("def f(r, base):\n    return base + 5 if r.adhoc_alert_group else base\n",
+     [f"2: chooses 5 by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("def f(r, n):\n    if r.adhoc_alert_group:\n        n += 5\n    return n\n",
+     [f"3: sets 5 chosen by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("def f(r, base):\n    return max(base, 9) if r.adhoc_alert_group else base\n",
+     [f"2: chooses 9 by the request's adhoc_alert_group; {_CHOSEN}"]),
+    ("import dataclasses\ndef f(d, r):\n"
+     "    return dataclasses.replace(d, preemption_capability=r.adhoc_alert_group)\n",
+     ["3: replaces preemption_capability with a computed value; a priority is IF-PRI's as "
+      "decided"]),
+    ("def f(r):\n    table = {'emergency': 9}\n    return table.get(r.call_type, 1)\n",
+     ["3: looks up a request field in the label table table; a priority is IF-PRI's"]),
+    ("def f(rule):\n    return rule.media == 'audio'\n", []),
+    ("def f(sessions):\n    return sorted(sessions, key=lambda s: s.request.adhoc_alert_group)\n",
+     ["2: orders by a priority value or request field in f; the order is IF-PRI's"]),
+    ("def f(request):\n    return request.attributes.get('core.active_sessions', '0')\n", []),
+], ids=["attributes-of-the-request", "initiator-of-session-request", "annotated-request-media",
+        "request-target", "adjusted-arm", "augmented-in-branch", "max-in-arm",
+        "decision-field-from-request", "table-in-a-local", "common-name-elsewhere",
+        "ordered-by-a-flag", "key-is-not-a-literal"])
+def test_bnd_013_review_probes_round_6(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_no_priority_table_in_core(root) == [f"core/sample.py:{e}" for e in expected]
+
+
+# -- batch C: the rebuilt helpers' own probes ------------------------------------
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_an_opaque_rebinding_does_not_resolve(tmp_path):
+    root = _with_profiles(tmp_path, patches={
+        "profiles/mcx/hooks.py": ("    TableSessionPolicy,\n)\n",
+                                  "    TableSessionPolicy,\n)\nPolicy = dict(x=TablePriorityPolicy)\n"),
+        "profiles/mcx/profile.yaml": ("profiles.mcx.hooks:TablePriorityPolicy",
+                                      "profiles.mcx.hooks:Policy")})
+    assert gate.check_priority_table_declarative(root) == _lines(root, [
+        "profiles/mcx/profile.yaml: profile.hooks.priority_policy ('profiles.mcx.hooks:Policy') "
+        "does not resolve to a class in the tree",
+        "profiles/mcx/hooks.py:{L:Policy = dict}: holds TablePriorityPolicy in another name; the "
+        "table interpreter is not altered by a profile"])
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("text,expected", [
+    ("class M:\n    def f(self, target, request, other):\n        request = self._located(other)\n"
+     "        return self._hooks.identity_resolver.resolve(target, request)\n",
+     ["core/sample.py:3: the request is rebuilt before the resolver sees it; only the core's "
+      "adding helpers (REQUEST_ENRICHERS) may change it"]),
+    ("class M:\n    def f(self, target, request):\n"
+     "        return self._hooks.identity_resolver.resolve(target, request=request)\n", []),
+    ("class M:\n    def f(self, target, *, request):\n"
+     "        return self._hooks.identity_resolver.resolve(target, request)\n", []),
+    ("class M:\n    def f(self, target, request):\n        def helper(request):\n"
+     "            request = None\n            return request\n"
+     "        return self._hooks.identity_resolver.resolve(target, request)\n", []),
+], ids=["enricher-given-another", "request-by-keyword", "keyword-only-parameter",
+        "nested-function-is-its-own"])
+def test_bnd_014_what_counts_as_the_request(tmp_path, text, expected):
+    root = _with_profiles(tmp_path, {"core/sample.py": text})
+    assert gate.check_resolver_receives_context(root) == expected
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_the_last_binding_is_the_one_followed(tmp_path):
+    root = _with_profiles(tmp_path, patches={
+        "profiles/mcx/hooks.py": ("    TableSessionPolicy,\n)\n",
+                                  "    TableSessionPolicy,\n)\n"
+                                  "TablePriorityPolicy = dict(x=TablePriorityPolicy)\n")})
+    got = gate.check_priority_table_declarative(root)
+    assert ("profiles/mcx/profile.yaml: profile.hooks.priority_policy "
+            "('profiles.mcx.hooks:TablePriorityPolicy') does not resolve to a class in the tree"
+            ) in got
+
+
+@pytest.mark.vp("VP1-BND-011")
+def test_bnd_011_a_name_the_interpreter_reads_is_bound_once(tmp_path):
+    root = _with_profiles(tmp_path)
+    path = root / _TABLES
+    path.write_text(path.read_text() + "\n\nHookContractViolation = RuntimeError\n")
+    line = len(path.read_text().splitlines())
+    assert gate.check_priority_table_declarative(root) == [
+        f"{_TABLES}:{line}: rebinds HookContractViolation after its definition; the "
+        "interpreter is the code as defined"]
+
+
+@pytest.mark.vp("VP1-BND-014")
+@pytest.mark.parametrize("old,new", [
+    ("        request = self._located(request)\n",
+     "        request = _located(request)\n"),
+    ("        request = self._located(request)\n",
+     "        request = self._cells._located(request)\n"),
+    ("        request = self._located(request)\n",
+     "        request = self._located(dataclasses.replace(request, location=None), request)\n"),
+    ("        request = self._located(request)\n",
+     "        request = cells._located(request)\n"),
+], ids=["module-function", "other-receiver", "request-not-first", "other-name-receiver"])
+def test_bnd_014_an_enricher_is_the_cores_own_method_given_the_request(tmp_path, old, new):
+    root = _with_profiles(tmp_path, patches={"core/session.py": (old, new)})
+    assert gate.check_resolver_receives_context(root) == _lines(root, [
+        f"core/session.py:{{L:{new.strip()[:30]}}}: the request is rebuilt before the resolver "
+        "sees it; only the core's adding helpers (REQUEST_ENRICHERS) may change it"])

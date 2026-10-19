@@ -519,20 +519,45 @@ VP1-BND-010:
     and a check that the module/class name or declared constant carries that reference-point name.'
   note: Evidence checks a different property from the one the criterion states.
 VP1-BND-011:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-19'
   evidence:
-  - gate:VP1-BND-011
-  gap: 'Checks profile.yaml rules are match/decision pairs and that TablePriorityPolicy in profiles/common/tables.py
-    has no int literal outside {0,1,-1}. Probed misses: imperative branching on string literals inside
-    TablePriorityPolicy (`return ct == ''emergency''`), and an MCX-profile subclass in profiles/mcx/hooks.py
-    overriding evaluate() with its own logic (the criterion is about the MCX profile''s hook; that file
-    is not inspected at all). Close with: resolve the class the MCX profile.yaml actually binds as priority_policy
-    (including subclasses) and require evaluate/compare to be the generic table interpreter unmodified
-    — flag any override of evaluate/compare in profile packages and any Compare against a non-structural
-    literal (str or int) in the priority policy.'
-  note: Data shape of the table is well checked; 'no imperative logic in the hook' is only sampled.
+    - gate:VP1-BND-011
+    - tests/test_boundary.py::test_batch_c_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_011_a_docstring_is_not_a_change
+    - tests/test_boundary.py::test_bnd_011_a_helper_is_not_redefined
+    - tests/test_boundary.py::test_bnd_011_a_name_the_interpreter_reads_is_bound_once
+    - tests/test_boundary.py::test_bnd_011_a_profile_may_name_core_classes_in_place
+    - tests/test_boundary.py::test_bnd_011_a_profile_may_set_its_own_instances
+    - tests/test_boundary.py::test_bnd_011_an_opaque_rebinding_does_not_resolve
+    - tests/test_boundary.py::test_bnd_011_any_change_to_the_interpreter_needs_review
+    - tests/test_boundary.py::test_bnd_011_catches_the_variants
+    - tests/test_boundary.py::test_bnd_011_follows_an_alias_of_the_interpreter
+    - tests/test_boundary.py::test_bnd_011_helpers_are_bound_once
+    - tests/test_boundary.py::test_bnd_011_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_011_review_probes_round_3
+    - tests/test_boundary.py::test_bnd_011_review_probes_round_4
+    - tests/test_boundary.py::test_bnd_011_review_probes_round_5
+    - tests/test_boundary.py::test_bnd_011_the_interpreter_is_not_patched
+    - tests/test_boundary.py::test_bnd_011_the_interpreter_names_are_these
+    - tests/test_boundary.py::test_bnd_011_the_interpreters_name_is_not_rebound
+    - tests/test_boundary.py::test_bnd_011_the_last_binding_is_the_one_followed
+  note: >-
+    Re-reviewed after RES-OP-09 (batch C, seven rounds, and a regression review of the code as
+    rebuilt after a workspace loss). The gate binds every profile's priority_policy, followed
+    through imports and assignments to the module's last binding, to the generic table interpreter
+    (TablePriorityPolicy), which compares with and returns only structural literals, and pins the
+    interpreter and the helper it calls (_matches) by an AST fingerprint (INTERPRETER_FINGERPRINT).
+    Under profiles/ it refuses any change to them or to the core: attribute stores or deletes other
+    than self.<attr> and cls.<attr> in a method's own unrebound first parameter (not a
+    staticmethod's), setattr, delattr and __setattr__ on anything else, holding the interpreter or
+    handing on a core class imported by name (but calling, subclassing, reading, isinstance and
+    annotations), and globals(), vars() and __dict__; tables.py binds once each name the interpreter
+    reads. VP1-BND-005 refuses __globals__, exec, importlib and sys.modules. Accepted residue:
+    attributes reached through getattr with computed names; bindings the loader resolves other than
+    by a module:Name spec; changes to a profile's own subclass of a core class, which affect only
+    that profile. These need deliberate indirection; the review found no ordinary-code bypass.
 VP1-BND-012:
   verdict: pass
   by: independent review (agent)
@@ -545,47 +570,101 @@ VP1-BND-012:
   - tests/test_boundary.py::test_the_qos_gate_leaves_what_is_not_qos_alone
   note: 'Re-reviewed after RES-OP-10 (case amended on the owner''s ruling). core/qos.py holds the four TS 23.501 tables and two lookups, no other function and no priority; elsewhere a QoS literal in any statement, comparison, keyword or mapping, or a mission-critical 5QI outside a comparison, fails the gate, and an exemption is a reviewed entry with its reason. HEURISTIC: computed, float, string, positional and table-derived values are stated as not seen.'
 VP1-BND-013:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-19'
   evidence:
-  - gate:VP1-BND-013
-  gap: 'Detects only dict literals mapping >=2 string keys to ints with a priority-ish name. ''All priority
-    decisions traced to IF-PRI'' is not established: probed misses are an if/elif chain returning levels
-    by label and ordering requests by `r.urgency` in core. Close with: trace every consumer of priority/urgency/level
-    values in core back to a PriorityDecision returned by IF-PRI (dataflow), flag comparisons/sorts on
-    request fields (urgency, call_type) outside that, and record the permitted core uses (floor.py queue
-    sort on IF-PRI floor_priority; session.preemption_victims gates on IF-PRI flags) as reviewed exceptions.'
-  note: Heuristic for one table shape, by the gate's own docstring.
+    - gate:VP1-BND-013
+    - tests/test_boundary.py::test_batch_c_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_013_accepts_counters_and_declarations
+    - tests/test_boundary.py::test_bnd_013_catches_the_variants
+    - tests/test_boundary.py::test_bnd_013_reads_the_interface_definitions_too
+    - tests/test_boundary.py::test_bnd_013_review_probes
+    - tests/test_boundary.py::test_bnd_013_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_013_review_probes_round_3
+    - tests/test_boundary.py::test_bnd_013_review_probes_round_4
+    - tests/test_boundary.py::test_bnd_013_review_probes_round_5
+    - tests/test_boundary.py::test_bnd_013_review_probes_round_6
+    - tests/test_boundary.py::test_bnd_013_reviewed_uses_are_narrow
+    - tests/test_boundary.py::test_bnd_013_the_common_attributes_are_these
+    - tests/test_boundary.py::test_bnd_013_the_request_attributes_are_read_from_the_interface
+    - tests/test_boundary.py::test_bnd_013_the_reviewed_uses_are_these
+  note: >-
+    Re-reviewed after RES-OP-09 (batch C, seven rounds); signed pass with the residue recorded, the
+    gate being a heuristic by nature. Over core/ and service/ (the platform the profile plugs into,
+    PLT-HOK-021), it refuses: comparisons, orderings (key functions and key lambdas followed),
+    matches, method tests and pattern calls of priority values and request fields against literals
+    (module and class constants, folded expressions and compiled patterns included, a request field
+    followed into locals); label tables at module level, inline or local, literal collections,
+    dict(zip(...)) and comprehensions of literals, and any lookup of a request field in them;
+    PriorityDecision built from literals, conditions, constants or **; replace of a priority field
+    from a computed or request value; branches on a request field that return, assign or work in a
+    number. Only the reviewed PRIORITY_USES comparisons, by Class.method and by name, are allowed.
+    Accepted residue: decisions under neutral names with no literal (victims chosen by a request
+    flag); values or fields passed through other functions; tables built at run time from
+    non-literals; flags on objects not plainly the request; levels in 100-699, excepted as status
+    codes; hash comparisons; local aliases of the common request fields (_COMMON_ATTRIBUTES), which
+    are not followed by name to avoid collisions. Some ordinary non-priority code is refused (a
+    literal test of a common field, a counter bumped under a request flag): it fails safe and needs
+    review.
 VP1-BND-014:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-19'
   evidence:
-  - gate:VP1-BND-014
-  gap: 'Only inspects calls in core/session.py whose *arguments* contain the text ''identity_resolver.resolve''
-    (i.e. invoker.call(...)) and checks some arg is literally `request`. A direct call `self._hooks.identity_resolver.resolve(target,
-    None)` is not examined (probe missed); any other module calling resolve is not scanned; and passing
-    a `request` rebuilt with location/application cleared would pass. It never checks the four named items
-    (initiator, call type, application, location) are populated. Close with: find every call to resolve
-    anywhere in core (func or arg form), require the request argument to be the unmodified inbound SessionRequest,
-    plus a spy-hook test asserting the resolver receives initiator, call_type, application and location
-    with the values of the originating request.'
-  note: Current invoker.call sites do pass `request`; the gate cannot see other shapes.
+    - gate:VP1-BND-014
+    - tests/test_boundary.py::test_batch_c_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_014_an_enricher_is_the_cores_own_method_given_the_request
+    - tests/test_boundary.py::test_bnd_014_needs_a_call_site
+    - tests/test_boundary.py::test_bnd_014_review_probes
+    - tests/test_boundary.py::test_bnd_014_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_014_review_probes_round_3
+    - tests/test_boundary.py::test_bnd_014_review_probes_round_4
+    - tests/test_boundary.py::test_bnd_014_the_reviewed_origins_are_these
+    - tests/test_boundary.py::test_bnd_014_what_counts_as_the_request
+    - tests/test_session.py::test_the_resolver_sees_initiator_call_type_application_and_location
+    - tests/test_session.py::test_the_resolver_sees_the_whole_request_for_ad_hoc_criteria
+    - tests/test_session.py::test_the_resolver_sees_the_whole_request_for_an_ad_hoc_list
+  note: >-
+    Re-reviewed after RES-OP-09 (batch C, signed pass in round 3, rechecked through round 7). Every
+    resolve and determine_participants call in core receives the enclosing function's own request,
+    and every caller in the module, transitively, passes its own request or is a reviewed origin
+    (REQUEST_ORIGINS: receive_inbound, born from IF-IWF map_inbound); the request changes only
+    through the enrichers, called as the core's own methods on the request (self._located(request),
+    self._with_roles(request, ...)); rebinding in any form, attribute stores, setattr, writing or
+    holding vars() or __dict__ (anywhere in core), holding the resolver or a traced function, and
+    looking either up by getattr are refused. VP1-BND-008 refuses object.__setattr__ on frozen
+    values; VP1-BND-002 refuses dynamic builtins. Spy tests show at run time that initiator, call
+    type, application and location (by value) arrive intact for private, group, ad hoc list and ad
+    hoc criteria calls. Accepted residue: the trace is intra-module, so a request the service or
+    another class builds before SessionManager.establish is the spy tests' to show; the enrichers'
+    bodies and computed getattr names ('__di' + 'ct__') are caught only by the spy tests.
 VP1-BND-015:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-19'
   evidence:
-  - gate:VP1-BND-015
-  gap: 'Checks only direct imports in core/floor.py whose last dotted component is in {sip,rtp,rtcp,socket,requests,http}.
-    Probed misses: `from core import sip` (leaf ''core''), `from service.media import MediaPlane` (''media''
-    not listed), `import asyncio, ssl`; transitive dependencies through other core modules are not followed.
-    The clause ''instantiable in ENV-UNIT'' is not evidenced at all (no test in the evidence list). Close
-    with: compute floor.py''s transitive import closure and forbid core.sip/core.rtcp/core.codec/service.*/socket/ssl/asyncio/selectors/http*;
-    add the ENV-UNIT instantiation test (e.g. tests/test_floor.py constructing the machine with a fake
-    clock) as listed evidence.'
-  note: Only one of two clauses covered, and that one by leaf-name match.
+    - gate:VP1-BND-015
+    - tests/test_boundary.py::test_batch_c_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_015_catches_the_variants
+    - tests/test_boundary.py::test_bnd_015_follows_packages
+    - tests/test_boundary.py::test_bnd_015_refuses_processes_and_other_networking
+    - tests/test_boundary.py::test_bnd_015_refuses_what_it_is_not_allowed
+    - tests/test_boundary.py::test_bnd_015_resolves_a_two_level_relative_import
+    - tests/test_boundary.py::test_bnd_015_the_forbidden_modules_are_these
+    - tests/test_floor.py::test_importing_the_floor_machine_loads_no_sip_media_or_network
+    - tests/test_floor.py::test_the_floor_machine_runs_alone_on_an_injected_clock
+  note: >-
+    Re-reviewed after RES-OP-09 (batch C, signed pass in round 2, rechecked through round 7). The
+    gate walks the transitive first-party import closure of core/floor.py, package __init__ files
+    and relative imports resolved, and refuses anything in FLOOR_FORBIDDEN (SIP, media, the service,
+    profiles, sockets, TLS, the event loop, HTTP, mail, processes, concurrent, logging.handlers and
+    logging.config) and anything from outside the tree not in FLOOR_ALLOWED, a list of pure modules
+    (dataclasses, enum, typing, collections and the like). VP1-BND-002 refuses dynamic imports in
+    core. A fresh-interpreter (-I) test shows importing core.floor loads none of the forbidden
+    modules, and the ENV-UNIT tests run the machine on an injected clock. Accepted residue: run-time
+    behaviour of the allowed modules (logging loads threading and os, no network). With the
+    allowlist the review found no bypass.
 VP1-BND-016:
   verdict: pass
   by: independent review (agent)
