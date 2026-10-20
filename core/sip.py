@@ -57,6 +57,9 @@ from . import mcinfo
 from .release import Release, supports_session_type, supports_sip_warning
 from .session import Signal, SignalType
 
+# PLT-PRF-032: this module implements the SIP-2 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "SIP-2"
+
 # --------------------------------------------------------------------------
 # TS 24.379 constants
 # --------------------------------------------------------------------------

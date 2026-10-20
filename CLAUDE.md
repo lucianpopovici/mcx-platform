@@ -43,10 +43,19 @@ leak → fix the core; profile defect → fix the profile and add a validation r
 interface change → revise the ICD and update every in-tree profile in the same
 change set.
 
+**Some files are pinned as reviewed** (`tools/check_boundary.py`): the CI
+workflow (`REVIEWED_WORKFLOW`), `tools/package.py` and `tests/conftest.py`
+(`REVIEWED_FILES`), `tests/mcpttinfo_fixture.py` (`SUITE_HELPERS`), the table
+interpreter (`INTERPRETER_FINGERPRINT`) and the conformance suite's run-time
+checks (`RUN_TIME_CHECK_FINGERPRINT`). Changing one fails its gate until the
+change is reviewed and the pin recomputed (`file_fingerprint`,
+`workflow_fingerprint`, `source_fingerprint`); comments and docstrings do not
+count, and the values are the same on every Python version.
+
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (2621 tests)
+python3 -m pytest tests/ -q                   # must stay green (2864 tests)
 python3 tools/check_boundary.py --root .      # must stay 21/21
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default

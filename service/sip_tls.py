@@ -25,6 +25,9 @@ from core.sip import SipError, canonical_uri, split_frame
 from .config import SipConfig
 from .sip_core import SipCore
 
+# PLT-PRF-032: this module implements the SIP-2 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "SIP-2"
+
 log = logging.getLogger("mcx.sip.tls")
 
 TLS_HANDSHAKE_RECORD = 0x16

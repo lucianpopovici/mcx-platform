@@ -97,6 +97,98 @@ def test_profile_loads(loaded, profile_name):
     assert len(loaded.profile.content_hash) == 64
 
 
+@pytest.mark.vp("VP1-BND-021")
+def test_the_suite_runs_against_the_core_of_the_profiles_release_image(profile_name, tmp_path):
+    """PLT-VER-001: the core this suite imports is the core its profile's
+    release image carries (the same core hash, VP1-BND-006)."""
+    import json
+    import core
+    sys.path.insert(0, str(ROOT / "tools"))
+    import package
+    tree = Path(core.__file__).resolve().parents[1]
+    image = package.stage(profile_name, tmp_path, ROOT)
+    manifest = json.loads((image / "MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["profile"] == profile_name
+    assert len(manifest["core_hash"]) == 64
+    assert package.core_hash(tree) == manifest["core_hash"]
+    # The code that runs is the code hashed: nothing in core/ or service/
+    # was replaced at run time (a conftest patching SessionManager, say).
+    assert _replaced_at_run_time() == []
+
+
+def _replaced_at_run_time():
+    """What in the loaded core and service modules is not what their files
+    say: a function, or one wrapped (partial, partialmethod, property,
+    static or class method), on a module or its classes whose code was
+    written elsewhere in this tree (a test, a conftest, a profile); and a
+    module-level literal (`MAX = 256`, a dict, list or set included) whose
+    value differs from the one its file assigns. Code or data put in at run time, which the core hash does
+    not see."""
+    import ast
+    import copy
+    import inspect
+    platform = (str(ROOT / "core"), str(ROOT / "service"))
+
+    def codes(v):
+        for inner in (v, getattr(v, "__func__", None), getattr(v, "func", None),
+                      getattr(v, "fget", None), getattr(v, "fset", None),
+                      getattr(v, "fdel", None)):
+            code = getattr(inner, "__code__", None)
+            if code is not None:
+                yield code.co_filename
+
+    out = []
+    for name, module in sorted(sys.modules.items()):
+        if name.split(".")[0] not in ("core", "service") or module is None:
+            continue
+        for attr, value in list(vars(module).items()):
+            owners = [(attr, value)]
+            if inspect.isclass(value) and value.__module__ == name:
+                owners += [(f"{attr}.{k}", v) for k, v in vars(value).items()]
+            for where, v in owners:
+                if any(f.startswith(str(ROOT)) and not f.startswith(platform) for f in codes(v)):
+                    out.append(f"{name}.{where}")
+        source = getattr(module, "__file__", None)
+        if not source or not source.startswith(platform):
+            continue
+        tree = ast.parse(Path(source).read_text(encoding="utf-8"))
+        assigned = {}                  # names the file binds to a literal so far
+
+        def resolved(value):
+            # A name bound to a literal earlier in the file reads as it.
+            class Names(ast.NodeTransformer):
+                def visit_Name(self, n):
+                    if n.id in assigned:
+                        return ast.copy_location(ast.Constant(assigned[n.id]), n)
+                    return n
+            return Names().visit(copy.deepcopy(value))
+        for node in tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                try:
+                    written = ast.literal_eval(resolved(node.value))
+                except (ValueError, SyntaxError, TypeError):
+                    for t in targets:
+                        if isinstance(t, ast.Name):
+                            assigned.pop(t.id, None)
+                    continue
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        assigned[t.id] = written
+                    if isinstance(t, ast.Name) and t.id in vars(module) and \
+                            vars(module)[t.id] != written:
+                        out.append(f"{name}.{t.id}")
+    return out
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _still_as_their_files_say():
+    """The same check once every test has run: nothing in core/ or service/
+    was replaced or changed by a test that ran after CORE_HASH_TEST."""
+    yield
+    assert _replaced_at_run_time() == []
+
+
 def test_all_five_hooks_resolve(loaded):
     for field in ("identity_resolver", "priority_policy", "session_policy",
                   "bearer_selector", "interworking_gateway"):
@@ -104,8 +196,8 @@ def test_all_five_hooks_resolve(loaded):
 
 
 def test_identity_triple_is_well_formed(loaded):
-    parts = loaded.profile.identifier().split("/")
-    assert len(parts) == 3 and all(parts)
+    assert len(loaded.profile.identifier().split("/")) == 3
+    assert all(loaded.profile.identifier().split("/"))
 
 
 # --------------------------------------------------------------------------

@@ -192,40 +192,6 @@ def test_frozen_check_accepts_what_is_frozen(tmp_path, planted):
     assert _hooks_with(tmp_path, "\n\n" + planted) == []
 
 
-def test_ci_check_detects_a_missing_profile_suite(tmp_path):
-    _stage(tmp_path)
-    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
-    workflow.parent.mkdir(parents=True, exist_ok=True)
-    workflow.write_text("run: pytest\ncheck_boundary\nmcx\n", encoding="utf-8")
-    violations = gate.check_ci_runs_both_suites(tmp_path)
-    assert any("frmcs" in v for v in violations)
-
-
-def test_ci_check_detects_a_failure_escape(tmp_path):
-    _stage(tmp_path)
-    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
-    workflow.parent.mkdir(parents=True, exist_ok=True)
-    workflow.write_text(
-        "check_boundary\nmcx\nfrmcs\ncontinue-on-error: true\n", encoding="utf-8")
-    violations = gate.check_ci_runs_both_suites(tmp_path)
-    assert any("escape" in v for v in violations)
-
-
-@pytest.mark.parametrize("escape", [
-    "    if:\n      false\n", '    "continue-on-error": true\n'])
-def test_ci_check_reads_escapes_from_the_parsed_workflow(tmp_path, escape):
-    """Review of RES-OP-08: a key YAML allows in another spelling is the
-    same escape, whatever the text looks like."""
-    _stage(tmp_path)
-    workflow = tmp_path / ".github" / "workflows" / "ci.yml"
-    workflow.parent.mkdir(parents=True, exist_ok=True)
-    workflow.write_text("jobs:\n  t:\n" + escape +
-                        "    steps: [{run: check_boundary mcx frmcs}]\n",
-                        encoding="utf-8")
-    violations = gate.check_ci_runs_both_suites(tmp_path)
-    assert any("job t has" in v for v in violations), violations
-
-
 def _stage(root: Path, core_extra: str = "") -> None:
     """Build a minimal tree the checks can run against."""
     (root / "core").mkdir(parents=True, exist_ok=True)
@@ -3157,3 +3123,1517 @@ def test_bnd_014_an_enricher_is_the_cores_own_method_given_the_request(tmp_path,
     assert gate.check_resolver_receives_context(root) == _lines(root, [
         f"core/session.py:{{L:{new.strip()[:30]}}}: the request is rebuilt before the resolver "
         "sees it; only the core's adding helpers (REQUEST_ENRICHERS) may change it"])
+
+
+# --------------------------------------------------------------------------
+# Batch D (RES-OP-09): VP1-BND-006, 010, 020, 021
+# --------------------------------------------------------------------------
+
+_CI = ".github/workflows/ci.yml"
+_CONF = "tests/test_conformance.py"
+_TYPE = "calls type, asking what an object is; a profile's hook class tells the profiles apart; "
+_HOOK = ("other than to call it, hand it to the core or assert it is there; a profile's hooks "
+         "tell the profiles apart; the suite is the same for every profile")
+_USES = ("other than in an assertion, as the core's argument or against another profile's; "
+         "the suite is the same for every profile")
+
+
+def _deploy(tmp_path, files=None, patches=None, drop=()):
+    """A copy of what the batch D gates read: the process and the profiles,
+    tools/, the workflow, requirements, PLT-SRS and the conformance suite,
+    with `files` added, `patches` ({path: (old, new)}) applied and `drop`
+    removed."""
+    import shutil
+    for d in ("core", "service", "profiles", "tools", ".github"):
+        shutil.copytree(ROOT / d, tmp_path / d,
+                        ignore=shutil.ignore_patterns("__pycache__", "interop"))
+    for rel in ("requirements.txt", "docs/PLT-SRS.md", _CONF, "tests/conftest.py",
+                "tests/mcpttinfo_fixture.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, tmp_path / rel)
+    for rel, (old, new) in (patches or {}).items():
+        path = tmp_path / rel
+        text = path.read_text(encoding="utf-8")
+        assert text.count(old) == 1, (rel, old)
+        path.write_text(text.replace(old, new), encoding="utf-8")
+    for rel, text in (files or {}).items():
+        if rel.startswith("+"):                 # appended to a file of the tree
+            rel, text = rel[1:], (tmp_path / rel[1:]).read_text(encoding="utf-8") + text
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(text, encoding="utf-8")
+    for rel in drop:
+        (tmp_path / rel).unlink()
+    return tmp_path
+
+
+def _images(root):
+    """check_per_profile_images with the workflow re-pinned, as a review
+    of a ci.yml change would: the workflow's own rules, seen past the pin
+    (test_bnd_006_the_workflow_is_pinned shows the pin itself)."""
+    saved = gate.REVIEWED_WORKFLOW
+    gate.REVIEWED_WORKFLOW = (saved[0], gate.workflow_fingerprint(root))
+    try:
+        return gate.check_per_profile_images(root)
+    finally:
+        gate.REVIEWED_WORKFLOW = saved
+
+
+@pytest.mark.vp("VP1-BND-006", "VP1-BND-010", "VP1-BND-020", "VP1-BND-021")
+@pytest.mark.parametrize("fn", [gate.check_per_profile_images, gate.check_reference_point_naming,
+                                gate.check_ci_runs_both_suites, gate.check_per_profile_suite],
+                         ids=["006", "010", "020", "021"])
+def test_batch_d_gates_pass_the_unchanged_copy(tmp_path, fn):
+    assert fn(_deploy(tmp_path)) == []
+
+
+_IMAGE = "the profile is data given to tools/package.py"
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({"service/x.py": "DEFAULT = 'frmcs'\n"}, {},
+     ["service/x.py:1: shared code names the profile 'frmcs', but every image carries only "
+      "one"]),
+    ({"service/x.py": "P = 'profiles/mcx/hooks.py'\n"}, {},
+     ["service/x.py:1: shared code names the profile package 'mcx', but every image carries "
+      "only one"]),
+    ({"service/x.py": "from profiles.utility import hooks\n"}, {},
+     ["service/x.py:1: shared code names the profile package 'utility', but every image "
+      "carries only one"]),
+    ({"+profiles/SCHEMA.yaml": "\nx_default: frmcs  # a\n"}, {},
+     ["profiles/SCHEMA.yaml:{L:x_default: frmcs}: shared code names the profile 'frmcs', but every image "
+      "carries only one"]),
+    ({}, {"tools/release.Containerfile": ("FROM", "ARG PROFILE=mcx\nFROM")},
+     ["tools/release.Containerfile:{L:ARG PROFILE=mcx}: a build file takes the profile as an "
+      f"argument; {_IMAGE}"]),
+    ({"Makefile": "image:\n\tcp -r profiles/utility out/\n"}, {},
+     [f"Makefile:2: a build file names the profile package 'utility'; {_IMAGE}"]),
+    ({"deploy/run.yaml": "image: platform\nprofile: frmcs\n"}, {},
+     [f"deploy/run.yaml:2: a build file names the profile 'frmcs'; {_IMAGE}"]),
+    ({"build.sh": "podman build --build-arg PROFILE=x .\n"}, {},
+     [f"build.sh:1: a build file takes the profile as an argument; {_IMAGE}"]),
+    ({"tools/frmcs.Containerfile": "FROM x\n"}, {},
+     [f"tools/frmcs.Containerfile: per-profile build variant; {_IMAGE}, not a build file"]),
+    ({"deploy/release-mcx.sh": "true\n"}, {},
+     [f"deploy/release-mcx.sh: per-profile build variant; {_IMAGE}, not a build file"]),
+    ({}, {_CI: ("tools/package.py --all --out dist --tar", "tools/package.py --profile mcx "
+                                                            "--out dist")},
+     [f"{_CI}: job images runs the packager as 'python3 tools/package.py --profile mcx --out "
+      "dist'; the images are built once, by 'python3 tools/package.py --all --out dist --tar'",
+      f"{_CI}: no job builds every image with tools/package.py --all, which verifies them"]),
+], ids=["bare-literal", "path-string", "import", "shared-yaml", "build-arg-in-containerfile",
+        "makefile-copies-one", "deployment-yaml", "build-arg-on-command", "named-containerfile",
+        "named-mcx-script", "ci-builds-one"])
+def test_bnd_006_catches_the_variants(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert _images(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files", [
+    {"service/x.py": "LOGGER = 'mcx'\n"},
+    {"+profiles/SCHEMA.yaml": "\nx_a: 1  # frmcs\n"},
+    {"service/x.py": "# the frmcs profile is a stub\nX = 1\n"},
+], ids=["platform-name", "yaml-comment", "python-comment"])
+def test_bnd_006_accepts_the_platform_name_and_comments(tmp_path, files):
+    assert gate.check_per_profile_images(_deploy(tmp_path, files)) == []
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_catches_a_core_that_differs_between_images(tmp_path, monkeypatch):
+    root = _deploy(tmp_path)
+    packager = gate._load_packager(root)
+    real = packager.stage
+
+    def stage(name, out, src):
+        image = real(name, out, src)
+        if name == "frmcs":
+            (image / "core" / "floor.py").write_text("# changed\n", encoding="utf-8")
+        return image
+    monkeypatch.setattr(packager, "stage", stage)
+    monkeypatch.setattr(gate, "_load_packager", lambda r: packager)
+    violations = gate.check_per_profile_images(root)
+    assert violations and all("frmcs" in v for v in violations), violations
+
+
+@pytest.mark.vp("VP1-BND-010")
+def test_bnd_010_the_reference_points_are_these():
+    assert gate.REFERENCE_POINT_MODULES == {
+        "SIP-2": ("core/sip.py", "service/sip_core.py", "service/sip_txn.py",
+                  "service/sip_tls.py", "service/session_timer.py"),
+        "HTTP-1": ("service/http.py", "service/http_tls.py")}
+    assert gate.REFERENCE_POINT_STEMS == {"sip": "SIP-2", "http": "HTTP-1"}
+    assert gate.SRS_PHASE == "R1"
+    assert gate._reference_points(ROOT) == {
+        "SIP-2": "R1", "HTTP-1": "R1", "CSC-1": "R2", "CSC-4": "R2", "CSC-8/9": "R2",
+        "Rx / N5": "R3", "MB2 / xMB / MBS": "R4", "OBAPP / TSAPP": "R3"}
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("module,name", [
+    ("core.sip", "SIP-2"), ("service.sip_core", "SIP-2"), ("service.sip_txn", "SIP-2"),
+    ("service.sip_tls", "SIP-2"), ("service.session_timer", "SIP-2"),
+    ("service.http", "HTTP-1"), ("service.http_tls", "HTTP-1")])
+def test_bnd_010_each_module_says_which_reference_point_it_implements(module, name):
+    import importlib
+    assert importlib.import_module(module).REFERENCE_POINT == name
+
+
+_RP = 'REFERENCE_POINT = "SIP-2"\n'
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"service/sip_tls.py": (_RP, "")},
+     ["service/sip_tls.py: implements SIP-2 and does not say so: declare REFERENCE_POINT = "
+      "'SIP-2'"]),
+    ({}, {"service/http_tls.py": ('REFERENCE_POINT = "HTTP-1"', 'REFERENCE_POINT = "SIP-2"')},
+     ["service/http_tls.py: implements HTTP-1 and does not say so: declare REFERENCE_POINT = "
+      "'HTTP-1'"]),
+    ({"service/kms.py": 'REFERENCE_POINT = "CSC-4"\n'}, {},
+     ["service/kms.py: declares REFERENCE_POINT = 'CSC-4' but is not listed for it in "
+      "REFERENCE_POINT_MODULES"]),
+    ({"service/x.py": 'REFERENCE_POINT = "SIP-9"\n'}, {},
+     ["service/x.py: REFERENCE_POINT 'SIP-9' is not a PLT-SRS §3.1 interface",
+      "service/x.py: declares REFERENCE_POINT = 'SIP-9' but is not listed for it in "
+      "REFERENCE_POINT_MODULES"]),
+    ({}, {"docs/PLT-SRS.md": ("| CSC-1 | IdMS | OpenID Connect | R2 |",
+                              "| CSC-1 | IdMS | OpenID Connect | R1 |")},
+     ["PLT-SRS §3.1 CSC-1 (R1): no module is named for it"]),
+    ({}, {"docs/PLT-SRS.md": ("| HTTP-1 | HTTP proxy | HTTPS | R1 |\n", "")},
+     ["REFERENCE_POINT_MODULES names 'HTTP-1', which PLT-SRS §3.1 does not list",
+      "service/http.py: REFERENCE_POINT 'HTTP-1' is not a PLT-SRS §3.1 interface",
+      "service/http_tls.py: REFERENCE_POINT 'HTTP-1' is not a PLT-SRS §3.1 interface"]),
+    ({}, {"core/sip.py": ('REFERENCE_POINT = "SIP-2"', 'REFERENCE_POINT = "SIP-" + "2"')},
+     ["core/sip.py: REFERENCE_POINT '' is not a PLT-SRS §3.1 interface",
+      "core/sip.py: implements SIP-2 and does not say so: declare REFERENCE_POINT = 'SIP-2'"]),
+    ({}, {"service/sip_txn.py": (_RP, 'def _f():\n    REFERENCE_POINT = "SIP-2"\n')},
+     ["service/sip_txn.py: implements SIP-2 and does not say so: declare REFERENCE_POINT = "
+      "'SIP-2'"]),
+    ({}, {"core/sip.py": (_RP, _RP + 'REFERENCE_POINT = "HTTP-1"\n')},
+     ["core/sip.py: implements SIP-2 and does not say so: declare REFERENCE_POINT = 'SIP-2'"]),
+    ({"service/sip_reg.py": "X = 1\n"}, {},
+     ["service/sip_reg.py: named for SIP-2 and not listed for it in REFERENCE_POINT_MODULES"]),
+    ({"core/http_x.py": _RP}, {},
+     ["core/http_x.py: declares REFERENCE_POINT = 'SIP-2' but is not listed for it in "
+      "REFERENCE_POINT_MODULES",
+      "core/http_x.py: named for HTTP-1 and not listed for it in REFERENCE_POINT_MODULES"]),
+    ({}, {"service/sip_core.py": (_RP, "")}, None),
+], ids=["undeclared", "wrong-name", "unlisted", "unknown", "new-r1-interface",
+        "interface-dropped", "not-a-constant", "in-a-function", "rebound", "new-sip-module",
+        "http-module-as-sip", "drop-listed-file"])
+def test_bnd_010_catches_the_variants(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    if expected is None:
+        (root / "service/sip_core.py").unlink()
+        expected = ["service/sip_core.py: listed for SIP-2, and missing"]
+    assert gate.check_reference_point_naming(root) == expected
+
+
+@pytest.mark.vp("VP1-BND-010")
+def test_bnd_010_accepts_an_annotated_declaration(tmp_path):
+    root = _deploy(tmp_path, patches={"core/sip.py": ('REFERENCE_POINT = "SIP-2"',
+                                                      'REFERENCE_POINT: str = "SIP-2"')})
+    assert gate.check_reference_point_naming(root) == []
+
+
+@pytest.mark.vp("VP1-BND-020")
+@pytest.mark.parametrize("old,new,expected", [
+    ("on: [push, pull_request]", "on:\n  push:\n    branches: [main]\n  pull_request:",
+     ["filters push (branches): a change can skip the suites"]),
+    ("on: [push, pull_request]",
+     "on:\n  push:\n  pull_request:\n    paths-ignore: ['profiles/frmcs/**']",
+     ["filters pull_request (paths-ignore): a change can skip the suites"]),
+    ("on: [push, pull_request]", "on: push", ["does not run on pull_request"]),
+    ("profile: [mcx, frmcs, utility]", "profile: [mcx, utility]  # frmcs",
+     ["job conformance runs the conformance suite for ['mcx', 'utility'], not every profile "
+      "['frmcs', 'mcx', 'utility']"]),
+    ("  unit:\n    runs-on: ubuntu-latest\n",
+     "  unit:\n    runs-on: ubuntu-latest\n    if:\n      false\n",
+     ["job unit has 'if', a conditional or failure escape"]),
+    ("        run: python3 -m pytest tests/ -q\n",
+     "        run: python3 -m pytest tests/ -q\n        continue-on-error: true\n",
+     ["job unit step 4 has 'continue-on-error', a conditional or failure escape"]),
+    ("python3 -m pytest tests/ -q", "python3 -m pytest tests/test_session.py -q",
+     ["the unit suite (pytest tests/) is not run"]),
+    ("python3 tools/check_boundary.py --root .", "echo python3 tools/check_boundary.py",
+     ["the boundary gate is not run"]),
+    ("python3 -m pytest tests/ -q", "echo python3 -m pytest tests/",
+     ["the unit suite (pytest tests/) is not run"]),
+    ("run: python3 -m pytest tests/test_conformance.py -q",
+     "run: echo python3 -m pytest tests/test_conformance.py",
+     ["the conformance suite is not run"]),
+    ("MCX_PROFILE: ${{ matrix.profile }}", "MCX_PROFILE: mcx",
+     ["job conformance does not state MCX_PROFILE from its matrix"]),
+    ("run: python3 -m pytest tests/ -q", "run: python3 -m pytest tests/ -q || true",
+     ["job unit runs a suite and can discard its exit status: python3 -m pytest tests/ -q "
+      "|| true", "job unit runs the unit suite as 'python3 -m pytest tests/ -q || true', not "
+      "exactly 'python3 -m pytest tests/ -q'"]),
+    ("run: python3 -m pytest tests/ -q",
+     "run: |\n          set +e\n          python3 -m pytest tests/ -q",
+     ["job unit runs a suite and can discard its exit status: set +e",
+      "job unit runs the unit suite as 'set +e\\npython3 -m pytest tests/ -q', not exactly "
+      "'python3 -m pytest tests/ -q'"]),
+    ("run: python3 tools/check_boundary.py --root .",
+     "run: python3 tools/check_boundary.py --root . | tee gate.log",
+     ["job boundary runs a suite and can discard its exit status: python3 "
+      "tools/check_boundary.py --root . | tee gate.log",
+      "job boundary runs the boundary gate as 'python3 tools/check_boundary.py --root . | tee "
+      "gate.log', not exactly 'python3 tools/check_boundary.py --root .'"]),
+    ("python3 -m pytest tests/ -q", "python3 -m pytest tests/ -q\n        allow_failure: true",
+     ["contains allow_failure, a failure escape"]),
+], ids=["branch-filter", "paths-ignore", "no-pull-request", "profile-dropped", "multiline-if",
+        "step-continue-on-error", "unit-narrowed", "gate-echoed", "unit-echoed",
+        "conformance-echoed", "profile-fixed", "or-true", "set-plus-e", "piped",
+        "allow-failure"])
+def test_bnd_020_catches_the_variants(tmp_path, old, new, expected):
+    root = _deploy(tmp_path, patches={_CI: (old, new)})
+    assert gate.check_ci_runs_both_suites(root) == [f"{_CI}: {e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-020")
+def test_bnd_020_a_new_profile_needs_its_suite(tmp_path):
+    root = _deploy(tmp_path, {"profiles/rail/profile.yaml": "profile:\n  name: rail\n"})
+    assert gate.check_ci_runs_both_suites(root) == [
+        f"{_CI}: job conformance runs the conformance suite for ['mcx', 'frmcs', 'utility'], "
+        "not every profile ['frmcs', 'mcx', 'rail', 'utility']"]
+
+
+@pytest.mark.vp("VP1-BND-020")
+def test_bnd_020_a_suite_step_runs_its_command_alone(tmp_path):
+    root = _deploy(tmp_path, patches={_CI: ("run: python3 -m pytest tests/ -q",
+                                            "run: |\n          echo unit\n"
+                                            "          python3 -m pytest tests/ -q")})
+    assert gate.check_ci_runs_both_suites(root) == [
+        f"{_CI}: job unit runs the unit suite as 'echo unit\\npython3 -m pytest tests/ -q', "
+        "not exactly 'python3 -m pytest tests/ -q'"]
+
+
+@pytest.mark.vp("VP1-BND-020")
+def test_bnd_020_needs_the_workflow(tmp_path):
+    root = _deploy(tmp_path, drop=[_CI])
+    assert gate.check_ci_runs_both_suites(root) == [f"no CI configuration found ({_CI})"]
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("old,new,expected", [
+    ('ALL_PROFILES = sorted(p.parent.name for p in PROFILES.glob("*/profile.yaml"))',
+     'ALL_PROFILES = ["mcx", "frmcs"]  # "*/profile.yaml"',
+     ["ALL_PROFILES is not read from profiles/*/profile.yaml",
+      "{L:ALL_PROFILES = [}: writes 'frmcs', a profile's name; the suite is the same for every profile",
+      "{L:ALL_PROFILES = [}: writes 'mcx', a profile's name; the suite is the same for every profile"]),
+    ("RELEASES = _releases()", "RELEASES = _releases()\nALL_PROFILES = ALL_PROFILES[:1]",
+     ["ALL_PROFILES is not read from profiles/*/profile.yaml",
+      "{L:ALL_PROFILES = ALL_PROFILES[:1]}: binds ALL_PROFILES again at module level (first "
+      "at line {L:ALL_PROFILES = sorted}); each module-level name is bound once"]),
+    ('PROFILE_NAMES = [os.environ["MCX_PROFILE"]] if os.environ.get("MCX_PROFILE") \\\n'
+     '    else ALL_PROFILES', 'PROFILE_NAMES = ["mcx"]',
+     ["PROFILE_NAMES is not ALL_PROFILES narrowed by MCX_PROFILE",
+      "{L:PROFILE_NAMES = [\"mcx\"]}: writes 'mcx', a profile's name; the suite is the same for every profile"]),
+    ("RELEASES = _releases()", "RELEASES = _releases()\nPROFILE_NAMES = PROFILE_NAMES[:1]",
+     ["PROFILE_NAMES is not ALL_PROFILES narrowed by MCX_PROFILE",
+      "{L:PROFILE_NAMES = PROFILE_NAMES[:1]}: binds PROFILE_NAMES again at module level (first "
+      "at line {L:PROFILE_NAMES = [os.environ}); each module-level name is bound once"]),
+    ('    else ALL_PROFILES\n', '    else ["mcx"]\n',
+     ["PROFILE_NAMES is not ALL_PROFILES narrowed by MCX_PROFILE",
+      "{L:    else [\"mcx\"]}: writes 'mcx', a profile's name; the suite is the same for every profile"]),
+    ('@pytest.fixture(scope="module", params=PROFILE_NAMES)',
+     '@pytest.fixture(scope="module", params=["mcx"])',
+     ["no fixture is parametrised by PROFILE_NAMES",
+      "{L:params=[\"mcx\"]}: writes 'mcx', a profile's name; the suite is the same for every profile"]),
+], ids=["all-fixed", "all-narrowed", "names-fixed", "names-narrowed", "names-without-all",
+        "fixture-fixed"])
+def test_bnd_021_catches_the_variants(tmp_path, old, new, expected):
+    root = _deploy(tmp_path, patches={_CONF: (old, new)})
+    expected = [expected] if isinstance(expected, str) else expected
+    assert gate.check_per_profile_suite(root) == _lines(root, [
+        f"{_CONF}:{e}" if e.startswith("{L:") else f"{_CONF}: {e}" for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_needs_the_suite(tmp_path):
+    root = _deploy(tmp_path, drop=[_CONF])
+    assert gate.check_per_profile_suite(root) == [
+        "no per-profile conformance suite (tests/test_conformance.py)"]
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("profile", sorted(p.parent.name
+                                           for p in (ROOT / "profiles").glob("*/profile.yaml")))
+def test_bnd_021_every_profile_gets_the_whole_suite(profile):
+    """Run as CI runs it, at one release: every test collected, every
+    profile-dependent one for this profile, all of them passing, none
+    skipped or expected to fail."""
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
+    env.update(MCX_PROFILE=profile, MCX_RELEASE="19")
+    r = subprocess.run([sys.executable, "-m", "pytest", _CONF, "-v", "-rA",
+                        "-p", "no:cacheprovider"], cwd=ROOT, env=env,
+                       capture_output=True, text=True, timeout=600)
+    ids = [line.split(" ", 1)[0] for line in r.stdout.splitlines()
+           if line.startswith(_CONF + "::") and " PASSED" in line]
+    others = [line for line in r.stdout.splitlines() if line.startswith(_CONF + "::")
+              and not re.search(r" PASSED", line)]
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-2000:]
+    assert others == []
+    assert len(ids) >= 18
+    assert len([i for i in ids if re.search(rf"[\[-]{re.escape(profile)}[\]-]", i)]) == \
+        len(ids) - 1
+    assert re.search(rf"\b{len(ids)} passed\b", r.stdout) and "skipped" not in r.stdout \
+        and "xfail" not in r.stdout
+
+
+# -- batch D, the independent review's probes (round 1) ------------------------
+
+_SHARED = "but every image carries only one"
+_BUILD = "the profile is data given to tools/package.py"
+_PKG = "'python3 tools/package.py --all --out dist --tar'"
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {"tools/package.py": ('"requirements.txt")', '"requirements.txt", '
+                                                      '"profiles/frmcs/hooks.py")')},
+     ["image mcx: carries profiles/frmcs/hooks.py, which is not its profile",
+      "image utility: carries profiles/frmcs/hooks.py, which is not its profile",
+      "profiles/frmcs/hooks.py:{L:class FRMCSSessionPolicy}: shared code is written for the "
+      "profile 'frmcs' (FRMCSSessionPolicy), but every image carries only one",
+      "tools/package.py: has changed since it was reviewed; review it and update "
+      "REVIEWED_FILES"]),
+    ({}, {_CI: ("run: python3 tools/package.py --all --out dist --tar",
+                "run: python3 tools/package.py --all --out dist --tar || true")},
+     [f"{_CI}: job images runs the packager as 'python3 tools/package.py --all --out dist "
+      f"--tar || true'; the images are built once, by {_PKG}",
+      f"{_CI}: no job builds every image with tools/package.py --all, which verifies them"]),
+    ({}, {_CI: ("      - uses: actions/upload-artifact@v4",
+                "      - run: cp -r profiles/frmcs dist/\n      - uses: actions/upload-artifact@v4")},
+     [f"{_CI}: job images changes or replaces the images after building them; only uploading "
+      "dist/ may follow"]),
+    ({"service/x.py": "COLOR = '#fff'; HOOKS = 'profiles/mcx/hooks.py'\n"}, {},
+     [f"service/x.py:1: shared code names the profile package 'mcx', {_SHARED}"]),
+    ({"+profiles/SCHEMA.yaml": '\nx_hooks: "#profiles/mcx/hooks.py"\n'}, {},
+     [f"profiles/SCHEMA.yaml:{{L:x_hooks:}}: shared code names the profile package 'mcx', "
+      f"{_SHARED}"]),
+    ({"service/x.py": "def f(p):\n    return p.upper() == 'FRMCS'\n"}, {},
+     [f"service/x.py:2: shared code names the profile 'frmcs', {_SHARED}"]),
+    ({"service/x.py": "P = b'frmcs'\n"}, {},
+     [f"service/x.py:1: shared code names the profile 'frmcs', {_SHARED}"]),
+    ({"service/x.py": "P = 'util' + 'ity'\n"}, {},
+     [f"service/x.py:1: shared code names the profile 'utility', {_SHARED}"]),
+    ({"service/x.py": "def f(n):\n    return __import__('profiles.' + n + '.hooks')\n"}, {},
+     [f"service/x.py:2: shared code imports a profile package by a computed name, {_SHARED}"]),
+    ({"tools/build_frmcs_image.py": "X = 1\n"}, {},
+     [f"tools/build_frmcs_image.py: per-profile build variant; {_BUILD}, not a build file"]),
+    ({"deploy/build.py": "ARGS = ['--profile', 'frmcs']\n"}, {},
+     [f"deploy/build.py:1: a build file names the profile 'frmcs'; {_BUILD}"]),
+    ({"deploy/build-image": "#!/bin/sh\npodman build --build-arg PROFILE=frmcs .\n"}, {},
+     [f"deploy/build-image:2: a build file names the profile 'frmcs'; {_BUILD}",
+      f"deploy/build-image:2: a build file takes the profile as an argument; {_BUILD}"]),
+    ({".github/workflows/release-frmcs.yml": "on: push\n"}, {},
+     [f".github/workflows/release-frmcs.yml: per-profile build variant; {_BUILD}, not a build "
+      "file"]),
+], ids=["packager-ships-another-profile", "build-status-discarded", "image-changed-after-build",
+        "hash-inside-a-string", "hash-inside-a-yaml-string", "upper-case", "bytes",
+        "joined-string", "computed-import", "named-tool-script", "python-build-script",
+        "extensionless-script", "per-profile-workflow"])
+def test_bnd_006_review_probes_round_1(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert _images(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,patches", [
+    ({}, {"requirements.txt": ("cffi==", "python-utility-belt==1.0\ncffi==")}),
+    ({"+profiles/SCHEMA.yaml": "\nx_description: a utility function for tables\n"}, {}),
+], ids=["package-name", "english-word-in-yaml"])
+def test_bnd_006_does_not_read_ordinary_words_as_profiles(tmp_path, files, patches):
+    assert gate.check_per_profile_images(_deploy(tmp_path, files, patches)) == []
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_the_reviewed_files_are_these():
+    assert set(gate.REVIEWED_FILES) == {"tools/package.py", "tests/conftest.py"}
+    for rel, fingerprint in gate.REVIEWED_FILES.items():
+        assert gate.file_fingerprint(ROOT, rel) == fingerprint
+    assert gate.IMAGES_RUN == "python3 tools/package.py --all --out dist --tar"
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_the_fingerprint_is_the_source_text_less_comments_and_docstrings():
+    import ast
+    import hashlib
+    src = ('"""Module."""\n\nimport os  # why\n\n\n@deco\ndef f(x):   \n'
+           '    """Doc\n    more."""\n    # note\n    s = """a\n\n b  \n"""\n    return x + 1\n')
+    body = 'import os\n@deco\ndef f(x):\n    ""\n    s = """a\n\n b  \n"""\n    return x + 1'
+    assert gate.fingerprint_text(src, None) == '""\n' + body
+    assert gate.source_fingerprint(src, None) == \
+        hashlib.sha256(('""\n' + body).encode()).hexdigest()
+    tree = ast.parse(src)
+    assert gate.fingerprint_text(src, [tree.body[2]]) == body.split("\n", 1)[1]
+    # Comments and docstrings, their length included, do not count ...
+    same = src.replace("# why", "# another reason").replace("Doc", "Changed at length")
+    assert gate.source_fingerprint(same, None) == gate.source_fingerprint(src, None)
+    # ... code does, and so does the inside of any other string.
+    for old, new in (("x + 1", "x + 2"), ("a\n\n b  \n", "a\n b\n")):
+        assert gate.source_fingerprint(src.replace(old, new), None) != \
+            gate.source_fingerprint(src, None)
+    assert gate.fingerprint_text("s = '# kept'\n", None) == "s = '# kept'"
+
+
+@pytest.mark.vp("VP1-BND-006", "VP1-BND-011", "VP1-BND-021")
+def test_bnd_006_no_code_hides_in_what_the_fingerprint_leaves_out():
+    """Review round 3: AST columns count UTF-8 bytes, Python strings count
+    characters. Code after a non-ASCII docstring on its line is hashed."""
+    import hashlib
+    src = 'def f():\n    """Doc \u00a7\u00a7\u00a7\u00a7\u00a7\u00a7\u00a7\u00a7\u00a7\u00a7\u00a7."""; return []\n'
+    assert gate.fingerprint_text(src, None) == 'def f():\n    ""; return []'
+    # Cut right to left, so a comment after it on the line comes out whole.
+    assert gate.fingerprint_text('def f():\n    """D \u00a7."""; return 1  # c\n', None) == \
+        'def f():\n    ""; return 1'
+    assert gate.source_fingerprint(src, None) != gate.source_fingerprint(
+        'def f():\n    """Doc."""\n', None)
+    assert gate.fingerprint_text("x = 1 +\n", None) is None      # not Python
+    assert gate.source_fingerprint("x = 1 +\n", None) == ""
+    assert gate.fingerprint_text("", None) == ""
+    assert hashlib.sha256(b"").hexdigest() == gate.source_fingerprint("", None)
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({"service/registrar.py": "from core.sip import Request\nOK = 'SIP/2.0 200 OK'\n"}, {},
+     ["service/registrar.py:2: writes 'SIP/2.0 200 OK', so it implements SIP-2, and is not "
+      "listed for it in REFERENCE_POINT_MODULES"]),
+    ({"service/mcdata_client.py": "import urllib.request\n"}, {},
+     ["service/mcdata_client.py:1: imports urllib.request, so it implements HTTP-1, and is not "
+      "listed for it in REFERENCE_POINT_MODULES"]),
+    ({"service/sip/transport.py": "X = 1\n"}, {},
+     ["service/sip/transport.py: named for SIP-2 and not listed for it in "
+      "REFERENCE_POINT_MODULES"]),
+    ({"service/SIP_registrar.py": "X = 1\n"}, {},
+     ["service/SIP_registrar.py: named for SIP-2 and not listed for it in "
+      "REFERENCE_POINT_MODULES"]),
+    ({}, {"service/sip_tls.py": (_RP, _RP + "from http.server import ThreadingHTTPServer\n")},
+     ["service/sip_tls.py:{L:from http.server}: imports http.server, so it implements HTTP-1, "
+      "and is not listed for it in REFERENCE_POINT_MODULES"]),
+    ({}, {"service/http.py": ('REFERENCE_POINT = "HTTP-1"\n',
+                              'REFERENCE_POINT = "HTTP-1"\n\n\nclass SipCoreGateway:\n    pass\n')},
+     ["service/http.py:{L:class SipCoreGateway}: class SipCoreGateway is named for another "
+      "reference point than this module's HTTP-1"]),
+], ids=["writes-sip", "imports-http", "package-named-sip", "upper-case-stem",
+        "http-stack-in-a-sip-module", "class-named-for-the-other"])
+def test_bnd_010_review_probes_round_1(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert gate.check_reference_point_naming(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-010")
+def test_bnd_010_the_protocol_marks_are_these():
+    assert gate.REFERENCE_POINT_STACKS == {
+        "HTTP-1": ("http.server", "http.client", "urllib.request", "urllib3", "httpx",
+                   "requests", "aiohttp", "wsgiref", "socketserver", "flask", "fastapi",
+                   "starlette", "uvicorn", "tornado", "werkzeug", "h2", "h11", "xmlrpc.server",
+                   "xmlrpc.client"), "SIP-2": ()}
+    sip, http = gate.REFERENCE_POINT_TEXT["SIP-2"], gate.REFERENCE_POINT_TEXT["HTTP-1"]
+    assert [bool(sip.search(t)) for t in ("SIP/2.0 200 OK", "INVITE sip:a@b SIP/2.0",
+                                          "SIP/2.0/TLS ", "SIP/2.0", "SIP/2.0 stack ready")] \
+        == [True, True, True, True, False]
+    assert [bool(http.search(t)) for t in ("HTTP/1.1 200 OK", "GET / HTTP/1.1", "HTTP/1.1 ok")] \
+        == [True, True, False]
+    assert (gate._SIP_MESSAGES, gate._SOCKETS) == (("core.sip",), ("socket", "ssl"))
+    assert gate._ASYNC_TRANSPORTS == {"start_server", "open_connection", "create_server",
+                                      "create_connection", "create_datagram_endpoint",
+                                      "start_tls"}
+    assert gate.NOT_REFERENCE_POINTS == {}
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("seed", ["0", "1", "2", "3"])
+def test_bnd_010_reports_in_the_same_order_whatever_the_hash_seed(tmp_path, seed):
+    import os
+    import subprocess
+    root = _deploy(tmp_path, {"core/http_x.py": _RP})
+    code = ("import sys; sys.path.insert(0, 'tools'); import check_boundary as g, pathlib; "
+            f"print(g.check_reference_point_naming(pathlib.Path({str(root)!r})))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONHASHSEED": seed}, timeout=60)
+    assert r.stdout.strip() == repr([
+        "core/http_x.py: declares REFERENCE_POINT = 'SIP-2' but is not listed for it in "
+        "REFERENCE_POINT_MODULES",
+        "core/http_x.py: named for HTTP-1 and not listed for it in REFERENCE_POINT_MODULES"])
+
+
+@pytest.mark.vp("VP1-BND-020")
+@pytest.mark.parametrize("old,new,expected", [
+    ("  conformance:\n    runs-on: ubuntu-latest\n",
+     "  conformance:\n    runs-on: ubuntu-latest\n    concurrency: {group: c, cancel-in-progress: true}\n",
+     ["job conformance runs a suite and has 'concurrency', which can cancel, alter or replace "
+      "its run"]),
+    ("  conformance:\n    runs-on: ubuntu-latest\n    needs: boundary\n",
+     "  conformance:\n    runs-on: ubuntu-latest\n    needs: [boundary, label-check]\n",
+     ["job conformance runs a suite and needs ['label-check']; a job it waits on could skip it"]),
+    ("        run: python3 -m pytest tests/ -q\n",
+     "        run: python3 -m pytest tests/ -q\n        shell: bash +e {0}\n",
+     ["job unit gives the unit suite its own shell"]),
+    ("run: python3 tools/check_boundary.py --root .",
+     "run: python3 tools/check_boundary.py --root . --case VP1-BND-001",
+     ["job boundary runs the boundary gate as 'python3 tools/check_boundary.py --root . --case "
+      "VP1-BND-001', not exactly 'python3 tools/check_boundary.py --root .'"]),
+    ("        run: python3 -m pytest tests/ -q\n",
+     "        run: python3 -m pytest tests/ -q\n        env:\n          PYTEST_ADDOPTS: -k mcx\n",
+     ["job unit gives the unit suite its own env"]),
+    ("  unit:\n    runs-on: ubuntu-latest\n", "  unit:\n    runs-on: [self-hosted, rig]\n",
+     ["job unit runs a suite on ['self-hosted', 'rig'], not the hosted ubuntu-latest"]),
+], ids=["concurrency", "needs-another-job", "own-shell", "gate-narrowed", "own-env",
+        "self-hosted"])
+def test_bnd_020_review_probes_round_1(tmp_path, old, new, expected):
+    root = _deploy(tmp_path, patches={_CI: (old, new)})
+    assert gate.check_ci_runs_both_suites(root) == [f"{_CI}: {e}" for e in expected]
+
+
+@pytest.mark.vp("VP1-BND-020")
+def test_bnd_020_ci_yml_is_the_only_workflow(tmp_path):
+    root = _deploy(tmp_path, {".github/workflows/cancel.yml": "on: push\n"})
+    assert gate.check_ci_runs_both_suites(root) == [
+        ".github/workflows/cancel.yml: a second workflow; the suites' workflow is ci.yml alone"]
+
+
+@pytest.mark.vp("VP1-BND-020")
+@pytest.mark.parametrize("old,new", [
+    ("on: [push, pull_request]", "on:\n  push:\n    branches: ['**']\n  pull_request:"),
+    ("name: ci\n", "name: ci\n# no allow_failure here\n"),
+], ids=["every-branch", "word-in-a-comment"])
+def test_bnd_020_accepts_what_skips_nothing(tmp_path, old, new):
+    assert gate.check_ci_runs_both_suites(_deploy(tmp_path, patches={_CI: (old, new)})) == []
+
+
+@pytest.mark.vp("VP1-BND-020")
+def test_bnd_020_the_pinned_commands_are_these():
+    assert (gate.GATE_RUN_EXACT, gate.UNIT_RUN_EXACT) == (
+        "python3 tools/check_boundary.py --root .", "python3 -m pytest tests/ -q")
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("patches,expected", [
+    ({_CONF: ("    directory = PROFILES / profile_name\n",
+              "    if profile_name == 'utility':\n        pytest.skip('stub')\n"
+              "    directory = PROFILES / profile_name\n")},
+     [f"{_CONF}:{{L:if profile_name == 'utility'}}: branches on 'utility', a profile's name; the suite is the same for every profile",
+      f"{_CONF}:{{L:if profile_name == 'utility'}}: branches on a profile's name; the suite is "
+      "the same for every profile",
+      f"{_CONF}:{{L:if profile_name == 'utility'}}: branches on profile_name; the suite is the "
+      "same for every profile",
+      f"{_CONF}:{{L:if profile_name == 'utility'}}: uses profile_name {_USES}",
+      f"{_CONF}:{{L:pytest.skip}}: skips or expects failure (skip); a profile's suite runs "
+      "whole"]),
+    ({"tests/conftest.py": ("import pytest\n", "import pytest\nX = 1\n")},
+     ["tests/conftest.py: has changed since it was reviewed; review it and update "
+      "REVIEWED_FILES"]),
+    ({_CONF: ('    assert package.core_hash(tree) == manifest["core_hash"]\n',
+              '    assert len(package.core_hash(tree)) == 64\n')},
+     [f"{_CONF}: test_the_suite_runs_against_the_core_of_the_profiles_release_image does not "
+      "assert \"assert package.core_hash(tree) == manifest['core_hash']\""]),
+    ({_CONF: ('ALL_PROFILES = sorted(p.parent.name for p in PROFILES.glob("*/profile.yaml"))',
+              'ALL_PROFILES = sorted(p.parent.name for p in PROFILES.glob("*/profile.yaml") '
+              'if p.parent.name != "utility")')},
+     [f"{_CONF}: ALL_PROFILES is not read from profiles/*/profile.yaml",
+      f"{_CONF}:{{L:ALL_PROFILES = }}: branches on a profile's name; the suite is the same for "
+      "every profile",
+      f"{_CONF}:{{L:ALL_PROFILES = }}: writes 'utility', a profile's name; the suite is the same for every profile"]),
+    ({_CONF: ('@pytest.fixture(scope="module", params=PROFILE_NAMES)',
+              '@pytest.fixture(scope="module", params=PROFILE_NAMES[:1])')},
+     [f"{_CONF}: no fixture is parametrised by PROFILE_NAMES"]),
+], ids=["skipped-profile", "conftest-changed", "core-hash-not-asserted", "profiles-filtered",
+        "params-sliced"])
+def test_bnd_021_review_probes_round_1(tmp_path, patches, expected):
+    root = _deploy(tmp_path, patches=patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_code_put_into_the_core_at_run_time_is_seen(monkeypatch):
+    sys.path.insert(0, str(ROOT / "tests"))
+    import test_conformance as suite
+    import core.session
+    assert suite._replaced_at_run_time() == []
+
+    def _init(self, *a, **k):
+        return None
+    monkeypatch.setattr(core.session.SessionManager, "__init__", _init)
+    monkeypatch.setattr(core.session, "_planted", _init, raising=False)
+    assert suite._replaced_at_run_time() == ["core.session.SessionManager.__init__",
+                                             "core.session._planted"]
+
+
+# -- batch D, the independent review's probes (round 2) ------------------------
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({"profiles/common/rail_hooks.py": "X = 1\n"}, {},
+     ["profiles/common/rail_hooks.py: not a reviewed framework module (COMMON_MODULES); what "
+      "ships in every image is reviewed"]),
+    ({}, {_CI: ("      - run: pip install pyyaml\n",
+                "      - run: pip install pyyaml\n      - run: cp a b\n")},
+     [f"{_CI}: job images does more before building the images than the fixed setup "
+      "(IMAGES_SETUP)"]),
+    ({}, {_CI: ("  images:\n", "  publish:\n    runs-on: ubuntu-latest\n    steps:\n"
+                               "      - run: podman build -t x .\n  images:\n")},
+     [f"{_CI}: job publish builds an image another way than {_PKG}: podman build -t x ."]),
+    ({}, {_CI: ("  images:\n", "  other:\n    runs-on: ubuntu-latest\n    steps:\n"
+                               "      - run: python3 -m tools.package --profile mcx --out dist2\n"
+                               "  images:\n")},
+     [f"{_CI}: job other runs the packager as 'python3 -m tools.package --profile mcx --out "
+      f"dist2'; the images are built once, by {_PKG}"]),
+    ({}, {_CI: ("  images:\n", "  repack:\n    runs-on: ubuntu-latest\n    steps:\n"
+                               "      - uses: actions/upload-artifact@v4\n"
+                               "        with: {name: release-images, path: dist/x, overwrite: "
+                               "true}\n  images:\n")},
+     [f"{_CI}: 2 artifact steps; the one after the build is the only one, so nothing replaces "
+      "the images",
+      f"{_CI}: job repack overwrites an artifact; the images uploaded are the ones built"]),
+    ({"service/x.py": "class FrmcsBearerAdapter:\n    pass\ndef use_frmcs_bearer(hooks):\n"
+                      "    return hooks.frmcs_extension\n"}, {},
+     [f"service/x.py:1: shared code is written for the profile 'frmcs' (FrmcsBearerAdapter), "
+      f"{_SHARED}",
+      f"service/x.py:3: shared code is written for the profile 'frmcs' (use_frmcs_bearer), "
+      f"{_SHARED}",
+      f"service/x.py:4: shared code is written for the profile 'frmcs' (frmcs_extension), "
+      f"{_SHARED}"]),
+    ({"tools/images.py": "import subprocess\n"
+                         "subprocess.run(['podman', 'build', '--build-arg', 'PROFILE=frmcs'])\n"},
+     {}, [f"tools/images.py:2: a build file names the profile 'frmcs'; {_BUILD}"]),
+    ({"bench/load.py": "PROFILE = 'frmcs'\n"}, {}, []),
+], ids=["framework-module-not-reviewed", "step-before-the-build", "image-built-elsewhere",
+        "packager-run-as-a-module", "artifact-replaced", "identifiers", "tool-script-content",
+        "benchmark-is-not-a-build-file"])
+def test_bnd_006_review_probes_round_2(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert _images(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_the_framework_and_the_images_step_are_these():
+    assert gate.COMMON_MODULES == ("profiles/common/__init__.py", "profiles/common/tables.py")
+    assert gate.IMAGES_SETUP == [
+        {"uses": "actions/checkout@v4"},
+        {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
+        {"run": "pip install pyyaml"}]
+
+
+_NOT_LISTED = "is not listed for it in REFERENCE_POINT_MODULES"
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({"service/mcptt_registrar.py": "import ssl\nfrom core.sip import Request\n"}, {},
+     [f"service/mcptt_registrar.py:2: puts core.sip's messages on ssl, so it implements SIP-2, "
+      f"and {_NOT_LISTED}"]),
+    ({"service/status_page.py": "def f(c):\n    c.sendall(b'HTTP/1.1 200 OK\\r\\n')\n"}, {},
+     [f"service/status_page.py:2: writes 'HTTP/1.1 200 OK', so it implements HTTP-1, and "
+      f"{_NOT_LISTED}"]),
+    ({"service/admin_api.py": "from wsgiref.simple_server import make_server\n"}, {},
+     [f"service/admin_api.py:1: imports wsgiref.simple_server, so it implements HTTP-1, and "
+      f"{_NOT_LISTED}"]),
+    ({"service/mc_sip_gateway.py": "X = 1\n"}, {},
+     ["service/mc_sip_gateway.py: named for SIP-2 and not listed for it in "
+      "REFERENCE_POINT_MODULES"]),
+    ({}, {"service/http.py": ('REFERENCE_POINT = "HTTP-1"\n',
+                              'REFERENCE_POINT = "HTTP-1"\n\n\nclass GossipCounter:\n    pass\n')},
+     []),
+    ({}, {"service/sip_core.py": (_RP, _RP + "\n\nclass HttpProxyUnreachable(Exception):\n"
+                                             "    pass\n")}, []),
+    ({"service/x.py": "BANNER = 'SIP/2.0 stack ready'\n"}, {}, []),
+], ids=["sip-on-a-socket", "http-status-as-bytes", "wsgiref", "protocol-mid-name",
+        "word-containing-sip", "error-about-the-other", "prose-mentioning-sip"])
+def test_bnd_010_review_probes_round_2(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert gate.check_reference_point_naming(root) == expected
+
+
+@pytest.mark.vp("VP1-BND-020")
+@pytest.mark.parametrize("old,new", [
+    ("        run: python3 -m pytest tests/ -q\n",
+     "        run: rm -f tests/test_conformance.py\n      - run: python3 -m pytest tests/ -q\n"),
+    ("        run: python3 -m pytest tests/ -q\n",
+     "        run: echo PYTEST_ADDOPTS=-k mcx >> $GITHUB_ENV\n"
+     "      - run: python3 -m pytest tests/ -q\n"),
+], ids=["file-removed-first", "env-set-first"])
+def test_bnd_020_review_probes_round_2(tmp_path, old, new):
+    root = _deploy(tmp_path, patches={_CI: (old, new)})
+    assert gate.check_ci_runs_both_suites(root) == [
+        f"{_CI}: job unit does more around its suite than the fixed setup (CONFORMANCE_SETUP)"]
+
+
+@pytest.mark.vp("VP1-BND-020")
+def test_bnd_020_the_gate_cannot_be_replaced_first(tmp_path):
+    root = _deploy(tmp_path, patches={_CI: (
+        "        run: python3 tools/check_boundary.py --root .\n",
+        "        run: printf 'import sys' > tools/check_boundary.py\n"
+        "      - run: python3 tools/check_boundary.py --root .\n")})
+    got = gate.check_ci_runs_both_suites(root)
+    assert f"{_CI}: job boundary does more around its suite than the fixed setup " \
+           "(CONFORMANCE_SETUP)" in got
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {_CONF: ("def test_profile_loads(loaded, profile_name):\n",
+                  "def test_profile_loads(loaded, profile_name):\n"
+                  "    if profile_name == 'utility':\n        return\n")},
+     [f"{_CONF}:{{L:if profile_name == 'utility'}}: branches on 'utility', a profile's name; "
+      "the suite is the same for every profile",
+      f"{_CONF}:{{L:if profile_name == 'utility'}}: branches on a profile's name; the suite is "
+      "the same for every profile",
+      f"{_CONF}:{{L:if profile_name == 'utility'}}: branches on profile_name; the suite is the "
+      "same for every profile",
+      f"{_CONF}:{{L:if profile_name == 'utility'}}: uses profile_name {_USES}"]),
+    ({"tests/__init__.py": "import core.session\n"}, {},
+     ["tests/__init__.py: holds code; it runs before every suite and is kept empty"]),
+    ({}, {_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\n"
+                  "if os.environ.get('MCX_PROFILE') == 'utility':\n    pass\n")},
+     [f"{_CONF}:{{L:if os.environ.get('MCX_PROFILE') == 'utility'}}: module level runs if "
+      "`if os.environ.get('MCX_PROFILE') == 'utility':`; the suite's module level only "
+      "imports, binds and defines",
+      f"{_CONF}:{{L:if os.environ.get('MCX_PROFILE') == 'utility'}}: reads MCX_PROFILE outside "
+      "PROFILE_NAMES",
+      f"{_CONF}:{{L:if os.environ.get('MCX_PROFILE') == 'utility'}}: writes 'utility', a profile's name; the suite is the same for every profile"]),
+    ({}, {_CONF: ("say).\n    assert _replaced_at_run_time() == []\n", "say).\n")},
+     [f"{_CONF}: test_the_suite_runs_against_the_core_of_the_profiles_release_image does not "
+      "assert 'assert _replaced_at_run_time() == []'"]),
+    ({}, {_CONF: ("    platform = (str(ROOT / \"core\"), str(ROOT / \"service\"))\n",
+                  "    return []\n    platform = (str(ROOT / \"core\"), str(ROOT / \"service\"))\n")},
+     [f"{_CONF}: _replaced_at_run_time and _still_as_their_files_say have changed since they "
+      "were reviewed; review them and update RUN_TIME_CHECK_FINGERPRINT"]),
+], ids=["early-return-for-a-profile", "tests-package-code", "profile-read-elsewhere",
+        "run-time-check-dropped", "run-time-check-hollowed"])
+def test_bnd_021_review_probes_round_2(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_data_and_wrapped_code_put_in_at_run_time_are_seen(monkeypatch):
+    import functools
+    sys.path.insert(0, str(ROOT / "tests"))
+    import test_conformance as suite
+    import core.session
+    name = next(n for n, v in vars(core.session).items()
+                if n.isupper() and isinstance(v, int) and not isinstance(v, bool))
+    monkeypatch.setattr(core.session, name, getattr(core.session, name) + 1)
+
+    def _other(self, *a, **k):
+        return None
+    monkeypatch.setattr(core.session.SessionManager, "establish",
+                        functools.partialmethod(_other))
+    assert suite._replaced_at_run_time() == [f"core.session.SessionManager.establish",
+                                             f"core.session.{name}"]
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_the_images_are_built_once(tmp_path):
+    root = _deploy(tmp_path, patches={_CI: (
+        "  images:\n", "  images2:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: \"3.11\"\n      - run: pip install pyyaml\n"
+        "      - run: python3 tools/package.py --all --out dist --tar\n  images:\n")})
+    assert _images(root) == [
+        f"{_CI}: the images are built by more than one step (['images2', 'images'])"]
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,patches", [
+    ({"service/x.py": "X = 1  # see profiles/frmcs/hooks.py\n"}, {}),
+], ids=["path-in-a-python-comment"])
+def test_bnd_006_python_comments_are_not_code(tmp_path, files, patches):
+    assert gate.check_per_profile_images(_deploy(tmp_path, files, patches)) == []
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_requirements_name_packages_not_profiles(tmp_path):
+    root = _deploy(tmp_path, patches={"requirements.txt": ("cffi==", "utility==1.0\ncffi==")})
+    assert gate.check_per_profile_images(root) == []
+    root2 = _deploy(tmp_path / "b", {"deploy/run.sh": "echo utility\n"})
+    assert gate.check_per_profile_images(root2) == [
+        f"deploy/run.sh:1: a build file names the profile 'utility'; {_BUILD}"]
+
+
+@pytest.mark.vp("VP1-BND-010")
+def test_bnd_010_a_reviewed_exception_is_honoured(tmp_path, monkeypatch):
+    root = _deploy(tmp_path, {"service/sip_reg.py": "X = 1\n"})
+    assert gate.check_reference_point_naming(root) == [
+        "service/sip_reg.py: named for SIP-2 and not listed for it in REFERENCE_POINT_MODULES"]
+    monkeypatch.setattr(gate, "NOT_REFERENCE_POINTS", {"service/sip_reg.py": "a register only"})
+    assert gate.check_reference_point_naming(root) == []
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 3
+# ---------------------------------------------------------------------------
+
+_CAP = "def test_reserved_capacity_fits_within_the_maximum(loaded):\n"
+_SAME = "the suite is the same for every profile"
+_TAKES = (f"{_CONF}:{{L:def test_reserved_capacity_fits_within_the_maximum}}: "
+          "test_reserved_capacity_fits_within_the_maximum takes profile_name; a test gets its "
+          "profile as `loaded`, the same for every profile")
+_AS_SAID = "the suite runs the code as its files say"
+_IMAGES_STEP = "        run: python3 tools/package.py --all --out dist --tar\n"
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("patches,expected", [
+    ({_CONF: (_CAP, _CAP.replace("loaded)", "loaded, profile_name)") +
+              "    if profile_name in ('utility',):\n        return\n")},
+     [_TAKES,
+      f"{_CONF}:{{L:if profile_name in}}: branches on 'utility', a profile's name; {_SAME}",
+      f"{_CONF}:{{L:if profile_name in}}: branches on a profile's name; {_SAME}",
+      f"{_CONF}:{{L:if profile_name in}}: branches on profile_name; {_SAME}",
+      f"{_CONF}:{{L:if profile_name in}}: uses profile_name {_USES}"]),
+    ({_CONF: (_CAP, _CAP.replace("loaded)", "loaded, profile_name)") +
+              "    if profile_name.startswith('util'):\n        return\n")},
+     [_TAKES,
+      f"{_CONF}:{{L:profile_name.startswith}}: branches on 'util', a profile's name; {_SAME}",
+      f"{_CONF}:{{L:profile_name.startswith}}: branches on profile_name; {_SAME}",
+      f"{_CONF}:{{L:profile_name.startswith}}: uses profile_name {_USES}"]),
+    ({_CONF: (_CAP, _CAP + "    if loaded.profile.name[0] == loaded.profile.name[0]:\n"
+                           "        return\n")},
+     [f"{_CONF}:{{L:if loaded.profile.name[0]}}: branches on loaded.profile.name; {_SAME}",
+      f"{_CONF}:{{L:if loaded.profile.name[0]}}: uses loaded.profile.name {_USES}"]),
+    ({_CONF: (_CAP, _CAP + "    who = loaded.profile.name\n")},
+     [f"{_CONF}:{{L:who = loaded.profile.name}}: uses loaded.profile.name {_USES}"]),
+    ({_CONF: (_CAP, _CAP + "    n = 1 if loaded.profile.name else 2\n")},
+     [f"{_CONF}:{{L:n = 1 if loaded}}: branches on loaded.profile.name; {_SAME}",
+      f"{_CONF}:{{L:n = 1 if loaded}}: uses loaded.profile.name {_USES}"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\nimport core.floor  # noqa\n"
+              "core.floor.DEFAULT_TIMERS_MS['T1'] = 1\n")},
+     [f"{_CONF}:{{L:DEFAULT_TIMERS_MS['T1'] = 1}}: changes core.floor.DEFAULT_TIMERS_MS['T1'], "
+      f"which core or service holds; {_AS_SAID}",
+      f"{_CONF}:{{L:DEFAULT_TIMERS_MS['T1'] = 1}}: module level runs assign "
+      "`core.floor.DEFAULT_TIMERS_MS['T1'] = 1`; the suite's module level only imports, binds "
+      "and defines"]),
+    ({_CONF: (_CAP, _CAP + "    from core.floor import DEFAULT_TIMERS_MS\n"
+                           "    DEFAULT_TIMERS_MS.update(T1=1)\n")},
+     [f"{_CONF}:{{L:DEFAULT_TIMERS_MS.update}}: calls DEFAULT_TIMERS_MS.update, changing what "
+      "core or service holds"]),
+    ({_CONF: (_CAP, _CAP + "    import core.session as cs\n    cs.INITIATOR_RECORDED_MAX += 1\n")},
+     [f"{_CONF}:{{L:cs.INITIATOR_RECORDED_MAX += 1}}: changes cs.INITIATOR_RECORDED_MAX, which "
+      f"core or service holds; {_AS_SAID}"]),
+    ({_CONF: (_CAP, _CAP.replace("loaded)", "loaded, monkeypatch)") +
+              "    import core.session\n"
+              "    monkeypatch.setattr(core.session, 'INITIATOR_RECORDED_MAX', 1)\n")},
+     [f"{_CONF}:{{L:loaded, monkeypatch)}}: uses monkeypatch; {_AS_SAID}",
+      f"{_CONF}:{{L:monkeypatch.setattr}}: calls setattr; the suite does not patch or rebind "
+      "the code it runs",
+      f"{_CONF}:{{L:monkeypatch.setattr}}: uses monkeypatch; {_AS_SAID}"]),
+    ({_CONF: (_CAP, _CAP + "    sys.modules['core.floor'].X = 1\n")},
+     [f"{_CONF}:{{L:sys.modules['core.floor']}}: reads sys.modules; the suite does not reach "
+      "past its imports"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\n"
+              "if len(PROFILE_NAMES) == 1:\n    def _replaced_at_run_time():  # noqa\n"
+              "        return []\n")},
+     [f"{_CONF}:{{L:if len(PROFILE_NAMES) == 1}}: module level runs if "
+      "`if len(PROFILE_NAMES) == 1:`; the suite's module level only imports, binds and defines",
+      f"{_CONF}:{{L:def _replaced_at_run_time():  # noqa}}: binds _replaced_at_run_time again; "
+      "the "
+      "reviewed check is the one run"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\n"
+              "_still_as_their_files_say = None\n")},
+     [f"{_CONF}:{{L:_still_as_their_files_say = None}}: binds _still_as_their_files_say again; "
+      "the "
+      "reviewed check is the one run"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\nprint('x')\n")},
+     [f"{_CONF}:{{L:print('x')}}: module level runs expr `print('x')`; the suite's module "
+      "level only imports, binds and defines"]),
+], ids=["in-a-tuple", "startswith", "subscript-branch", "copied", "conditional-expression",
+        "core-dict-mutated", "imported-dict-updated", "augmented", "monkeypatch",
+        "sys-modules", "check-shadowed", "fixture-rebound", "module-level-call"])
+def test_bnd_021_review_probes_round_3(tmp_path, patches, expected):
+    root = _deploy(tmp_path, patches=patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_a_profile_compared_with_another_is_not_a_branch(tmp_path):
+    root = _deploy(tmp_path, patches={_CONF: (_CAP, _CAP + (
+        "    other = loader.load(PROFILES / ALL_PROFILES[0])\n"
+        "    if other.profile.name != loaded.profile.name:\n        pass\n"))})
+    assert gate.check_per_profile_suite(root) == []
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_the_run_time_checks_are_these():
+    assert gate.RUN_TIME_CHECKS == ("_replaced_at_run_time", "_still_as_their_files_say")
+    sys.path.insert(0, str(ROOT / "tests"))
+    import test_conformance as suite
+    import inspect
+    src = inspect.getsource(suite)
+    assert '@pytest.fixture(scope="session", autouse=True)\ndef _still_as_their_files_say():\n' \
+        in src
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_a_dict_changed_at_run_time_is_seen(monkeypatch):
+    sys.path.insert(0, str(ROOT / "tests"))
+    import test_conformance as suite
+    import core.floor
+    monkeypatch.setitem(core.floor.DEFAULT_TIMERS_MS, "T1", 1)
+    assert suite._replaced_at_run_time() == ["core.floor.DEFAULT_TIMERS_MS"]
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_a_change_made_after_the_core_hash_test_fails_the_run(tmp_path):
+    import os
+    import shutil
+    import subprocess
+    for d in ("core", "service", "profiles", "tools", "tests", "docs"):
+        shutil.copytree(ROOT / d, tmp_path / d,
+                        ignore=shutil.ignore_patterns("__pycache__", "interop"))
+    for f in ROOT.glob("*"):
+        if f.is_file():
+            shutil.copy2(f, tmp_path / f.name)
+    suite = tmp_path / _CONF
+    suite.write_text(suite.read_text(encoding="utf-8") +
+                     "\n\ndef test_zz_late():\n    import core.floor\n"
+                     "    core.floor.DEFAULT_TIMERS_MS['T1'] = 1\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
+    env["MCX_PROFILE"] = "utility"
+    env["COLUMNS"] = "400"
+    r = subprocess.run([sys.executable, "-m", "pytest", "-vv", "-rE", "--tb=short",
+                        "-p", "no:cacheprovider", _CONF],
+                       cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 1
+    assert "40 passed, 1 error" in r.stdout
+    assert "assert ['core.floor.DEFAULT_TIMERS_MS'] == []" in r.stdout
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("text,expected", [
+    ("import asyncio\nfrom core.sip import Request\n\nasync def serve(ctx):\n"
+     "    return await asyncio.start_server(lambda r, w: None, '0.0.0.0', 5061, ssl=ctx)\n",
+     "service/x.py:2: puts core.sip's messages on asyncio's start_server, so it implements "
+     "SIP-2, and is not listed for it in REFERENCE_POINT_MODULES"),
+    ("from http import server\n", "service/x.py:1: imports http.server, so it implements "
+     "HTTP-1, and is not listed for it in REFERENCE_POINT_MODULES"),
+    ("from urllib import request\n", "service/x.py:1: imports urllib.request, so it implements "
+     "HTTP-1, and is not listed for it in REFERENCE_POINT_MODULES"),
+    ("L = b'HTTP/1.1 %d %s\\r\\n'\n", "service/x.py:1: writes 'HTTP/1.1 %d %s', so it "
+     "implements HTTP-1, and is not listed for it in REFERENCE_POINT_MODULES"),
+    ("L = 'SIP/2.0 {code} {why}'\n", "service/x.py:1: writes 'SIP/2.0 {code} {why}', so it "
+     "implements SIP-2, and is not listed for it in REFERENCE_POINT_MODULES"),
+    ("L = 'HTTP/1.0 {:03d} OK'\n", "service/x.py:1: writes 'HTTP/1.0 {:03d} OK', so it "
+     "implements HTTP-1, and is not listed for it in REFERENCE_POINT_MODULES"),
+], ids=["sip-on-asyncio", "from-http-import-server", "from-urllib-import-request",
+        "http-status-filled-in", "sip-status-formatted", "http-status-format-spec"])
+def test_bnd_010_review_probes_round_3(tmp_path, text, expected):
+    root = _deploy(tmp_path, {"service/x.py": text})
+    assert gate.check_reference_point_naming(root) == [expected]
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("text", [
+    "import asyncio\nfrom core.sip import Request\n\nasync def later():\n"
+    "    await asyncio.sleep(1)\n",
+    "from http import HTTPStatus\n",
+    "MSG = 'SIP/2.0 is the version this platform speaks'\n",
+], ids=["asyncio-without-a-transport", "http-status-enum", "prose"])
+def test_bnd_010_round_3_does_not_overreach(tmp_path, text):
+    assert gate.check_reference_point_naming(_deploy(tmp_path, {"service/x.py": text})) == []
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,patches,expected", [
+    ({}, {_CI: (_IMAGES_STEP, _IMAGES_STEP + "        env:\n          PYTHONPATH: tests\n")},
+     [f"{_CI}: job images's build step has env; it is the fixed command and nothing else"]),
+    ({f"+{_CI}": "\n  publish:\n    runs-on: ubuntu-latest\n    needs: images\n    steps:\n"
+                 "      - uses: actions/checkout@v4\n"
+                 "      - run: tar czf all.tgz core service profiles\n"}, {},
+     [f"{_CI}: job publish packs or publishes outside the images job's upload: "
+      "tar czf all.tgz core service profiles"]),
+    ({f"+{_CI}": "\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n"
+                 "      - run: gh release upload v1 dist/x\n"}, {},
+     [f"{_CI}: job publish packs or publishes outside the images job's upload: "
+      "gh release upload v1 dist/x"]),
+    ({f"+{_CI}": "\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n"
+                 "      - uses: softprops/action-gh-release@v2\n"}, {},
+     [f"{_CI}: job publish uses softprops/action-gh-release@v2; a workflow sets up, runs and "
+      "uploads the images artifact, nothing else"]),
+    ({"release/make_images.py": "import subprocess\n"
+                                "subprocess.run(['python3', 'tools/package.py', '--profile', "
+                                "'frmcs'])\n"}, {},
+     [f"release/make_images.py:2: a build file names the profile 'frmcs'; {_BUILD}"]),
+    ({"service/x.py": "def ext(hooks):\n    return getattr(hooks, 'frmcs_extension', None)\n"},
+     {}, ["service/x.py:2: shared code is written for the profile 'frmcs' (frmcs_extension), "
+          "but every image carries only one"]),
+    ({"service/x.py": "import operator\nGET = operator.attrgetter('utility_rate')\n"},
+     {}, ["service/x.py:2: shared code is written for the profile 'utility' (utility_rate), "
+          "but every image carries only one"]),
+], ids=["build-step-env", "tar-in-a-job", "gh-release", "release-action",
+        "build-script-elsewhere", "getattr-string", "attrgetter-string"])
+def test_bnd_006_review_probes_round_3(tmp_path, files, patches, expected):
+    root = _deploy(tmp_path, files, patches)
+    assert _images(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files", [
+    {"bench/run.py": "print('frmcs')\n"},
+    {f"+{_CI}": "\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: python3 -m compileall -q core\n"},
+], ids=["python-elsewhere-not-building", "ordinary-job"])
+def test_bnd_006_round_3_does_not_overreach(tmp_path, files):
+    assert _images(_deploy(tmp_path, files)) == []
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_lines_end_where_python_ends_them():
+    src = 'x = 1\x0c  # c\ny = """d\x0cz"""  # e\n'
+    assert gate.fingerprint_text(src, None) == 'x = 1\ny = """d\x0cz"""'
+
+
+@pytest.mark.vp("VP1-BND-006", "VP1-BND-011", "VP1-BND-021")
+def test_bnd_006_a_cut_that_takes_code_gives_no_fingerprint(monkeypatch):
+    """The backstop: if what is left out ever held code (here a tokenizer
+    calling `return 1` a comment), the text hashed is not the module, and
+    there is no fingerprint for a pin to match."""
+    import tokenize
+    real = tokenize.generate_tokens
+
+    def lying(readline):
+        for tok in real(readline):
+            if tok.string == "return":
+                yield tok._replace(type=tokenize.COMMENT, end=(tok.start[0], tok.start[1] + 8))
+            elif tok.type != tokenize.NUMBER:
+                yield tok
+    monkeypatch.setattr(tokenize, "generate_tokens", lying)
+    assert gate.fingerprint_text("def f():\n    x = 2\n    return 1\n", None) is None
+    assert gate.source_fingerprint("def f():\n    x = 2\n    return 1\n", None) == ""
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 4
+# ---------------------------------------------------------------------------
+
+_WF = (f"{_CI}: has changed since it was reviewed; review it and update REVIEWED_WORKFLOW")
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_the_workflow_is_pinned(tmp_path):
+    assert gate.REVIEWED_WORKFLOW == (_CI, gate.workflow_fingerprint(ROOT))
+    # Comments and layout are not the workflow; a job is.
+    same = _deploy(tmp_path / "same", patches={_CI: ("jobs:\n", "# reviewed\njobs:\n\n")})
+    assert gate.check_per_profile_images(same) == []
+    for i, job in enumerate((
+            "      - run: python3 -m zipfile -c all.zip core service profiles\n",
+            "      - run: git push -f https://example.org/mcx-images.git HEAD:main\n",
+            "      - run: python3 -c \"print('ok')\"\n")):
+        root = _deploy(tmp_path / str(i), {f"+{_CI}": "\n  publish:\n    runs-on: ubuntu-latest\n"
+                                                      "    steps:\n" + job})
+        assert gate.check_per_profile_images(root) == [_WF]
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_an_unreadable_workflow_matches_no_pin(tmp_path):
+    root = _deploy(tmp_path, patches={_CI: ("jobs:\n", "jobs: [\n")})
+    assert gate.workflow_fingerprint(root) == ""
+    (tmp_path / "x").mkdir()
+    assert gate.workflow_fingerprint(tmp_path / "x") == ""
+
+
+@pytest.mark.vp("VP1-BND-006")
+@pytest.mark.parametrize("files,expected", [
+    ({"release/frmcs_image.py": "import shutil\n"
+                                "shutil.copytree('profiles/frmcs', 'out/profiles/frmcs')\n"},
+     ["release/frmcs_image.py: per-profile build variant; the profile is data given to "
+      "tools/package.py, not a build file"]),
+    ({"release/image.py": "import shutil, os\n"
+                          "shutil.copytree(os.path.join('profiles', 'utility'), 'out')\n"},
+     ["release/image.py:2: a build file names the profile 'utility'; " + _BUILD]),
+], ids=["copies-one-profile", "joins-a-profile-path"])
+def test_bnd_006_python_reaching_into_profiles_is_a_build_file(tmp_path, files, expected):
+    assert gate.check_per_profile_images(_deploy(tmp_path, files)) == expected
+
+
+@pytest.mark.vp("VP1-BND-010")
+@pytest.mark.parametrize("text,expected", [
+    ("from xmlrpc.server import SimpleXMLRPCServer\n",
+     "service/x.py:1: imports xmlrpc.server, so it implements HTTP-1, and is not listed for "
+     "it in REFERENCE_POINT_MODULES"),
+    ("import xmlrpc.client\n",
+     "service/x.py:1: imports xmlrpc.client, so it implements HTTP-1, and is not listed for "
+     "it in REFERENCE_POINT_MODULES"),
+    ("import http\n\ndef c(h):\n    return http.client.HTTPSConnection(h)\n",
+     "service/x.py:4: uses http.client, so it implements HTTP-1, and is not listed for it in "
+     "REFERENCE_POINT_MODULES"),
+    ("import socket\nfrom service.sip_txn import ServerTxn\n",
+     "service/x.py:2: puts service.sip_txn's messages on socket, so it implements SIP-2, and "
+     "is not listed for it in REFERENCE_POINT_MODULES"),
+    ("import ssl\nfrom service import sip_core\n",
+     "service/x.py:2: puts service.sip_core's messages on ssl, so it implements SIP-2, and is "
+     "not listed for it in REFERENCE_POINT_MODULES"),
+], ids=["xmlrpc-server", "xmlrpc-client", "http-as-attribute", "sip-txn-on-a-socket",
+        "sip-core-on-ssl"])
+def test_bnd_010_review_probes_round_4(tmp_path, text, expected):
+    root = _deploy(tmp_path, {"service/x.py": text})
+    assert gate.check_reference_point_naming(root) == [expected]
+
+
+@pytest.mark.vp("VP1-BND-010")
+def test_bnd_010_a_sip_module_alone_is_not_a_transport(tmp_path):
+    root = _deploy(tmp_path, {"service/x.py": "from service.sip_txn import ServerTxn\n"
+                                              "import http\nX = http.HTTPStatus.OK\n"})
+    assert gate.check_reference_point_naming(root) == []
+
+
+_UND = "def test_undeclared_call_type_is_refused(manager):\n"
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("patches,expected", [
+    ({_CONF: (_UND, _UND.replace("manager)", "manager, profile_name)") +
+              "    match profile_name:\n        case 'utility':\n            return\n")},
+     [f"{_CONF}:{{L:{_UND[:-1]}}}".replace("(manager):", "(manager, profile_name):") +
+      ": test_undeclared_call_type_is_refused takes profile_name; a test gets its profile "
+      "as `loaded`, the same for every profile",
+      f"{_CONF}:{{L:match profile_name}}: branches on profile_name; {_SAME}",
+      f"{_CONF}:{{L:match profile_name}}: uses profile_name {_USES}",
+      f"{_CONF}:{{L:case 'utility'}}: branches on 'utility', a profile's name; {_SAME}"]),
+    ({_CONF: (_CAP, _CAP + "    flaky = {'utility': True}.get(loaded.profile.name)\n")},
+     [f"{_CONF}:{{L:flaky = }}: uses loaded.profile.name {_USES}",
+      f"{_CONF}:{{L:flaky = }}: writes 'utility', a profile's name; the suite is the same for every profile"]),
+    ({_CONF: (_CAP, _CAP + "    if 'utility' in loaded.profile.identifier():\n"
+                           "        return\n")},
+     [f"{_CONF}:{{L:in loaded.profile.identifier()}}: branches on 'utility', a profile's "
+      f"name; {_SAME}",
+      f"{_CONF}:{{L:in loaded.profile.identifier()}}: branches on "
+      f"loaded.profile.identifier(); {_SAME}",
+      f"{_CONF}:{{L:in loaded.profile.identifier()}}: uses loaded.profile.identifier() "
+      f"{_USES}"]),
+    ({_CONF: (_CAP, _CAP + "    if loaded.profile.version:\n        return\n")},
+     [f"{_CONF}:{{L:if loaded.profile.version}}: branches on loaded.profile.version; {_SAME}",
+      f"{_CONF}:{{L:if loaded.profile.version}}: uses loaded.profile.version {_USES}"]),
+    ({_CONF: (_CAP, _CAP + "    import importlib\n"
+                           "    mod = importlib.import_module('core.session')\n"
+                           "    mod.INITIATOR_RECORDED_MAX = 1\n")},
+     [f"{_CONF}:{{L:    import importlib}}: imports importlib; the suite imports the "
+      "platform, the packager and SUITE_IMPORTS, and reaches a profile only through core's "
+      "loader",
+      f"{_CONF}:{{L:importlib.import_module}}: calls import_module; the suite does not patch "
+      "or rebind the code it runs"]),
+    ({_CONF: (_CAP, _CAP + "    type(loaded).hooks = None\n")},
+     [f"{_CONF}:{{L:type(loaded).hooks}}: {_TYPE}{_SAME}",
+      f"{_CONF}:{{L:type(loaded).hooks}}: changes type(loaded).hooks, reached through a "
+      f"call; {_AS_SAID}",
+      f"{_CONF}:{{L:type(loaded).hooks}}: uses the hook type(loaded).hooks {_HOOK}"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\nROOT = Path('.')\n")},
+     [f"{_CONF}:{{L:ROOT = Path('.')}}: binds ROOT again at module level (first at line "
+      "{L:ROOT = Path(__file__)}); each module-level name is bound once"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\n"
+              "from pathlib import PurePath as Path  # noqa\n")},
+     [f"{_CONF}:{{L:PurePath as Path}}: binds Path again at module level (first at line "
+      "{L:from pathlib import Path}); each module-level name is bound once"]),
+    ({_CONF: (_CAP, _CAP + "    flaky = dict(who=loaded.profile.name)\n")},
+     [f"{_CONF}:{{L:flaky = dict}}: uses loaded.profile.name {_USES}"]),
+    ({_CONF: (_CAP, _CAP + "    where = PROFILES.joinpath('x') * 0 or PROFILES * loaded.profile.name\n")},
+     [f"{_CONF}:{{L:where = PROFILES}}: uses loaded.profile.name {_USES}"]),
+    ({_CONF: (_CAP, _CAP.replace("loaded)", "loaded, request)") +
+              "    who = request.param\n")},
+     [f"{_CONF}:{{L:who = request.param}}: uses request.param {_USES}"]),
+], ids=["match", "dict-get", "identifier", "version", "importlib-alias", "type-of-instance",
+        "root-rebound", "path-rebound", "keyword-elsewhere", "other-operator",
+        "param-outside-a-fixture"])
+def test_bnd_021_review_probes_round_4(tmp_path, patches, expected):
+    root = _deploy(tmp_path, patches=patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_where_a_profile_may_be_named(tmp_path):
+    """The suite's own uses, each an allowed one: the loader's path, an
+    assertion, the packager's argument, an f-string, another profile."""
+    assert gate.PROFILE_NAME_TESTS == (
+        "test_profile_loads",
+        "test_the_suite_runs_against_the_core_of_the_profiles_release_image")
+    assert gate._IDENTITY_ATTRS == {"name", "version", "content_hash"}
+    root = _deploy(tmp_path, patches={_CONF: (_CAP, _CAP + (
+        "    from core.audit import Auditor as A\n"
+        "    A(MemorySink(), loaded.profile.identifier(), clock=Clock())\n"
+        "    A(MemorySink(), source=loaded.profile.identifier(), clock=Clock())\n"
+        "    assert loaded.profile.version is not None\n"))})
+    assert gate.check_per_profile_suite(root) == []
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 5
+# ---------------------------------------------------------------------------
+
+_UND_LOADED = "def test_undeclared_call_type_is_refused(manager):\n"
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("patches,expected", [
+    ({_CONF: (_UND_LOADED, _UND_LOADED.replace("manager)", "manager, loaded)") +
+              "    if 'utility' in loaded.source.parts:\n        return\n")},
+     [f"{_CONF}:{{L:in loaded.source.parts}}: branches on 'utility', a profile's name; {_SAME}",
+      f"{_CONF}:{{L:in loaded.source.parts}}: reads loaded.source, a profile's directory; "
+      f"{_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    if PROFILE_NAMES == ['UTILITY']:\n"
+                                         "        return\n")},
+     [f"{_CONF}:{{L:if PROFILE_NAMES ==}}: branches on 'UTILITY', a profile's name; {_SAME}",
+      f"{_CONF}:{{L:if PROFILE_NAMES ==}}: reads PROFILE_NAMES, the profiles this run "
+      f"selects; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED.replace("manager)", "manager, request)") +
+              "    p = request.node.callspec.params\n")},
+     [f"{_CONF}:{{L:p = request.node}}: reads request.node, pytest's record of the "
+      f"parameters; {_SAME}",
+      f"{_CONF}:{{L:p = request.node}}: reads request.node.callspec, pytest's record of the "
+      f"parameters; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED.replace("manager)", "manager, request)") +
+              "    v = request.getfixturevalue('loaded')\n")},
+     [f"{_CONF}:{{L:request.getfixturevalue}}: reads request.getfixturevalue, pytest's record "
+      f"of the parameters; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    x = [1 for c in 'ab' if c.startswith('frm')]\n")},
+     [f"{_CONF}:{{L:c.startswith('frm')}}: branches on 'frm', a profile's name; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    match manager:\n        case 'mcx-core':\n"
+                                         "            return\n")},
+     [f"{_CONF}:{{L:case 'mcx-core'}}: branches on 'mcx-core', a profile's name; {_SAME}"]),
+], ids=["source-parts", "selection-constant", "callspec", "getfixturevalue",
+        "prefix-in-a-comprehension", "case-holding-a-name"])
+def test_bnd_021_review_probes_round_5(tmp_path, patches, expected):
+    root = _deploy(tmp_path, patches=patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_branches_on_declared_data_stay(tmp_path):
+    """The words of the platform are not profile names: 'voice' in a call
+    type's media, a string shorter than three letters, ALL_PROFILES walked."""
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, _UND_LOADED + (
+        "    if 'voice' in 'voice video' or 'mc' == 'm':\n        pass\n"
+        "    if [n for n in ALL_PROFILES if n]:\n        pass\n"))})
+    assert gate.check_per_profile_suite(root) == []
+
+
+@pytest.mark.vp("VP1-BND-006")
+def test_bnd_006_a_scalar_read_two_ways_is_refused(tmp_path):
+    assert gate._ambiguous_scalars(
+        "on:\n  push:\nx: [015, 14, 1_000, 1:20, yes, Off, \"yes\", '015', 3.11, 0, 10, v4]\n"
+        "y: 0x_1f\nz: 0b1\n") == [(3, "015"), (3, "1:20"), (3, "1_000"), (3, "Off"), (3, "yes"),
+                                  (4, "0x_1f"), (5, "0b1")]
+    assert gate._ambiguous_scalars("x: [\n") == []
+    root = _deploy(tmp_path, patches={_CI: ("release: [13, ", "release: [015, ")})
+    assert gate.check_per_profile_images(root) == _lines(root, [
+        f"{_CI}:{{L:release: [015}}: '015' reads one way in YAML 1.1 (the pin) and another in "
+        "YAML 1.2 (the runner); quote it or write it plainly"])
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 6
+# ---------------------------------------------------------------------------
+
+_WRITES = ", a profile's name; the suite is the same for every profile"
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("patches,expected", [
+    ({_CONF: ("def manager(loaded):\n",
+              "def exempt(loaded):\n    return 'utility' in loaded.source.parts\n\n\n"
+              "@pytest.fixture\ndef manager(loaded):\n")},
+     [f"{_CONF}:{{L:return 'utility' in}}: reads loaded.source, a profile's directory; "
+      f"{_SAME}",
+      f"{_CONF}:{{L:return 'utility' in}}: writes 'utility'{_WRITES}"]),
+    ({_CONF: ("RELEASES = _releases()\n", "RELEASES = _releases()\n"
+              "STUB_HOOKS = 'profiles.frmcs.hooks'\n")},
+     [f"{_CONF}:{{L:STUB_HOOKS = }}: writes 'profiles.frmcs.hooks'{_WRITES}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED.replace("manager)", "manager, stub='Profiles.FRMCS')"))},
+     [f"{_CONF}:{{L:stub='Profiles.FRMCS'}}: writes 'Profiles.FRMCS'{_WRITES}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    m = type(manager).__module__\n"
+                                         "    q = type(manager).__qualname__\n")},
+     [f"{_CONF}:{{L:m = type(manager)}}: {_TYPE}{_SAME}",
+      f"{_CONF}:{{L:m = type(manager)}}: reads type(manager).__module__, which names where "
+      f"code comes from, a profile's package among them; {_SAME}",
+      f"{_CONF}:{{L:q = type(manager)}}: {_TYPE}{_SAME}",
+      f"{_CONF}:{{L:q = type(manager)}}: reads type(manager).__qualname__, which names where "
+      f"code comes from, a profile's package among them; {_SAME}"]),
+    ({_CONF: ("def loaded(profile_name):\n",
+              "def loaded(profile_name):\n    assert PROFILE_NAMES\n")},
+     [f"{_CONF}:{{L:    assert PROFILE_NAMES}}: reads PROFILE_NAMES, the profiles this run "
+      f"selects; {_SAME}"]),
+], ids=["fixture-flag", "name-bound-outside", "default-argument", "where-code-comes-from",
+        "selection-in-a-fixture"])
+def test_bnd_021_review_probes_round_6(tmp_path, patches, expected):
+    root = _deploy(tmp_path, patches=patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_the_environment_and_docstrings_may_name_the_platform(tmp_path):
+    """MCX_PROFILE and MCX_RELEASE are the suite's inputs, and a docstring
+    is not code: neither is a profile named."""
+    assert gate._SUITE_ENV.sub("", "MCX_PROFILE=x MCX_RELEASE") == "=x "
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, _UND_LOADED + (
+        "    '''Not for frmcs, nor utility.'''\n"
+        "    x = os.environ.get('MCX_RELEASE', 'MCX_PROFILE=')\n"))})
+    assert gate.check_per_profile_suite(root) == []
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 7
+# ---------------------------------------------------------------------------
+
+_IMPORTS = ("the suite imports the platform, the packager and SUITE_IMPORTS, and reaches a "
+            "profile only through core's loader")
+_WHERE = "which names where code comes from, a profile's package among them; "
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("patches,expected", [
+    ({_CONF: ("from core.session import SessionManager  # noqa: E402\n",
+              "from core.session import SessionManager  # noqa: E402\n"
+              "from profiles.common.tables import TableSessionPolicy  # noqa: E402\n")},
+     [f"{_CONF}:{{L:from profiles.common.tables}}: imports profiles.common.tables; "
+      f"{_IMPORTS}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    import inspect  # probe\n")},
+     [f"{_CONF}:{{L:import inspect  # probe}}: imports inspect; {_IMPORTS}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    from importlib import import_module as im\n")},
+     [f"{_CONF}:{{L:from importlib import}}: imports importlib; {_IMPORTS}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    from tests import helper2\n")},
+     [f"{_CONF}:{{L:from tests import helper2}}: imports tests.helper2; {_IMPORTS}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    if b'frmcs' in b'x':\n        return\n")},
+     [f"{_CONF}:{{L:if b'frmcs'}}: branches on b'frmcs', a profile's name; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    X = b'UTILITY'\n")},
+     [f"{_CONF}:{{L:X = b'UTILITY'}}: writes b'UTILITY', a profile's name; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    ok = isinstance(manager, object)\n")},
+     [f"{_CONF}:{{L:ok = isinstance}}: calls isinstance, asking what an object is; a "
+      f"profile's hook class tells the profiles apart; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    ok = issubclass(int, object)\n")},
+     [f"{_CONF}:{{L:ok = issubclass}}: calls issubclass, asking what an object is; a "
+      f"profile's hook class tells the profiles apart; {_SAME}"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    c = manager.__class__\n    f = os.__file__\n")},
+     [f"{_CONF}:{{L:c = manager.__class__}}: reads manager.__class__, {_WHERE}{_SAME}",
+      f"{_CONF}:{{L:f = os.__file__}}: reads os.__file__, {_WHERE}{_SAME}"]),
+    ({"tests/mcpttinfo_fixture.py": ("import re\n", "import re\nX = 1\n")},
+     ["tests/mcpttinfo_fixture.py: has changed since it was reviewed; review it and update "
+      "SUITE_HELPERS"]),
+    ({_CONF: (_UND_LOADED, _UND_LOADED + "    import requests, core_extras\n")},
+     [f"{_CONF}:{{L:import requests, core_extras}}: imports core_extras; {_IMPORTS}",
+      f"{_CONF}:{{L:import requests, core_extras}}: imports requests; {_IMPORTS}"]),
+], ids=["profiles-import", "inspect", "importlib", "unreviewed-helper", "bytes-in-a-branch",
+        "bytes-bound", "isinstance", "issubclass", "class-and-file", "helper-changed",
+        "a-name-that-only-starts-alike"])
+def test_bnd_021_review_probes_round_7(tmp_path, patches, expected):
+    root = _deploy(tmp_path, patches=patches)
+    assert gate.check_per_profile_suite(root) == _lines(root, expected)
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_what_the_suite_may_import():
+    assert gate.SUITE_IMPORTS == ("__future__", "os", "sys", "pathlib", "pytest", "json", "re",
+                                  "core", "service", "package", "tests.mcpttinfo_fixture")
+    assert gate._RUN_TIME_CHECK_IMPORTS == ("ast", "copy", "inspect")
+    assert set(gate.SUITE_HELPERS) == {"tests/mcpttinfo_fixture.py"}
+    for rel, fingerprint in gate.SUITE_HELPERS.items():
+        assert gate.file_fingerprint(ROOT, rel) == fingerprint
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_the_cores_file_may_be_read(tmp_path):
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, _UND_LOADED + (
+        "    import core.floor\n    f = core.floor.__file__\n"))})
+    assert gate.check_per_profile_suite(root) == []
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 8
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("line,expected", [
+    ("if repr(loaded.hooks.session_policy).startswith('<'):\n        return",
+     ["{L:if repr(}: calls repr, the text of an object, which names its class; " + _SAME,
+      "{L:if repr(}: uses the hook loaded.hooks.session_policy " + _HOOK]),
+    ("if getattr(loaded.hooks.session_policy, '__module__').endswith('.common.tables'):\n"
+     "        return",
+     ["{L:if getattr(}: calls getattr for '__module__', which names where code comes from; "
+      + _SAME,
+      "{L:if getattr(}: uses the hook loaded.hooks.session_policy " + _HOOK]),
+    ("if '.common.' in str(loaded.hooks.bearer_selector):\n        return",
+     ["{L:in str(loaded}: uses the hook loaded.hooks.bearer_selector " + _HOOK]),
+    ("policy = loaded.hooks.session_policy\n    text = f'{policy}'",
+     ["{L:text = f'}: uses the hook policy " + _HOOK]),
+    ("policy = loaded.hooks.session_policy\n    t = policy.table",
+     ["{L:t = policy.table}: uses the hook policy " + _HOOK]),
+    ("same = loaded.hooks.session_policy == loaded.hooks.priority_policy",
+     ["{L:same = loaded.hooks}: uses the hook loaded.hooks.priority_policy " + _HOOK,
+      "{L:same = loaded.hooks}: uses the hook loaded.hooks.session_policy " + _HOOK]),
+    ("x = getattr(loaded.hooks.session_policy, 'table')",
+     ["{L:x = getattr(}: uses the hook loaded.hooks.session_policy " + _HOOK]),
+    ("n = id(manager) + len(format(1, 'd')) + len(ascii(1))",
+     ["{L:n = id(manager)}: calls ascii, the text of an object, which names its class; "
+      + _SAME,
+      "{L:n = id(manager)}: calls format, the text of an object, which names its class; "
+      + _SAME,
+      "{L:n = id(manager)}: calls id, the text of an object, which names its class; " + _SAME]),
+    ("assert loaded.hooks.session_policy is not loaded.hooks.priority_policy",
+     ["{L:assert loaded.hooks.session_policy is not}: uses the hook "
+      "loaded.hooks.priority_policy " + _HOOK,
+      "{L:assert loaded.hooks.session_policy is not}: uses the hook "
+      "loaded.hooks.session_policy " + _HOOK]),
+    ("ok = loaded.hooks.session_policy is None",
+     ["{L:ok = loaded.hooks}: uses the hook loaded.hooks.session_policy " + _HOOK]),
+    ("k = getattr(manager, '__class__', None)",
+     ["{L:k = getattr(manager}: calls getattr for '__class__', which names where code comes "
+      "from; " + _SAME]),
+], ids=["repr", "getattr-dunder", "str", "f-string-of-an-alias", "attribute-read",
+        "compared", "getattr-by-literal", "other-text", "asserted-against-another",
+        "none-check-outside-an-assert", "getattr-another-dunder"])
+def test_bnd_021_review_probes_round_8(tmp_path, line, expected):
+    sig = _UND_LOADED.replace("manager)", "manager, loaded)")
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, sig + "    " + line + "\n")})
+    assert gate.check_per_profile_suite(root) == _lines(root, [f"{_CONF}:" + e for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_hooks_may_be_called_handed_on_and_asserted(tmp_path):
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, _UND_LOADED.replace(
+        "manager)", "manager, loaded)") + (
+        "    policy = loaded.hooks.priority_policy\n"
+        "    _ = policy.evaluate(None, None) if False else None\n"
+        "    SessionManager(loaded, Auditor(MemorySink(), 'x', clock=Clock()), clock=Clock())\n"
+        "    for field in ('priority_policy',):\n"
+        "        assert getattr(loaded.hooks, field) is not None\n"))})
+    assert gate.check_per_profile_suite(root) == []
+
+
+# ---------------------------------------------------------------------------
+# Batch D, review round 9
+# ---------------------------------------------------------------------------
+
+_DUNDER = ", a dunder, which reaches past what the object offers (its text, its class); "
+
+
+@pytest.mark.vp("VP1-BND-021")
+@pytest.mark.parametrize("line,expected", [
+    ("if loaded.hooks.session_policy.__repr__().startswith('<'):\n        return",
+     ["{L:__repr__()}: uses loaded.hooks.session_policy.__repr__" + _DUNDER + _SAME]),
+    ("t = loaded.hooks.session_policy.__getattribute__('table')",
+     ["{L:__getattribute__}: uses loaded.hooks.session_policy.__getattribute__" + _DUNDER +
+      _SAME]),
+    ("t = manager.__sizeof__()",
+     ["{L:__sizeof__}: uses manager.__sizeof__" + _DUNDER + _SAME]),
+], ids=["repr-as-a-method", "getattribute", "any-dunder"])
+def test_bnd_021_review_probes_round_9(tmp_path, line, expected):
+    sig = _UND_LOADED.replace("manager)", "manager, loaded)")
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, sig + "    " + line + "\n")})
+    assert gate.check_per_profile_suite(root) == _lines(root, [f"{_CONF}:" + e for e in expected])
+
+
+@pytest.mark.vp("VP1-BND-021")
+def test_bnd_021_dunders_outside_tests_are_not_judged_here(tmp_path):
+    """A dunder at module level (`__file__` for ROOT) or a core module's
+    `__file__` (CORE_HASH_TEST) is not a test asking what an object is."""
+    root = _deploy(tmp_path, patches={_CONF: (_UND_LOADED, _UND_LOADED + (
+        "    import service.media\n    f = service.media.__file__\n"
+        "    p = manager.__private if False else None\n"))})
+    assert gate.check_per_profile_suite(root) == []
