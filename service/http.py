@@ -27,6 +27,9 @@ from .http_tls import (HANDSHAKE_TIMEOUT_S, IDLE_TIMEOUT_S, MAX_CONNECTIONS,
                        MAX_PER_CLIENT, REQUEST_DEADLINE_S)
 from .runtime import Runtime
 
+# PLT-PRF-032: this module implements the HTTP-1 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "HTTP-1"
+
 log = logging.getLogger("mcx.http")
 
 GROUPS_PREFIX = "/docs/groups"

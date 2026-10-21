@@ -20,6 +20,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.sip import ReceivedResponse, Request
 
+# PLT-PRF-032: this module implements the SIP-2 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "SIP-2"
+
 T1_MS = 500
 T2_MS = 4000
 _BRANCH = re.compile(r"branch=([^;,\s>]+)")

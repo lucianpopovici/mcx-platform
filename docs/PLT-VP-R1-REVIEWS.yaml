@@ -417,23 +417,49 @@ VP1-BND-005:
     profiles.<own> or profiles.common: checked by the gate only, not the loader (a runtime check
     would refuse test hooks and deployments whose profiles root has another name).
 VP1-BND-006:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-20'
   evidence:
-  - gate:VP1-BND-006
-  gap: 'Rules 1-2 are checked on images the gate itself stages from one tree, so core-hash identity is
-    true by construction; it is not compared against the images CI actually builds/publishes (the `images`
-    job output) or the recorded release manifests. Rule 3 (no shared code names a profile) scans only
-    .py files and only `profiles.<name>` or `/ ''<name>''`: probed misses are a bare literal `DEFAULT
-    = ''mcx''` in service/, the string ''profiles/mcx/hooks.py'', a shared YAML under profiles/common
-    naming mcx. Rule 4 (no per-profile build file) checks filenames only: `ARG PROFILE=mcx` + `COPY profiles/mcx`
-    inside the one Containerfile passes, as would a per-profile Makefile target or a script not matching
-    build-*.sh. Close with: compare core_hash across the CI-built image manifests; scan all shared files
-    (any type) and build files'' contents for any profile name as a whole token; enumerate build files
-    by content, not name pattern.'
-  note: Image count/hash invariants are exact for staged images; the naming rules are heuristic by the
-    gate's own admission.
+    - gate:VP1-BND-006
+    - tests/test_boundary.py::test_batch_d_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_006_a_cut_that_takes_code_gives_no_fingerprint
+    - tests/test_boundary.py::test_bnd_006_a_scalar_read_two_ways_is_refused
+    - tests/test_boundary.py::test_bnd_006_accepts_the_platform_name_and_comments
+    - tests/test_boundary.py::test_bnd_006_an_unreadable_workflow_matches_no_pin
+    - tests/test_boundary.py::test_bnd_006_catches_a_core_that_differs_between_images
+    - tests/test_boundary.py::test_bnd_006_catches_the_variants
+    - tests/test_boundary.py::test_bnd_006_does_not_read_ordinary_words_as_profiles
+    - tests/test_boundary.py::test_bnd_006_lines_end_where_python_ends_them
+    - tests/test_boundary.py::test_bnd_006_no_code_hides_in_what_the_fingerprint_leaves_out
+    - tests/test_boundary.py::test_bnd_006_python_comments_are_not_code
+    - tests/test_boundary.py::test_bnd_006_python_reaching_into_profiles_is_a_build_file
+    - tests/test_boundary.py::test_bnd_006_requirements_name_packages_not_profiles
+    - tests/test_boundary.py::test_bnd_006_review_probes_round_1
+    - tests/test_boundary.py::test_bnd_006_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_006_review_probes_round_3
+    - tests/test_boundary.py::test_bnd_006_round_3_does_not_overreach
+    - tests/test_boundary.py::test_bnd_006_the_fingerprint_is_the_source_text_less_comments_and_docstrings
+    - tests/test_boundary.py::test_bnd_006_the_framework_and_the_images_step_are_these
+    - tests/test_boundary.py::test_bnd_006_the_images_are_built_once
+    - tests/test_boundary.py::test_bnd_006_the_reviewed_files_are_these
+    - tests/test_boundary.py::test_bnd_006_the_workflow_is_pinned
+  note: >-
+    Re-reviewed after RES-OP-09 (batch D, five rounds after the rebuild). VP1-BND-006 is signed
+    on round 5. Rules 1-2 are read from the staged images and a pinned packager (REVIEWED_FILES,
+    a source fingerprint: the text less docstrings and comments, the same on every Python
+    version, re-parsed so no code hides in what is left out); CI is pinned as reviewed data
+    (REVIEWED_WORKFLOW), so any new job, step or key is a change to review, and a scalar YAML
+    1.1 and 1.2 read differently (015, 1_000, 1:20, yes/no) is refused; the specific image rules
+    (one build step, exactly IMAGES_RUN after IMAGES_SETUP, only the upload after it, no other
+    action, no pack or publish) stay as defence in depth. Rule 3 covers paths, strings (folded,
+    any case, bytes), identifiers and attribute names given as strings in every shared file;
+    rule 4 covers deployment files, build Python (a build directory, or anywhere outside core/
+    and service/ that runs the packager or a container tool or reaches into profiles/), #!
+    scripts and other workflows. Recorded residue: (a) profile names built at run time from
+    parts that are not literals; (b) the platform name mcx as a bare word, by design; (c) the
+    YAML 1.1/1.2 scalar ambiguity of the workflow pin, since refused (round 6); (d) a file named
+    for the profile utility that means something else is reported and renamed, not allowed.
 VP1-BND-007:
   verdict: pass
   by: independent review (agent)
@@ -505,19 +531,39 @@ VP1-BND-009:
   - tests/test_boundary.py::test_the_state_machine_gate_catches_an_unjustified_profile_read
   note: 'Re-reviewed after RES-OP-10 (case amended on the owner''s ruling). The gate covers floor control, the SIP session and session state machine, media and the documents; each reads only listed profile attributes with their reasons, through aliases and getattr/vars too; the floor machine reads only its timers and TS 24.380 parameters, and its Policy carries no others. HEURISTIC: attrgetter and sub-attributes of an allowed read are not seen.'
 VP1-BND-010:
-  verdict: fail
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-20'
   evidence:
-  - gate:VP1-BND-010
-  gap: 'The criterion is about module boundaries corresponding to 3GPP reference points in PLT-SRS §3.1
-    (SIP-2, HTTP-1, CSC-1/4/8/9, Rx/N5, MB2/xMB, OBAPP/TSAPP). The gate only checks that the six internal
-    hook ids "IF-IDR"…"IF-ICX" appear as string literals somewhere in core/ — those are platform hook
-    interfaces, not reference points, and presence of a string anywhere says nothing about how a boundary/module
-    is named. No reference-point name appears in core/ or service/ .py at all (grep SIP-2/HTTP-1: none).
-    Close with: a table mapping each §3.1 reference point in phase to the module/class implementing it,
-    and a check that the module/class name or declared constant carries that reference-point name.'
-  note: Evidence checks a different property from the one the criterion states.
+    - gate:VP1-BND-010
+    - tests/test_boundary.py::test_batch_d_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_010_a_reviewed_exception_is_honoured
+    - tests/test_boundary.py::test_bnd_010_a_sip_module_alone_is_not_a_transport
+    - tests/test_boundary.py::test_bnd_010_accepts_an_annotated_declaration
+    - tests/test_boundary.py::test_bnd_010_catches_the_variants
+    - tests/test_boundary.py::test_bnd_010_each_module_says_which_reference_point_it_implements
+    - tests/test_boundary.py::test_bnd_010_reports_in_the_same_order_whatever_the_hash_seed
+    - tests/test_boundary.py::test_bnd_010_review_probes_round_1
+    - tests/test_boundary.py::test_bnd_010_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_010_review_probes_round_3
+    - tests/test_boundary.py::test_bnd_010_review_probes_round_4
+    - tests/test_boundary.py::test_bnd_010_round_3_does_not_overreach
+    - tests/test_boundary.py::test_bnd_010_the_protocol_marks_are_these
+    - tests/test_boundary.py::test_bnd_010_the_reference_points_are_these
+  note: >-
+    Re-reviewed after RES-OP-09 (batch D, five rounds after the rebuild). VP1-BND-010 is signed
+    on round 5. Every PLT-SRS §3.1 R1 interface (SIP-2, HTTP-1) has its modules listed in
+    REFERENCE_POINT_MODULES; each declares REFERENCE_POINT, checked statically and at import. A
+    runtime module implements a reference point, and must be listed for it, when its file or
+    package name carries the protocol stem (a token, any case), it imports an HTTP stack (the
+    standard library's and the common frameworks', xmlrpc included, through from X import Y and
+    dotted attribute use too), it writes SIP or HTTP version or start-line text (str or bytes, a
+    filled-in status included), or it puts SIP-2 messages (core.sip's or a listed SIP-2
+    module's) on a socket, ssl or asyncio transport; no class in a listed module is named for
+    the other reference point. Recorded residue: third-party HTTP or WebSocket stacks not on the
+    list and not in requirements.txt (they cannot run in the image as built); a start line whose
+    version text is computed, not written; R2+ interfaces, which join REFERENCE_POINT_MODULES
+    when built.
 VP1-BND-011:
   verdict: pass
   by: independent review (agent)
@@ -525,6 +571,8 @@ VP1-BND-011:
   evidence:
     - gate:VP1-BND-011
     - tests/test_boundary.py::test_batch_c_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_006_a_cut_that_takes_code_gives_no_fingerprint
+    - tests/test_boundary.py::test_bnd_006_no_code_hides_in_what_the_fingerprint_leaves_out
     - tests/test_boundary.py::test_bnd_011_a_docstring_is_not_a_change
     - tests/test_boundary.py::test_bnd_011_a_helper_is_not_redefined
     - tests/test_boundary.py::test_bnd_011_a_name_the_interpreter_reads_is_bound_once
@@ -546,18 +594,20 @@ VP1-BND-011:
   note: >-
     Re-reviewed after RES-OP-09 (batch C, seven rounds, and a regression review of the code as
     rebuilt after a workspace loss). The gate binds every profile's priority_policy, followed
-    through imports and assignments to the module's last binding, to the generic table interpreter
-    (TablePriorityPolicy), which compares with and returns only structural literals, and pins the
-    interpreter and the helper it calls (_matches) by an AST fingerprint (INTERPRETER_FINGERPRINT).
-    Under profiles/ it refuses any change to them or to the core: attribute stores or deletes other
-    than self.<attr> and cls.<attr> in a method's own unrebound first parameter (not a
-    staticmethod's), setattr, delattr and __setattr__ on anything else, holding the interpreter or
-    handing on a core class imported by name (but calling, subclassing, reading, isinstance and
-    annotations), and globals(), vars() and __dict__; tables.py binds once each name the interpreter
-    reads. VP1-BND-005 refuses __globals__, exec, importlib and sys.modules. Accepted residue:
-    attributes reached through getattr with computed names; bindings the loader resolves other than
-    by a module:Name spec; changes to a profile's own subclass of a core class, which affect only
-    that profile. These need deliberate indirection; the review found no ordinary-code bypass.
+    through imports and assignments to the module's last binding, to the generic table
+    interpreter (TablePriorityPolicy), which compares with and returns only structural literals,
+    and pins the interpreter and the helper it calls (_matches) by a source fingerprint
+    (INTERPRETER_FINGERPRINT: the source text less docstrings and comments, the same on every
+    Python version). Under profiles/ it refuses any change to them or to the core: attribute
+    stores or deletes other than self.<attr> and cls.<attr> in a method's own unrebound first
+    parameter (not a staticmethod's), setattr, delattr and __setattr__ on anything else, holding
+    the interpreter or handing on a core class imported by name (but calling, subclassing,
+    reading, isinstance and annotations), and globals(), vars() and __dict__; tables.py binds
+    once each name the interpreter reads. VP1-BND-005 refuses __globals__, exec, importlib and
+    sys.modules. Accepted residue: attributes reached through getattr with computed names;
+    bindings the loader resolves other than by a module:Name spec; changes to a profile's own
+    subclass of a core class, which affect only that profile. These need deliberate indirection;
+    the review found no ordinary-code bypass.
 VP1-BND-012:
   verdict: pass
   by: independent review (agent)
@@ -729,33 +779,94 @@ VP1-BND-016:
     timers_s/timers_ms: null read as no timers, schema keys read outside the configuration modules
     unchecked; fail-closed strftime(gmtime()) and timezone(timedelta(0)).
 VP1-BND-020:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-20'
   evidence:
-  - gate:VP1-BND-020
-  gap: 'Text search: every profile name occurs somewhere in the CI file, ''check_boundary'' occurs, and
-    none of ''if: '', allow_failure, continue-on-error occur. Probed misses: `on: push: branches: [main]`
-    / pull_request branch filters (skippable by branch — the exact thing the criterion forbids), `paths-ignore:
-    [''profiles/frmcs/**'']`, removing frmcs from the conformance matrix while leaving ''frmcs'' in a
-    comment, and a multi-line `if:` with no trailing space. Close with: parse the workflow YAML; require
-    `on` to include push and pull_request with no branches/branches-ignore/paths/paths-ignore; require
-    the conformance job''s matrix.profile to equal the set of profiles/*/profile.yaml; reject any `if`
-    key at job or step level; optionally require branch protection making the job a required check.'
-  note: Current ci.yml is compliant; the gate would not notice it becoming non-compliant.
+    - gate:VP1-BND-020
+    - tests/test_boundary.py::test_batch_d_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_020_a_new_profile_needs_its_suite
+    - tests/test_boundary.py::test_bnd_020_a_suite_step_runs_its_command_alone
+    - tests/test_boundary.py::test_bnd_020_accepts_what_skips_nothing
+    - tests/test_boundary.py::test_bnd_020_catches_the_variants
+    - tests/test_boundary.py::test_bnd_020_ci_yml_is_the_only_workflow
+    - tests/test_boundary.py::test_bnd_020_needs_the_workflow
+    - tests/test_boundary.py::test_bnd_020_review_probes_round_1
+    - tests/test_boundary.py::test_bnd_020_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_020_the_gate_cannot_be_replaced_first
+    - tests/test_boundary.py::test_bnd_020_the_pinned_commands_are_these
+  note: >-
+    Re-reviewed after RES-OP-09 (batch D, signed on round 3 after the rebuild and held through
+    round 5). ci.yml runs on every push and pull request with no filter but branches: ['**'],
+    and is the only workflow; the boundary and unit jobs are exactly CONFORMANCE_SETUP then
+    GATE_RUN_EXACT or UNIT_RUN_EXACT; the conformance job is pinned by VP1-REL-002 to every
+    in-tree profile at every supported release; no suite job has if, continue-on-error,
+    concurrency, env, defaults, container, services, a needs other than boundary, or a runner
+    other than ubuntu-latest, and no suite's exit status can be discarded. Recorded residue, not
+    judged by the gate: what the hosting service enforces (branch protection, required checks,
+    [skip ci] commit messages, a deployment environment's approval rules), and job or step keys
+    such as strategy and working-directory whose misuse fails the run loudly rather than
+    skipping. Accepted: none of these lets a change merge with a profile suite silently skipped
+    once branch protection requires the ci jobs, a hosting-configuration item outside the
+    repository.
 VP1-BND-021:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-20'
   evidence:
-  - gate:VP1-BND-021
-  gap: 'Only checks tests/test_conformance.py exists and contains the text ''MCX_PROFILE'' (probe: a file
-    with that word in a comment and one empty test passes). It does not check one suite per profile exists/executes,
-    nor the ''same core (same core hash)'' clause at all. Close with: collect the suite per profile (e.g.
-    pytest --collect-only under each MCX_PROFILE) and require non-zero profile-specific tests for each
-    profiles/*/profile.yaml; record the core hash of the tree each suite ran against and assert it equals
-    the VP1-BND-006 image core hash.'
-  note: Existence + string presence only.
+    - gate:VP1-BND-021
+    - tests/test_boundary.py::test_batch_d_gates_pass_the_unchanged_copy
+    - tests/test_boundary.py::test_bnd_006_a_cut_that_takes_code_gives_no_fingerprint
+    - tests/test_boundary.py::test_bnd_006_no_code_hides_in_what_the_fingerprint_leaves_out
+    - tests/test_boundary.py::test_bnd_021_a_change_made_after_the_core_hash_test_fails_the_run
+    - tests/test_boundary.py::test_bnd_021_a_dict_changed_at_run_time_is_seen
+    - tests/test_boundary.py::test_bnd_021_a_profile_compared_with_another_is_not_a_branch
+    - tests/test_boundary.py::test_bnd_021_branches_on_declared_data_stay
+    - tests/test_boundary.py::test_bnd_021_catches_the_variants
+    - tests/test_boundary.py::test_bnd_021_code_put_into_the_core_at_run_time_is_seen
+    - tests/test_boundary.py::test_bnd_021_data_and_wrapped_code_put_in_at_run_time_are_seen
+    - tests/test_boundary.py::test_bnd_021_dunders_outside_tests_are_not_judged_here
+    - tests/test_boundary.py::test_bnd_021_every_profile_gets_the_whole_suite
+    - tests/test_boundary.py::test_bnd_021_hooks_may_be_called_handed_on_and_asserted
+    - tests/test_boundary.py::test_bnd_021_needs_the_suite
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_1
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_2
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_3
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_4
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_5
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_6
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_7
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_8
+    - tests/test_boundary.py::test_bnd_021_review_probes_round_9
+    - tests/test_boundary.py::test_bnd_021_the_cores_file_may_be_read
+    - tests/test_boundary.py::test_bnd_021_the_environment_and_docstrings_may_name_the_platform
+    - tests/test_boundary.py::test_bnd_021_the_run_time_checks_are_these
+    - tests/test_boundary.py::test_bnd_021_what_the_suite_may_import
+    - tests/test_boundary.py::test_bnd_021_where_a_profile_may_be_named
+    - tests/test_conformance.py::test_the_suite_runs_against_the_core_of_the_profiles_release_image
+  note: >-
+    Re-reviewed after RES-OP-09 (batch D, ten rounds after the rebuild). VP1-BND-021 is signed
+    on round 10. tests/test_conformance.py takes its profiles from profiles/*/profile.yaml,
+    narrowed only by MCX_PROFILE, and its profile fixture is parametrised by them; it skips
+    nothing; CORE_HASH_TEST asserts the image's core hash; two pinned run-time checks (at the
+    core-hash test and at session teardown) show no core or service function, wrapped function
+    or module literal (dicts, lists and sets included) differs from its file. tests/conftest.py
+    and the suite's helper module are pinned, tests/__init__.py is empty, and the suite imports
+    only the allow-listed modules. It cannot patch or mutate core or service (no assignment
+    through them, no mutators, no monkeypatch, no sys.modules, no reflection calls) and cannot
+    tell which profile is running: profile-name literals (str or bytes, three letters or more,
+    any case) are refused anywhere but docstrings; the profile's identity appears only in
+    assertions, f-strings, core arguments, PROFILES / name, or against another identity; hooks
+    are only called, handed to the core or asserted present; the running selection, pytest's
+    records, .source, type introspection, dunder attributes (a core module's __file__ aside) and
+    object-text builtins are refused. A runtime test runs the suite per profile and requires
+    every test passed, none skipped. Recorded residue: (a) a branch on a declared property only
+    one profile has, indistinguishable from the data-derived assertions the suite is meant to
+    make; (b) a profile name assembled at run time from parts under three letters each; (c) a
+    core function replaced at run time by another core function, no effect shown; (d) a
+    profile's class name recovered from the text of an exception the core raises about a hook
+    handed to it. (b) and (d) need deliberate obfuscation; (a) needs a reviewer's judgement, not
+    a gate.
 VP1-BND-022:
   verdict: pass
   by: independent review (agent)

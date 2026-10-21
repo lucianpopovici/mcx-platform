@@ -956,6 +956,194 @@ def check_frozen_value_objects(root: Path) -> List[str]:
 # --------------------------------------------------------------------------
 
 
+# Files a gate trusts to do what it checks, pinned as reviewed: the
+# packager VP1-BND-006 builds and verifies the images with, and the test
+# configuration every suite runs under (VP1-BND-021). A change fails until
+# it is reviewed and the fingerprint (file_fingerprint) updated.
+# The profile framework every image carries (profiles/common/): reviewed
+# modules only, so a profile's code cannot ship to all under its name.
+COMMON_MODULES = ("profiles/common/__init__.py", "profiles/common/tables.py")
+REVIEWED_FILES: Dict[str, str] = {
+    "tools/package.py": "840cc09b2d1c9c8fc342aceaf23ce584c905ee8c49f21a8ba4e8495c56afa0de",
+    "tests/conftest.py": "c748dd97e33a522e4751df01d3689fb60df592f59fb41a480a152f2bc26f77ba",
+}
+
+
+def _docstring_nodes(tree):
+    for n in ast.walk(tree):
+        body = getattr(n, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) and \
+                isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            yield body[0]
+
+
+def source_fingerprint(source: str, nodes) -> str:
+    """sha256 of `fingerprint_text(source, nodes)`, or "" (no pin matches it)
+    when that is None."""
+    import hashlib
+    text = fingerprint_text(source, nodes)
+    return "" if text is None else hashlib.sha256(text.encode()).hexdigest()
+
+
+def fingerprint_text(source: str, nodes):
+    """The source text of `nodes` (whole module when None), with
+    docstrings (each left as `""`), comments, trailing blanks and empty
+    lines left out; the inside of any other multi-line string is kept as
+    written. Read from the text, not from ast.dump, so every Python
+    version CI or a developer runs gives the same value. The text hashed
+    is parsed again and must be the module itself less its docstrings
+    and comments, so no code can hide in what was left out; otherwise
+    the result is None."""
+    import copy
+    import io
+    import tokenize
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    # Lines as Python counts them: \f and the like inside one are not ends.
+    lines = re.findall(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$", source)
+    if not lines:
+        return ""
+
+    def char(ln, col):                 # the AST's columns are UTF-8 bytes
+        return len(lines[ln - 1].encode("utf-8")[:col].decode("utf-8", "ignore"))
+
+    cuts = []                          # (line, start, end, replacement)
+    for d in _docstring_nodes(tree):
+        for ln in range(d.lineno, d.end_lineno + 1):
+            a = char(ln, d.col_offset) if ln == d.lineno else 0
+            b = char(ln, d.end_col_offset) if ln == d.end_lineno else \
+                len(lines[ln - 1].rstrip("\r\n"))
+            cuts.append((ln, a, b, '""' if ln == d.lineno else ""))
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+            if tok.type == tokenize.COMMENT:
+                cuts.append((tok.start[0], tok.start[1], tok.end[1], ""))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    for ln, a, b, put in sorted(cuts, key=lambda c: (c[0], -c[1])):
+        text = lines[ln - 1]
+        lines[ln - 1] = text[:a] + put + text[b:]
+    # The text left must be the module less docstrings and comments.
+    expected = copy.deepcopy(tree)
+    for d in _docstring_nodes(expected):
+        d.value.value = ""
+    try:
+        if ast.dump(ast.parse("".join(lines))) != ast.dump(expected):
+            return None
+    except (SyntaxError, ValueError):
+        return None
+    kept = set()                       # inside a multi-line string: as written
+    docs = {id(d.value) for d in _docstring_nodes(tree)}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Constant, ast.JoinedStr)) and id(n) not in docs and \
+                n.end_lineno > n.lineno:
+            kept.update(range(n.lineno + 1, n.end_lineno + 1))
+    if nodes is None:
+        spans = [(1, len(lines))]
+    else:
+        spans = [(min([n.lineno] + [d.lineno for d in getattr(n, "decorator_list", [])]),
+                  n.end_lineno) for n in nodes]
+    out = []
+    for a, b in spans:
+        for ln in range(a, b + 1):
+            line = lines[ln - 1].rstrip("\r\n")
+            if ln in kept:
+                out.append(line)
+            elif line.strip():
+                out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def file_fingerprint(root: Path, rel: str) -> str:
+    """The reviewed file's source fingerprint (source_fingerprint)."""
+    try:
+        return source_fingerprint((root / rel).read_text(encoding="utf-8"), None)
+    except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+        return ""
+
+
+# The workflow, pinned as reviewed: the jobs CI runs, every step and key,
+# read as YAML (comments and layout aside). A job that packs, uploads or
+# pushes the tree, however it is written, is a change to review.
+REVIEWED_WORKFLOW = (".github/workflows/ci.yml",
+                     "575d5ca096d9b1d3cbfa8ae4c61db4adaaf129e04e84e352e6460d71b48bc0aa")
+
+
+def workflow_fingerprint(root: Path, rel: str = REVIEWED_WORKFLOW[0]) -> str:
+    """sha256 of the workflow as data: its YAML parsed, written back as JSON
+    with sorted keys. "" when it cannot be read."""
+    import hashlib
+    import json
+    import yaml
+    try:
+        doc = yaml.safe_load((root / rel).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return ""
+    def plain(x):                      # `on:` reads as True: keys as text
+        if isinstance(x, dict):
+            return {f"{type(k).__name__}:{k}": plain(v) for k, v in x.items()}
+        if isinstance(x, list):
+            return [plain(v) for v in x]
+        return x
+    try:
+        text = json.dumps(plain(doc), sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, default=str)
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+# A plain scalar YAML 1.1 (PyYAML, so the pin) and 1.2 (the runner) read
+# differently: `015` (octal 13 or 15), `1_000`, `1:20`, yes/no/on/off.
+_YAML_AMBIGUOUS = re.compile(r"(?i)^[-+]?(0\d[\d_]*|\d[\d_]*_[\d_]*|\d+(:[0-5]?\d)+(\.\d*)?|"
+                             r"0b[01_]+|0x[\da-f_]*_[\da-f_]*)$|^(y|n|yes|no|on|off)$")
+
+
+def _ambiguous_scalars(text: str) -> List[Tuple[int, str]]:
+    """Plain scalar values (not keys) whose reading depends on the YAML version."""
+    import yaml
+    try:
+        node = yaml.compose(text)
+    except yaml.YAMLError:
+        return []
+    out, todo = [], [(node, False)]
+    while todo:
+        n, is_key = todo.pop()
+        if isinstance(n, yaml.ScalarNode):
+            if not is_key and n.style is None and _YAML_AMBIGUOUS.match(n.value):
+                out.append((n.start_mark.line + 1, n.value))
+        elif isinstance(n, yaml.SequenceNode):
+            todo += [(x, False) for x in n.value]
+        elif isinstance(n, yaml.MappingNode):
+            todo += [(x, k) for pair in n.value for x, k in zip(pair, (True, False))]
+    return sorted(out)
+
+
+def _reviewed_workflow(root: Path) -> List[str]:
+    rel, pinned = REVIEWED_WORKFLOW
+    out = []
+    try:
+        text = (root / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    for line, value in _ambiguous_scalars(text):
+        out.append(f"{rel}:{line}: {value!r} reads one way in YAML 1.1 (the pin) and another "
+                   "in YAML 1.2 (the runner); quote it or write it plainly")
+    if workflow_fingerprint(root, rel) != pinned:
+        out.append(f"{rel}: has changed since it was reviewed; review it and update "
+                   "REVIEWED_WORKFLOW")
+    return out
+
+
+def _reviewed_file(root: Path, rel: str) -> List[str]:
+    if file_fingerprint(root, rel) != REVIEWED_FILES[rel]:
+        return [f"{rel}: has changed since it was reviewed; review it and update "
+                "REVIEWED_FILES"]
+    return []
+
+
 def _load_packager(root: Path):
     import importlib.util
     path = root / "tools" / "package.py"
@@ -969,23 +1157,328 @@ def _load_packager(root: Path):
     return module
 
 
+def _strip_comment(rel: str, line: str) -> str:
+    """The line without its comment, for the shell-like files whose comments
+    start with a `#` at the line's start or after a blank (so `#fff` or a
+    URL fragment stays)."""
+    if rel.endswith((".yaml", ".yml", ".sh", ".toml", ".cfg", ".ini", ".txt")) or \
+            "containerfile" in rel.lower() or "dockerfile" in rel.lower() or \
+            rel.lower().endswith("makefile") or "." not in rel.rsplit("/", 1)[-1]:
+        return re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
+    return line
+
+
+def _python_without_comments(text: str) -> str:
+    """Python source with its comments blanked, by the tokenizer."""
+    import io
+    import tokenize
+    lines = text.splitlines(True)
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT:
+                (r, c), (_, e) = tok.start, tok.end
+                lines[r - 1] = lines[r - 1][:c] + " " * (e - c) + lines[r - 1][e:]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    return "".join(lines)
+
+
+def _text_of(node):
+    """A string node's text, bytes decoded, implicit and `+` joins folded;
+    for an f-string its leading constant text; else None."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        v = node.value
+        return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        a, b = _text_of(node.left), _text_of(node.right)
+        return a + b if a is not None and b is not None else None
+    if isinstance(node, ast.JoinedStr) and node.values and \
+            isinstance(node.values[0], ast.Constant):
+        return node.values[0].value
+    return None
+
+
+def _names_a_profile(rel: str, text: str, names: Sequence[str],
+                     build: bool = False) -> List[Tuple[int, str]]:
+    """(line, what) for each place `text` (the file at `rel`) names one of the
+    profile packages: a path or import (`profiles/<name>`, `profiles.<name>`)
+    in any file; in Python a string (bytes, joined strings included) equal
+    to a profile name in any letter case, or a dynamic import of
+    `profiles.` + something; in YAML a scalar equal to one; in any other
+    file the name as a whole word (requirements.txt aside, whose words are
+    package names). The platform's own name (mcx, also a profile's name)
+    counts only as a path or import. Comments are skipped."""
+    out: List[Tuple[int, str]] = []
+    alt = "|".join(map(re.escape, names))
+    path = re.compile(rf"profiles\s*[./\\]\s*({alt})\b")
+    others = [n for n in names if n not in PLATFORM_NAMES]
+    word = re.compile(rf"(?i)(?<![\w-])({'|'.join(map(re.escape, others))})(?![\w-])") \
+        if others else None
+    if rel.endswith(".py"):
+        text = _python_without_comments(text)
+    for n, line in enumerate(text.splitlines(), 1):
+        code = _strip_comment(rel, line)
+        m = path.search(code)
+        if m:
+            out.append((n, f"names the profile package {m.group(1)!r}"))
+        elif word is not None and not rel.endswith((".py", ".yaml", ".yml")) and \
+                rel.rsplit("/", 1)[-1] != "requirements.txt":
+            w = word.search(code)
+            if w:
+                out.append((n, f"names the profile {w.group(1).lower()!r}"))
+    if rel.endswith((".yaml", ".yml")) and word is not None:
+        import yaml
+        try:
+            nodes = [yaml.compose(text)]
+        except yaml.YAMLError:
+            nodes = []
+        while nodes:
+            node = nodes.pop()
+            if isinstance(node, yaml.ScalarNode):
+                if isinstance(node.value, str) and node.value.strip().lower() in others:
+                    out.append((node.start_mark.line + 1,
+                                f"names the profile {node.value.strip().lower()!r}"))
+            elif isinstance(node, yaml.SequenceNode):
+                nodes += node.value
+            elif isinstance(node, yaml.MappingNode):
+                nodes += [x for pair in node.value for x in pair]
+    if rel.endswith(".py"):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return out + [(0, "cannot be parsed, so this gate cannot clear it")]
+        parents = _parent_map(tree)
+        for node in ast.walk(tree):
+            if isinstance(parents.get(node), (ast.BinOp, ast.JoinedStr)):
+                continue                      # judged as the whole expression
+            t = _text_of(node)
+            if t is not None and t.strip().lower() in others:
+                out.append((node.lineno, f"names the profile {t.strip().lower()!r}"))
+            elif build and t is not None and word is not None and word.search(t):
+                # A build script's arguments: `'PROFILE=frmcs'`.
+                out.append((node.lineno, f"names the profile {word.search(t).group(1).lower()!r}"))
+            elif t is not None and path.search(t) and not isinstance(node, ast.Constant):
+                out.append((node.lineno, f"names the profile package "
+                                         f"{path.search(t).group(1)!r}"))
+            f = node.func if isinstance(node, ast.Call) else None
+            fname = f.id if isinstance(f, ast.Name) else f.attr \
+                if isinstance(f, ast.Attribute) else ""
+            ident = node.name if isinstance(node, (ast.ClassDef, ast.FunctionDef,
+                                                   ast.AsyncFunctionDef)) else \
+                node.attr if isinstance(node, ast.Attribute) else \
+                node.id if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) else \
+                node.arg if isinstance(node, ast.arg) else None
+            # An attribute named in a string: getattr(hooks, 'frmcs_extension').
+            at = 1 if fname in ("getattr", "hasattr", "setattr", "delattr") else \
+                0 if fname in ("attrgetter", "methodcaller") else None
+            if ident is None and at is not None and len(node.args) > at and \
+                    isinstance(node.args[at], ast.Constant) and \
+                    isinstance(node.args[at].value, str):
+                ident = node.args[at].value
+            if ident:
+                words = {w.lower() for part in ident.split("_") for w in _NAME_PARTS.findall(part)}
+                hit = sorted(words & set(others))
+                if hit:
+                    out.append((node.lineno, f"is written for the profile {hit[0]!r} "
+                                             f"({ident})"))
+            if fname in ("__import__", "import_module") and node.args:
+                t = node.args[0]
+                while isinstance(t, ast.BinOp) and isinstance(t.op, ast.Add):
+                    t = t.left                # the text it starts with
+                t = _text_of(t)
+                if t is not None and t.startswith("profiles") and \
+                        not isinstance(node.args[0], ast.Constant):
+                    out.append((node.lineno, "imports a profile package by a computed name"))
+    return out
+
+
+_BUILD_ARGUMENT = re.compile(r"(?i)\b(ARG\s+\w*PROFILE\w*|--build-arg\s+\w*PROFILE\w*)")
+
+
+# The one step that builds the release images CI publishes; tools/package.py
+# --all verifies them (one profile each, the same core hash) and fails the
+# job otherwise.
+IMAGES_RUN = "python3 tools/package.py --all --out dist --tar"
+# What the images job does before it: the same fixed setup every time.
+IMAGES_SETUP = [
+    {"uses": "actions/checkout@v4"},
+    {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
+    {"run": "pip install pyyaml"},
+]
+_PACKAGER_RUN = re.compile(r"package\.py|tools\.package\b")
+# Building an image any other way than tools/package.py.
+_IMAGE_TOOLS = re.compile(r"(?i)\b(podman|docker|buildah|kaniko|nerdctl)\b|--build-arg\b")
+_ARTIFACT_STEP = re.compile(r"^actions/(upload|download)-artifact@")
+# The actions a workflow may use: setting up, and the one artifact upload.
+# Anything else (a release action, a registry push) publishes past it.
+_ALLOWED_ACTIONS = re.compile(r"^actions/(checkout|setup-python|upload-artifact)@")
+# Publishing or packing the tree any other way than the images job's upload.
+_PUBLISHES = re.compile(
+    r"(?i)\bgh\s+(release|api)\b|\btwine\b|\bcurl\b[^\n]*\s(-T|--upload-file|-F|--form|"
+    r"--data-binary)\b|\baws\s+s3\b|\bgsutil\b|\b(oras|skopeo|crane|rsync|scp|sftp)\b|"
+    r"\b(npm|cargo|poetry|flit)\s+publish\b|\baz\s+storage\b|(?<![-\w.])(tar|zip|7z)\b(?!\.)")
+
+
+def _ci_builds_every_image(root: Path) -> List[str]:
+    """The images CI publishes are the ones tools/package.py --all built and
+    verified: exactly one step runs IMAGES_RUN, no other step runs the
+    packager, and in its job nothing after it but uploading `dist/`."""
+    import yaml
+    path = root / ".github" / "workflows" / "ci.yml"
+    where = ".github/workflows/ci.yml"
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return [f"{where}: cannot be read, so the release images are not shown to be built "
+                "and verified"]
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    out = []
+    builds = []
+    uploads = 0
+    for name, job in (jobs or {}).items():
+        steps = [st for st in (job.get("steps") or []) if isinstance(st, dict)] \
+            if isinstance(job, dict) else []
+        for i, st in enumerate(steps):
+            run = (st.get("run") or "").strip()
+            uses = str(st.get("uses") or "")
+            if _IMAGE_TOOLS.search(run):
+                out.append(f"{where}: job {name} builds an image another way than "
+                           f"{IMAGES_RUN!r}: {run.splitlines()[0][:80]}")
+            if run != IMAGES_RUN and _PUBLISHES.search(run):
+                out.append(f"{where}: job {name} packs or publishes outside the images "
+                           f"job's upload: {run.splitlines()[0][:80]}")
+            if uses and not _ALLOWED_ACTIONS.match(uses):
+                out.append(f"{where}: job {name} uses {uses}; a workflow sets up, runs and "
+                           "uploads the images artifact, nothing else")
+            if _ARTIFACT_STEP.match(uses):
+                uploads += 1
+                if "overwrite" in (st.get("with") or {}):
+                    out.append(f"{where}: job {name} overwrites an artifact; the images "
+                               "uploaded are the ones built")
+            if _PACKAGER_RUN.search(run):
+                if run == IMAGES_RUN and set(st) - {"name", "run"}:
+                    out.append(f"{where}: job {name}'s build step has "
+                               f"{', '.join(sorted(set(st) - {'name', 'run'}))}; it is the "
+                               "fixed command and nothing else")
+                if run == IMAGES_RUN:
+                    setup = [{k: v for k, v in x.items() if k != "name"} for x in steps[:i]]
+                    if setup != IMAGES_SETUP:
+                        out.append(f"{where}: job {name} does more before building the images "
+                                   "than the fixed setup (IMAGES_SETUP)")
+                if run != IMAGES_RUN:
+                    out.append(f"{where}: job {name} runs the packager as {run!r}; the images "
+                               f"are built once, by {IMAGES_RUN!r}")
+                else:
+                    builds.append(name)
+                    for later in steps[i + 1:]:
+                        uses = str(later.get("uses") or "")
+                        upload = uses.startswith("actions/upload-artifact@") and \
+                            str((later.get("with") or {}).get("path", "")).startswith("dist/")
+                        if not upload:
+                            out.append(f"{where}: job {name} changes or replaces the images "
+                                       "after building them; only uploading dist/ may follow")
+    if uploads > 1:
+        out.append(f"{where}: {uploads} artifact steps; the one after the build is the only "
+                   "one, so nothing replaces the images")
+    if not builds:
+        out.append(f"{where}: no job builds every image with tools/package.py --all, which "
+                   "verifies them")
+    elif len(builds) > 1:
+        out.append(f"{where}: the images are built by more than one step ({builds})")
+    return out
+
+
+# Top-level directories whose Python builds or deploys (a benchmark or a
+# notebook elsewhere is not a build file).
+_BUILD_DIRS = frozenset({"deploy", "scripts", "build", "ci", "packaging", "docker"})
+
+
+def _build_file(root: Path, rel: str) -> bool:
+    """A file that takes part in building or deploying an image: a
+    deployment file (Containerfile, Makefile, shell, config) outside docs/,
+    tests/, .github/, kb/ and the profiles; any file under tools/ (the
+    gates and the pinned packager aside); Python in a build directory
+    (`_BUILD_DIRS`), or anywhere outside core/ and service/ that runs the
+    packager or a container tool or reaches into profiles/; an
+    extensionless script (`#!`); a workflow other
+    than ci.yml."""
+    parts = rel.split("/")
+    if any(p in CACHE_DIRS for p in parts):
+        return False
+    if rel.startswith(".github/workflows/"):
+        return parts[-1] != "ci.yml"
+    if parts[0] in _NOT_DEPLOYMENT or parts[0] == PROFILES:
+        return False
+    if DEPLOYMENT_FILES.search(rel) or parts[0] == "tools":
+        return True
+    if rel.endswith(".py"):
+        if parts[0] in _BUILD_DIRS:
+            return True
+        # Python anywhere else that runs the packager or a container tool.
+        if parts[0] in ("core", "service"):
+            return False
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        return bool(_PACKAGER_RUN.search(text) or _IMAGE_TOOLS.search(text) or
+                    re.search(r"\bprofiles\b", text))
+    if "." not in parts[-1]:
+        try:
+            with open(root / rel, "rb") as f:
+                return f.read(2) == b"#!"
+        except OSError:
+            return False
+    return False
+
+
 def check_per_profile_images(root: Path) -> List[str]:
     """VP1-BND-006 / PLT-GEN-001 — one core, one profile per image.
 
-    Builds every in-tree profile's image with tools/package.py and holds the
-    set to three rules:
+    Builds every in-tree profile's image with tools/package.py, itself pinned
+    as reviewed (`REVIEWED_FILES`: the packager the gate relies on cannot
+    change unseen), and holds the set to four rules:
 
-    1. Each image carries exactly one profile package.
+    1. Each image carries exactly one profile package: read from the staged
+       image itself, nothing under its profiles/ but the framework (common/,
+       __init__.py, SCHEMA.yaml) and its own profile.
     2. The shared part (core, service, profile framework) hashes the same in
-       every image. This is what keeps VP1-BND-001 meaningful once there is
-       no single artefact: the core under test is the core in every delivery.
-    3. Code that ships in every image does not name a specific profile, and
-       nothing in the build varies per profile. What varies is data, the
-       profile package, never a build file.
+       every image, and matches its files. CI builds the images it
+       publishes in one step, exactly `IMAGES_RUN` with no other key
+       (`--all`, which applies the same check and fails the job
+       otherwise), after the fixed `IMAGES_SETUP`; no other step runs the
+       packager, nothing but uploading dist/ follows it, and nothing else
+       publishes: no action but checkout, setup-python and that upload, and
+       no run packs or ships the tree (`_PUBLISHES`: tar, zip, gh release,
+       twine, a registry or bucket copy). Above all the workflow is pinned
+       as reviewed (`REVIEWED_WORKFLOW`): no job, step or key changes
+       unseen, whatever it is written in.
+    3. No file that ships in every image (`shared_files`, any type) names a
+       profile package: a path or import (`profiles/<name>`,
+       `profiles.<name>`); in Python a string (bytes, joined and `+` folded
+       included) equal to a profile name in any letter case, or an import
+       of `profiles.` + a computed name; in YAML a scalar equal to one; the
+       name as a whole word in any other file but requirements.txt; an
+       identifier, or an attribute named in a string (getattr, hasattr,
+       setattr, delattr, attrgetter, methodcaller), with the name as a
+       word (`FrmcsBearerAdapter`). The
+       platform's own name, mcx, counts only as a path or import. Comments
+       are skipped (Python's by the tokenizer, a `#` elsewhere only at the
+       start of a line or after a blank, so `'#fff'` is text).
+    4. Nothing in the build varies per profile: no build file
+       (`_build_file`: deployment files outside docs/, tests/, .github/,
+       kb/ and the profiles; any file under tools/; Python in a build
+       directory, or anywhere outside core/ and service/ that runs the
+       packager or a container tool or reaches into profiles/; extensionless
+       `#!` scripts; any workflow but ci.yml) is named for a profile, names one in its
+       content, or takes a profile build argument (`ARG PROFILE`,
+       `--build-arg PROFILE`). The profile is data given to
+       tools/package.py.
 
-    HEURISTIC for rule 3: it catches a profile package named by import path
-    (`profiles.<name>`) or path segment (`/ "<name>"`), not every way code
-    could depend on one. Rules 1 and 2 are exact.
+    Not followed: a profile name built at run time from parts that are not
+    literals (`f'profiles/{n}'` with n computed), the platform name mcx as
+    a bare word, a file named for the profile `utility` meaning something
+    else (reported; rename it).
     """
     import tempfile
     violations: List[str] = []
@@ -996,31 +1489,61 @@ def check_per_profile_images(root: Path) -> List[str]:
     if not names:
         return ["no profile packages to build"]
 
+    violations += _reviewed_file(root, "tools/package.py")
+    violations += _reviewed_workflow(root)
+    for f in sorted((root / PROFILES / "common").rglob("*")):
+        rel = f.relative_to(root).as_posix()
+        if f.is_file() and not any(p in CACHE_DIRS for p in f.parts) and \
+                rel not in COMMON_MODULES:
+            violations.append(f"{rel}: not a reviewed framework module (COMMON_MODULES); "
+                              "what ships in every image is reviewed")
     with tempfile.TemporaryDirectory(prefix="mcx-bnd006-") as tmp:
         images = {n: packager.stage(n, Path(tmp), root) for n in names}
         violations += packager.verify(images)
+        # Rule 1 read from the image itself, not from the packager: under
+        # profiles/ only the framework and this image's own profile.
+        for n, image in sorted(images.items()):
+            for f in sorted((image / PROFILES).rglob("*")):
+                part = f.relative_to(image / PROFILES).parts
+                if f.is_file() and part[0] not in (n, "common", "__init__.py", "SCHEMA.yaml"):
+                    violations.append(f"image {n}: carries profiles/{'/'.join(part)}, which is "
+                                      "not its profile")
+    violations += _ci_builds_every_image(root)
 
-    alt = "|".join(map(re.escape, names))
-    named = re.compile(rf"\bprofiles\.({alt})\b|[/\\]\s*[\"']({alt})[\"']")
     for rel in packager.shared_files(root):
-        if not rel.endswith(".py"):
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
-        for lineno, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1):
-            if line.lstrip().startswith("#"):
-                continue
-            if named.search(line):
-                violations.append(
-                    f"{rel}:{lineno}: shared code names a profile package, but every "
-                    f"image carries only one: {line.strip()[:90]}")
+        for line, what in _names_a_profile(rel, text, names):
+            violations.append(f"{rel}:{line}: shared code {what}, but every image carries "
+                              "only one")
 
-    for pattern in ("Dockerfile*", "*.Dockerfile", "Containerfile*", "*.Containerfile",
-                    "build-*.sh", "tools/*Containerfile*", "tools/*Dockerfile*"):
-        for candidate in root.glob(pattern):
-            if any(name in candidate.name for name in names):
-                violations.append(
-                    f"{candidate.relative_to(root)}: per-profile build variant; the profile "
-                    "is data given to tools/package.py, not a build file")
-    return violations
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if not path.is_file() or not _build_file(root, rel):
+            continue
+        if any(re.search(rf"(?i)(^|[^a-z]){re.escape(n)}([^a-z]|$)", path.name) for n in names
+               if n not in PLATFORM_NAMES) or \
+                any(re.search(rf"(?i)[._-]{re.escape(n)}([._-]|$)", path.name) for n in names):
+            violations.append(f"{rel}: per-profile build variant; the profile is data given to "
+                              "tools/package.py, not a build file")
+            continue
+        if rel in ("tools/check_boundary.py", "tools/package.py"):
+            continue          # the gates themselves, and the pinned packager
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line, what in _names_a_profile(rel, text, names, build=True):
+            violations.append(f"{rel}:{line}: a build file {what}; the profile is data given "
+                              "to tools/package.py")
+        for n, line in enumerate(text.splitlines(), 1):
+            if _BUILD_ARGUMENT.search(_strip_comment(rel, line)):
+                violations.append(f"{rel}:{n}: a build file takes the profile as an argument; "
+                                  "the profile is data given to tools/package.py")
+    return sorted(set(violations), key=_by_line)
+
 
 
 # --------------------------------------------------------------------------
@@ -1904,24 +2427,201 @@ def check_floor_machine_isolated(root: Path) -> List[str]:
 # VP1-BND-010 — reference-point naming
 # --------------------------------------------------------------------------
 
-INTERFACE_IDS = {"IF-IDR", "IF-PRI", "IF-SES", "IF-BER", "IF-IWF", "IF-ICX"}
+# VP1-BND-010 / PLT-PRF-032: the modules implementing each PLT-SRS §3.1
+# reference point, each declaring REFERENCE_POINT with its name. Every
+# interface of phase R1 must have its modules; a later phase's joins when
+# it is built.
+REFERENCE_POINT_MODULES: Dict[str, Tuple[str, ...]] = {
+    "SIP-2": ("core/sip.py", "service/sip_core.py", "service/sip_txn.py",
+              "service/sip_tls.py", "service/session_timer.py"),
+    "HTTP-1": ("service/http.py", "service/http_tls.py"),
+}
+SRS_PHASE = "R1"
+# A runtime module named for a protocol carried at a reference point is
+# taken to implement it, so a new one has to be listed: sip*.py for SIP-2,
+# http*.py for HTTP-1.
+REFERENCE_POINT_STEMS = {"sip": "SIP-2", "http": "HTTP-1"}
+# What a module carrying each reference point's protocol shows in its code:
+# for HTTP-1 an HTTP stack imported, for SIP-2 SIP's version text written.
+REFERENCE_POINT_STACKS = {"HTTP-1": ("http.server", "http.client", "urllib.request", "urllib3",
+                                     "httpx", "requests", "aiohttp", "wsgiref", "socketserver",
+                                     "flask", "fastapi", "starlette", "uvicorn", "tornado",
+                                     "werkzeug", "h2", "h11", "xmlrpc.server",
+                                     "xmlrpc.client"),
+                          "SIP-2": ()}
+# A protocol's version as it is written on the wire: a start line's
+# version (`SIP/2.0 200`, `... SIP/2.0`), a Via's (`SIP/2.0/TLS `), or the
+# bare token; not the words around it in a message to a person.
+REFERENCE_POINT_TEXT = {
+    "SIP-2": re.compile(r"^\s*SIP/2\.0(/[A-Z]+)?(\s+(\d{3}|%[sdi]|\{\w*(:[^}]*)?\})(?=\s|$).*"
+                        r"|\s*)$|\sSIP/2\.0\s*$"),
+    "HTTP-1": re.compile(r"^\s*HTTP/1\.[01](\s+(\d{3}|%[sdi]|\{\w*(:[^}]*)?\})(?=\s|$).*|\s*)$"
+                         r"|\sHTTP/1\.[01]\s*$"),
+}
+# The status code may be filled in: `%d`, `%s`, `{}`, `{code}`, `{code:03d}`.
+# A module that takes core.sip's messages onto a socket of its own carries SIP-2.
+_SIP_MESSAGES = ("core.sip",)
+_SOCKETS = ("socket", "ssl")
+# ... or onto one asyncio opens for it.
+_ASYNC_TRANSPORTS = frozenset({"start_server", "open_connection", "create_server",
+                               "create_connection", "create_datagram_endpoint",
+                               "start_tls"})
+# Modules named like a reference point that do not implement one, each
+# with the reason; reviewed like REFERENCE_POINT_MODULES.
+NOT_REFERENCE_POINTS: Dict[str, str] = {}
+
+
+def _reference_points(root: Path) -> Dict[str, str]:
+    """PLT-SRS §3.1: interface name -> phase."""
+    try:
+        text = (root / "docs" / "PLT-SRS.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    m = re.search(r"^### 3\.1 External interfaces\n(.*?)(?=^### )", text, re.M | re.S)
+    if not m:
+        return {}
+    out = {}
+    for row in m.group(1).splitlines():
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[0] not in ("Interface", "") and not set(cells[0]) <= {"-"}:
+            out[cells[0]] = cells[3]
+    return out
+
+
+def _declared_reference_point(tree):
+    """The module's last binding of REFERENCE_POINT: its text, "" when it is
+    not a string constant, None when there is none."""
+    found = None
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else \
+            [node.target] if isinstance(node, ast.AnnAssign) else []
+        if any(isinstance(t, ast.Name) and t.id == "REFERENCE_POINT" for t in targets):
+            v = node.value
+            found = v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else ""
+    return found
+
+
+def _carries_reference_point(tree) -> Dict[str, Tuple[int, str]]:
+    """Reference point -> (line, what) for each whose protocol the module
+    carries: its stack imported (REFERENCE_POINT_STACKS) or its version text
+    written (REFERENCE_POINT_TEXT)."""
+    out: Dict[str, Tuple[int, str]] = {}
+    for node in ast.walk(tree):
+        # `from http import server` imports http.server.
+        names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+            [node.module or ""] + [f"{node.module}.{a.name}" for a in node.names]  \
+            if isinstance(node, ast.ImportFrom) and node.module and not node.level else []
+        for point, stacks in REFERENCE_POINT_STACKS.items():
+            for n in names:
+                if any(n == s or n.startswith(s + ".") for s in stacks):
+                    out.setdefault(point, (node.lineno, f"imports {n}"))
+        # A stack reached as an attribute: `import http` then http.client.
+        if isinstance(node, ast.Attribute):
+            dotted = ast.unparse(node)
+            for point, stacks in REFERENCE_POINT_STACKS.items():
+                hit = next((st for st in stacks if "." in st and dotted == st), None)
+                if hit:
+                    out.setdefault(point, (node.lineno, f"uses {hit}"))
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+            v = node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value
+            for point, text in REFERENCE_POINT_TEXT.items():
+                for line in v.splitlines() or [v]:
+                    if text.search(line):
+                        out.setdefault(point, (node.lineno, f"writes {line.strip()!r}"))
+    imported = [(n.lineno, a.name) for n in ast.walk(tree) if isinstance(n, ast.Import)
+                for a in n.names] + \
+        [(n.lineno, n.module or "") for n in ast.walk(tree)
+         if isinstance(n, ast.ImportFrom) and not n.level]
+    # Any SIP-2 module's messages: core.sip's, or a listed module's
+    # (`from service.sip_txn import ServerTxn`, `from service import sip_txn`).
+    sip_modules = set(_SIP_MESSAGES) | {r[:-3].replace("/", ".")
+                                        for r in REFERENCE_POINT_MODULES.get("SIP-2", ())}
+    imported += [(n.lineno, f"{n.module}.{a.name}") for n in ast.walk(tree)
+                 if isinstance(n, ast.ImportFrom) and n.module and not n.level
+                 for a in n.names]
+    sip = [(line, m) for line, m in imported if m in sip_modules]
+    sockets = [m for _, m in imported if m.split(".")[0] in _SOCKETS] + \
+        [f"asyncio's {n.func.attr}" for n in ast.walk(tree) if isinstance(n, ast.Call)
+         and isinstance(n.func, ast.Attribute) and n.func.attr in _ASYNC_TRANSPORTS
+         and any(m.split(".")[0] == "asyncio" for _, m in imported)]
+    if sip and sockets:
+        out.setdefault("SIP-2", (sip[0][0], f"puts {sip[0][1]}'s messages on {sockets[0]}"))
+    return out
 
 
 def check_reference_point_naming(root: Path) -> List[str]:
-    """VP1-BND-010 / PLT-PRF-032 — boundaries are named for their interface."""
+    """VP1-BND-010 / PLT-PRF-032 — boundaries are named for their reference point.
+
+    The reference points are PLT-SRS §3.1's. Every one in the current phase
+    (`SRS_PHASE`) has the modules that implement it listed in
+    `REFERENCE_POINT_MODULES`, and each of those declares, at module level,
+    `REFERENCE_POINT = "<name>"` with that name (its last binding, a
+    string constant). A runtime module named for a reference point's
+    protocol (`REFERENCE_POINT_STEMS`: sip*, http*, in any letter case, in
+    its file or package name) is listed for it unless `NOT_REFERENCE_POINTS`
+    gives the reason it is not; so is one that carries the protocol (an
+    HTTP stack imported, `from http import server` too; `SIP/2.0` or
+    `HTTP/1.` written as a start line, its status code a literal or filled
+    in; core.sip's messages put on a socket, ssl or asyncio transport),
+    which also means
+    a listed module carrying the other reference point's protocol fails;
+    and no class in a listed module is named for the other one. No module in core/ or
+    service/ declares a reference point that is not in §3.1, or declares one
+    without being listed for it; no listed name is missing from §3.1.
+    """
     violations: List[str] = []
-    used = set()
-    for path in _iter_python(root, CORE):
-        used |= set(re.findall(r'"(IF-[A-Z]{3})"',
-                               path.read_text(encoding="utf-8")))
-    unknown = used - INTERFACE_IDS
-    if unknown:
-        violations.append(f"unknown interface identifiers in core: {sorted(unknown)}")
-    missing = INTERFACE_IDS - used
-    if missing:
-        violations.append(
-            f"interfaces never named at their call site: {sorted(missing)}")
-    return violations
+    points = _reference_points(root)
+    if not points:
+        return ["docs/PLT-SRS.md: §3.1 lists no external interfaces to name boundaries after"]
+    for name in REFERENCE_POINT_MODULES:
+        if name not in points:
+            violations.append(f"REFERENCE_POINT_MODULES names {name!r}, which PLT-SRS §3.1 "
+                              "does not list")
+    for name, phase in sorted(points.items()):
+        if phase == SRS_PHASE and not REFERENCE_POINT_MODULES.get(name):
+            violations.append(f"PLT-SRS §3.1 {name} ({phase}): no module is named for it")
+    listed = {rel: name for name, rels in REFERENCE_POINT_MODULES.items() for rel in rels}
+    trees, unreadable = _runtime_trees(root)
+    violations += unreadable
+    present = {rel for rel, _ in trees}
+    for rel, name in sorted(listed.items()):
+        if rel not in present:
+            violations.append(f"{rel}: listed for {name}, and missing")
+    for rel, tree in trees:
+        declared = _declared_reference_point(tree)
+        tokens = [t for p in rel.split("/")[1:] for t in re.split(r"[_.\-]", p.lower())]
+        for prefix, name in sorted(REFERENCE_POINT_STEMS.items()):
+            if any(t.startswith(prefix) for t in tokens) and listed.get(rel) != name and \
+                    rel not in NOT_REFERENCE_POINTS:
+                violations.append(f"{rel}: named for {name} and not listed for it in "
+                                  "REFERENCE_POINT_MODULES")
+        for name, why in sorted(_carries_reference_point(tree).items()):
+            if listed.get(rel) != name:
+                violations.append(f"{rel}:{why[0]}: {why[1]}, so it implements {name}, and is "
+                                  "not listed for it in REFERENCE_POINT_MODULES")
+        if rel in listed:
+            other = "http" if listed[rel] == "SIP-2" else "sip"
+            for node in ast.walk(tree):
+                # By word, and not an error a module may raise about the
+                # other (`HttpProxyUnreachable` in a SIP module).
+                if isinstance(node, ast.ClassDef) and other and any(
+                        t.lower().startswith(other) for t in _NAME_PARTS.findall(node.name)) \
+                        and not re.search(r"(Error|Exception|Unreachable|Failure|Refused)$",
+                                          node.name):
+                    violations.append(f"{rel}:{node.lineno}: class {node.name} is named for "
+                                      f"another reference point than this module's "
+                                      f"{listed[rel]}")
+        if rel in listed and declared != listed[rel]:
+            violations.append(f"{rel}: implements {listed[rel]} and does not say so: declare "
+                              f"REFERENCE_POINT = {listed[rel]!r}")
+        elif rel not in listed and declared is not None:
+            violations.append(f"{rel}: declares REFERENCE_POINT = {declared!r} but is not "
+                              "listed for it in REFERENCE_POINT_MODULES")
+        if declared is not None and declared not in points:
+            violations.append(f"{rel}: REFERENCE_POINT {declared!r} is not a PLT-SRS §3.1 "
+                              "interface")
+    return sorted(set(violations), key=_by_line)
+
 
 
 # --------------------------------------------------------------------------
@@ -1934,7 +2634,7 @@ TABLE_INTERPRETER = ("profiles/common/tables.py", "TablePriorityPolicy")
 # module functions it calls (`_matches`), docstrings left out. A change to
 # either fails VP1-BND-011 until it is reviewed and this is updated
 # (`interpreter_fingerprint`).
-INTERPRETER_FINGERPRINT = "ddaecef91a4953543ec09b3310817a29b11da80d9bc8b4b89c17e1d0a1dee0b4"
+INTERPRETER_FINGERPRINT = "513f1656297641ddf971d6818efdbd0a998ee08586f65a26fd19201faff9754d"
 # Literals the table interpreter may compare with or return: the match
 # wildcard, no value, and compare's three answers (PLT-ICD-001 §4.2 POST-1).
 STRUCTURAL_LITERALS = frozenset({"*", None, 0, 1, -1})
@@ -2018,16 +2718,15 @@ def _interpreter_parts(tree):
 def interpreter_fingerprint(root: Path) -> str:
     """sha256 of the interpreter's syntax (TablePriorityPolicy and the module
     functions it calls, transitively), docstrings left out."""
-    import hashlib
     try:
-        tree = _parse(root / TABLE_INTERPRETER[0])
+        source = (root / TABLE_INTERPRETER[0]).read_text(encoding="utf-8")
+        tree = ast.parse(source)
     except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
         return ""
     parts = _interpreter_parts(tree)
     if not parts:
         return ""
-    return hashlib.sha256("\n".join(ast.dump(_without_docstrings(p)) for p in parts)
-                          .encode()).hexdigest()
+    return source_fingerprint(source, parts)
 
 
 def _chain(node) -> List[str]:
@@ -3912,32 +4611,172 @@ def check_time_discipline(root: Path) -> List[str]:
 # VP1-BND-020 / 021 — conformance suites
 # --------------------------------------------------------------------------
 
-CI_CANDIDATES = (".github/workflows/ci.yml", ".gitlab-ci.yml", "Makefile")
+# A suite counts as run when a command line of a step starts with it, not
+# when its name merely appears (`echo tools/check_boundary.py`).
+_GATE_RUN = re.compile(r"(?m)^\s*python3?\s+tools/check_boundary\.py\b")
+_UNIT_RUN = re.compile(r"(?m)^\s*(python3?\s+-m\s+)?pytest\s+tests/?(\s|$)")
+_CONFORMANCE_RUN = re.compile(r"(?m)^\s*(python3?\s+-m\s+)?pytest\s+tests/test_conformance\.py\b")
+
+# Anything after the command on its line that can swallow its failure: a
+# second command, a pipe, `||`, backgrounding.
+_STATUS_DISCARDED = re.compile(r"[;|&]")
+# The boundary and unit steps as they run, whole (as VP1-REL-002 pins the
+# conformance step): nothing narrows them, nothing follows them.
+GATE_RUN_EXACT = "python3 tools/check_boundary.py --root ."
+UNIT_RUN_EXACT = "python3 -m pytest tests/ -q"
+
+
+def _ci_on(doc) -> List[str]:
+    """What keeps the workflow from running on every push and pull request:
+    a missing event, or any filter (branches, tags, paths, types)."""
+    on = doc.get("on", doc.get(True)) if isinstance(doc, dict) else None
+    events = {}
+    if isinstance(on, str):
+        events = {on: None}
+    elif isinstance(on, list):
+        events = {e: None for e in on if isinstance(e, str)}
+    elif isinstance(on, dict):
+        events = on
+    problems = []
+    for event in ("push", "pull_request"):
+        if event not in events:
+            problems.append(f"does not run on {event}")
+        elif events[event] not in (None, {}) and not (
+                isinstance(events[event], dict) and set(events[event]) == {"branches"}
+                and events[event]["branches"] == ["**"]):
+            problems.append(f"filters {event} ({', '.join(sorted(events[event]))}): a change "
+                            "can skip the suites" if isinstance(events[event], dict)
+                            else f"filters {event}")
+    return problems
 
 
 def check_ci_runs_both_suites(root: Path) -> List[str]:
-    """VP1-BND-020 / PLT-VER-002 — both suites on every change, unskippable."""
-    violations: List[str] = []
-    found = [c for c in CI_CANDIDATES if (root / c).is_file()]
-    if not found:
-        return [f"no CI configuration found (looked for {', '.join(CI_CANDIDATES)})"]
+    """VP1-BND-020 / PLT-VER-002 — every suite on every change, unskippable.
+
+    The workflow (.github/workflows/ci.yml), parsed:
+      * runs on every push and every pull request, with no branch, tag,
+        path or type filter;
+      * has the boundary gate, the unit suite (`pytest tests/`) and the
+        conformance suite (`pytest tests/test_conformance.py`) as step
+        commands, each at the start of a line of a step's run;
+      * the conformance job's matrix.profile is exactly the in-tree
+        profiles (profiles/*/profile.yaml) and its run states
+        MCX_PROFILE from that matrix;
+      * no job or step has `if` or `continue-on-error`, no step is
+        allowed to fail (`allow_failure`, a parsed key), and no suite's
+        command line can discard its exit status (`;`, `|`, `||`, `&`
+        after it, `2>&1` aside, or `set +e` in its step);
+      * the boundary and unit jobs are the fixed setup (CONFORMANCE_SETUP)
+        then one step running exactly `GATE_RUN_EXACT` or `UNIT_RUN_EXACT`,
+        with no env or shell of its own (the conformance job is
+        VP1-REL-002's);
+      * every job running a suite has no concurrency, env, defaults,
+        container or services, needs nothing but the boundary job, and
+        runs on the hosted ubuntu-latest;
+      * ci.yml is the only workflow, so none cancels or stands in for it.
+    `branches: ['**']` is no filter. Not judged: branch protection and
+    required checks on the hosting service.
+    """
+    import yaml
+    candidate = ".github/workflows/ci.yml"
+    path = root / candidate
+    if not path.is_file():
+        return [f"no CI configuration found ({candidate})"]
+    text = path.read_text(encoding="utf-8")
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return [f"{candidate}: not valid YAML ({exc})"]
+    violations = [f"{candidate}: {p}" for p in _ci_on(doc)]
+    violations += _workflow_escapes(candidate, text)
+
+    def keys(x):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                yield k
+                yield from keys(v)
+        elif isinstance(x, list):
+            for v in x:
+                yield from keys(v)
+    if "allow_failure" in set(keys(doc)):
+        violations.append(f"{candidate}: contains allow_failure, a failure escape")
+    # Another workflow could cancel these runs or stand in for them.
+    for other in sorted((root / ".github" / "workflows").glob("*")):
+        if other.is_file() and other.name != "ci.yml":
+            violations.append(f".github/workflows/{other.name}: a second workflow; the "
+                              "suites' workflow is ci.yml alone")
+    jobs = doc.get("jobs") if isinstance(doc, dict) else {}
+    jobs = jobs if isinstance(jobs, dict) else {}
+
+    def steps(job):
+        return [st for st in (job.get("steps") or []) if isinstance(st, dict)] \
+            if isinstance(job, dict) else []
+
+    runs = [(name, st) for name, job in jobs.items() for st in steps(job)]
+    for name, st in runs:
+        run = st.get("run") or ""
+        if not any(r.search(run) for r in (_GATE_RUN, _UNIT_RUN, _CONFORMANCE_RUN)):
+            continue
+        for line in run.splitlines():
+            if any(r.search(line) for r in (_GATE_RUN, _UNIT_RUN, _CONFORMANCE_RUN)) and \
+                    _STATUS_DISCARDED.search(line.replace("2>&1", "")) or \
+                    re.match(r"\s*set\s+\+e\b", line):
+                violations.append(f"{candidate}: job {name} runs a suite and can discard its "
+                                  f"exit status: {line.strip()}")
+    for name, st in runs:
+        run = (st.get("run") or "").strip()
+        for regex, exact, what in ((_GATE_RUN, GATE_RUN_EXACT, "the boundary gate"),
+                                   (_UNIT_RUN, UNIT_RUN_EXACT, "the unit suite")):
+            if regex.search(run) and run != exact:
+                violations.append(f"{candidate}: job {name} runs {what} as {run!r}, not "
+                                  f"exactly {exact!r}")
+            if regex.search(run) and ({"env", "shell"} & set(st)):
+                violations.append(f"{candidate}: job {name} gives {what} its own "
+                                  f"{' and '.join(sorted({'env', 'shell'} & set(st)))}")
+    suite_jobs = [(name, job) for name, job in jobs.items() if any(
+        r.search(st.get("run") or "") for st in steps(job)
+        for r in (_GATE_RUN, _UNIT_RUN, _CONFORMANCE_RUN))]
+    for name, job in suite_jobs:
+        # The boundary and unit jobs: the fixed setup, then the suite, as
+        # VP1-REL-002 holds the conformance job to.
+        plain = [{k: v for k, v in st.items() if k != "name"} for st in steps(job)]
+        if any(_GATE_RUN.search(st.get("run") or "") or _UNIT_RUN.search(st.get("run") or "")
+               for st in plain) and plain[:-1] != CONFORMANCE_SETUP:
+            violations.append(f"{candidate}: job {name} does more around its suite than the "
+                              "fixed setup (CONFORMANCE_SETUP)")
+        for key in ("concurrency", "env", "defaults", "container", "services"):
+            if key in job:
+                violations.append(f"{candidate}: job {name} runs a suite and has {key!r}, "
+                                  "which can cancel, alter or replace its run")
+        needs = job.get("needs") or []
+        needs = [needs] if isinstance(needs, str) else needs
+        if set(map(str, needs)) - {"boundary"}:
+            violations.append(f"{candidate}: job {name} runs a suite and needs "
+                              f"{sorted(set(map(str, needs)) - {'boundary'})}; a job it "
+                              "waits on could skip it")
+        if job.get("runs-on") != "ubuntu-latest":
+            violations.append(f"{candidate}: job {name} runs a suite on "
+                              f"{job.get('runs-on')!r}, not the hosted ubuntu-latest")
+    if not any(_GATE_RUN.search(st.get("run") or "") for _, st in runs):
+        violations.append(f"{candidate}: the boundary gate is not run")
+    if not any(_UNIT_RUN.search(st.get("run") or "") for _, st in runs):
+        violations.append(f"{candidate}: the unit suite (pytest tests/) is not run")
     profiles = sorted(p.parent.name for p in (root / PROFILES).glob("*/profile.yaml"))
-    for candidate in found:
-        text = (root / candidate).read_text(encoding="utf-8")
-        for profile in profiles:
-            if profile not in text:
-                violations.append(
-                    f"{candidate}: no suite run for profile {profile!r}")
-        if "check_boundary" not in text:
-            violations.append(f"{candidate}: boundary gate is not run")
-        # A suite that can be skipped by branch or label is not evidence.
-        for escape in ("if: ", "allow_failure", "continue-on-error"):
-            if escape in text:
-                violations.append(
-                    f"{candidate}: contains a conditional or failure escape "
-                    f"({escape.strip()})")
-        if candidate.endswith(".yml"):
-            violations += _workflow_escapes(candidate, text)
+    conformance = [(name, job) for name, job in jobs.items() if any(
+        _CONFORMANCE_RUN.search(st.get("run") or "") for st in steps(job))]
+    if not conformance:
+        violations.append(f"{candidate}: the conformance suite is not run")
+    for name, job in conformance:
+        matrix = ((job.get("strategy") or {}).get("matrix") or {}) if isinstance(job, dict) else {}
+        got = matrix.get("profile") if isinstance(matrix, dict) else None
+        if not isinstance(got, list) or sorted(map(str, got)) != profiles:
+            violations.append(f"{candidate}: job {name} runs the conformance suite for "
+                              f"{got!r}, not every profile {profiles}")
+        for st in steps(job):
+            if _CONFORMANCE_RUN.search(st.get("run") or "") and \
+                    (st.get("env") or {}).get("MCX_PROFILE") != "${{ matrix.profile }}":
+                violations.append(f"{candidate}: job {name} does not state MCX_PROFILE from "
+                                  "its matrix")
     return violations
 
 
@@ -4140,17 +4979,494 @@ def _pytest_addopts(root: Path) -> List[str]:
     return found
 
 
+# VP1-BND-021: the suite's profile axis, written once and only this way.
+_ALL_PROFILES_EXPR = 'sorted(p.parent.name for p in PROFILES.glob("*/profile.yaml"))'
+_PROFILE_NAMES_EXPR = ("[os.environ['MCX_PROFILE']] if os.environ.get('MCX_PROFILE') "
+                       "else ALL_PROFILES")
+# The core-hash test, and the assertion it must make.
+CORE_HASH_TEST = "test_the_suite_runs_against_the_core_of_the_profiles_release_image"
+_CORE_HASH_ASSERT = "assert package.core_hash(tree) == manifest['core_hash']"
+_RUN_TIME_ASSERT = "assert _replaced_at_run_time() == []"
+# The run-time check, as reviewed (`_replaced_at_run_time` in the suite).
+RUN_TIME_CHECK_FINGERPRINT = "7dc6e4b7597d6bc899de8976e648a4572358a99a9f1eab4a5a432603661f28e6"
+_SKIPS = frozenset({"skip", "skipif", "xfail", "importorskip"})
+# The suite's run-time checks, pinned together: the check, and the same
+# check once every test has run (a session fixture's teardown).
+RUN_TIME_CHECKS = ("_replaced_at_run_time", "_still_as_their_files_say")
+# What the suite's module level may run, besides bindings and definitions.
+_SUITE_MODULE_CALLS = ("sys.path.insert(0, str(ROOT))",)
+# The suite's environment variables, which hold the platform's name.
+_SUITE_ENV = re.compile(r"\bMCX_(PROFILE|RELEASE)\b")
+# What the suite may import: the platform, the packager, a few standard
+# modules, and the reviewed helper (SUITE_HELPERS). Not profiles.*: a
+# profile is reached through core's loader, the same way for every one.
+SUITE_IMPORTS = ("__future__", "os", "sys", "pathlib", "pytest", "json", "re",
+                 "core", "service", "package", "tests.mcpttinfo_fixture")
+# ... and what the pinned checks import besides, to read the code.
+_RUN_TIME_CHECK_IMPORTS = ("ast", "copy", "inspect")
+# Test helpers the suite imports, pinned as reviewed (source_fingerprint).
+SUITE_HELPERS: Dict[str, str] = {"tests/mcpttinfo_fixture.py": "665c553db99b2c58a74bf15e0d401d3f30fbad600d3a12947c48472e57319850"}
+# Asking what an object is, or where its code is: a profile's hook class
+# or package tells the profiles apart.
+_INTROSPECTION_CALLS = frozenset({"type", "isinstance", "issubclass"})
+_TEXT_OF_AN_OBJECT = frozenset({"repr", "ascii", "format", "id"})
+_INTROSPECTION_ATTRS = frozenset({"__class__", "__mro__", "__bases__", "__dict__",
+                                  "__file__", "__module__", "__qualname__"})
+# Reaching into the loaded code from a test: patching, mutating, rebinding.
+_SUITE_ESCAPE_CALLS = frozenset({"setattr", "delattr", "exec", "eval", "compile",
+                                 "__import__", "globals", "vars", "reload",
+                                 "import_module", "getmodule"})
+_MUTATORS = frozenset({"update", "pop", "popitem", "clear", "setdefault", "append",
+                       "extend", "insert", "remove", "add", "discard", "sort", "reverse",
+                       "__setitem__", "__delitem__", "__setattr__", "__delattr__"})
+
+
+_IDENTITY_ATTRS = frozenset({"name", "version", "content_hash"})
+# The tests that take the profile's name itself; the rest get it as `loaded`.
+PROFILE_NAME_TESTS = ("test_profile_loads", CORE_HASH_TEST)
+
+
+def _profile_identity(x) -> bool:
+    """Which profile this is: `profile_name`, a fixture's `request.param`,
+    or a profile's name, version, content hash or identifier
+    (`loaded.profile.name`, `loaded.profile.identifier()`)."""
+    if isinstance(x, ast.Call):
+        return isinstance(x.func, ast.Attribute) and x.func.attr == "identifier" and \
+            isinstance(x.func.value, ast.Attribute) and x.func.value.attr == "profile"
+    return isinstance(x, ast.Name) and x.id == "profile_name" or \
+        isinstance(x, ast.Attribute) and x.attr == "param" and \
+        isinstance(x.value, ast.Name) and x.value.id == "request" or \
+        isinstance(x, ast.Attribute) and x.attr in _IDENTITY_ATTRS and \
+        isinstance(x.value, ast.Attribute) and x.value.attr == "profile"
+
+
+def _suite_escapes(tree, profile_names=()) -> List[Tuple[int, str]]:
+    """The conformance suite reaching past its parameter (VP1-BND-021):
+      * a run-time check (RUN_TIME_CHECKS) bound more than once, or a
+        definition made under a condition (module level holds only
+        imports, bindings, definitions and `_SUITE_MODULE_CALLS`);
+      * a test changing the loaded code: an assignment, augmented
+        assignment or del whose target is reached from core or service
+        (an imported name or `core.`/`service.`), a mutating method
+        (`_MUTATORS`) called on one, monkeypatch, sys.modules, or a call
+        in `_SUITE_ESCAPE_CALLS` (the pinned checks aside, which read
+        sys.modules and vars to do theirs);
+      * a branch on which profile is running: a profile's identity
+        (`_profile_identity`) in an if, while, conditional expression or
+        comprehension test, unless compared with another profile's
+        identity (`other.profile.name == loaded.profile.name`); used as
+        the object of a method, attribute or subscript; or copied to a
+        name;
+      * a string that is a profile's name, part of one (three letters or
+        more) or holds one, in any letter case, anywhere but a docstring
+        and the environment variables' names (MCX_PROFILE, MCX_RELEASE):
+        in a branch, a module binding, a default, a fixture
+        (`"utility" in loaded.source.parts`, `"util"`, `"profiles.frmcs"`);
+      * in a test's or a fixture's code, the running selection
+        PROFILE_NAMES, a profile's `.source` directory, any dunder
+        attribute (`__module__`, `__repr__()`, `__getattribute__`; a core
+        module's `__file__` aside), or pytest's record of the
+        parameter (`request.node`, `.config`, `.callspec`,
+        getfixturevalue)."""
+    out: List[Tuple[int, str]] = []
+    parent = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    for name in RUN_TIME_CHECKS:
+        bound = [n.lineno for n in ast.walk(tree)
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                 and n.name == name
+                 or isinstance(n, ast.Name) and n.id == name and
+                 not isinstance(n.ctx, ast.Load)
+                 or isinstance(n, ast.alias) and (n.asname or n.name) == name
+                 or isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names]
+        if len(bound) > 1:
+            out.append((bound[1], f"binds {name} again; the reviewed check is the one run"))
+    allowed = {ast.dump(ast.parse(c, mode="eval").body) for c in _SUITE_MODULE_CALLS}
+    # A module-level name the checks read (ROOT, Path, sys) rebound later.
+    seen: Dict[str, int] = {}
+    for n in tree.body:
+        names = [n.name] if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                           ast.ClassDef)) else \
+            [(a.asname or a.name).split(".")[0] for a in n.names] \
+            if isinstance(n, (ast.Import, ast.ImportFrom)) else \
+            [x.id for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+             for x in ast.walk(t) if isinstance(x, ast.Name) and
+             isinstance(x.ctx, ast.Store)] \
+            if isinstance(n, (ast.Assign, ast.AnnAssign)) else []
+        for name in names:
+            if name in seen and name not in RUN_TIME_CHECKS:
+                out.append((n.lineno, f"binds {name} again at module level (first at line "
+                                      f"{seen[name]}); each module-level name is bound once"))
+            seen.setdefault(name, n.lineno)
+    for i, n in enumerate(tree.body):
+        if isinstance(n, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef,
+                          ast.ClassDef)):
+            continue
+        if isinstance(n, (ast.Assign, ast.AnnAssign)) and all(
+                isinstance(t, ast.Name)
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target])):
+            continue
+        if isinstance(n, ast.Expr) and (i == 0 and isinstance(n.value, ast.Constant)
+                                        or ast.dump(n.value) in allowed):
+            continue
+        out.append((n.lineno, f"module level runs {type(n).__name__.lower()} "
+                              f"`{ast.unparse(n).splitlines()[0][:60]}`; the suite's module "
+                              "level only imports, binds and defines"))
+    platform = {"core", "service"}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            platform |= {(a.asname or a.name.split(".")[0]) for a in n.names
+                         if a.name.split(".")[0] in ("core", "service")}
+        elif isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] in \
+                ("core", "service"):
+            platform |= {(a.asname or a.name) for a in n.names}
+
+    reviewed = {id(x) for d in tree.body if isinstance(d, ast.FunctionDef)
+                and d.name in RUN_TIME_CHECKS for x in ast.walk(d)}
+    same = "the suite is the same for every profile"
+
+    def fixture(f):
+        return any("fixture" in ast.unparse(d) for d in f.decorator_list)
+
+    def in_fixture(x):
+        while x is not None and not isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            x = parent.get(x)
+        return x is not None and fixture(x)
+
+    def identity_allowed(n, p):
+        """In an assertion, an f-string, the core's (or the packager's)
+        argument, `PROFILES / name`, or == / != / is another identity."""
+        s = p
+        while s is not None and not isinstance(s, ast.stmt):
+            s = parent.get(s)
+        if isinstance(s, ast.Assert) or isinstance(p, ast.FormattedValue):
+            return True
+        if isinstance(p, ast.keyword):
+            p = parent.get(p)
+            if isinstance(p, ast.Call) and root_name(p.func) in platform | {"package"}:
+                return True
+        if isinstance(p, ast.Call) and n in p.args and \
+                root_name(p.func) in platform | {"package"}:
+            return True
+        if isinstance(p, ast.BinOp) and isinstance(p.op, ast.Div) and p.right is n and \
+                isinstance(p.left, ast.Name) and p.left.id == "PROFILES":
+            return True
+        return isinstance(p, ast.Compare) and len(p.comparators) == 1 and \
+            isinstance(p.ops[0], (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)) and \
+            _profile_identity(p.left) and _profile_identity(p.comparators[0])
+
+    def root_name(x):
+        while isinstance(x, (ast.Attribute, ast.Subscript, ast.Call)):
+            x = x.func if isinstance(x, ast.Call) else x.value
+        return x.id if isinstance(x, ast.Name) else None
+    for n in ast.walk(tree):
+        if id(n) in reviewed:          # the pinned checks themselves
+            continue
+        targets = n.targets if isinstance(n, (ast.Assign, ast.Delete)) else \
+            [n.target] if isinstance(n, (ast.AugAssign, ast.AnnAssign)) else []
+        for t in targets:
+            for x in ast.walk(t):
+                if isinstance(x, ast.Attribute) and any(
+                        isinstance(y, ast.Call) for y in ast.walk(x.value)):
+                    out.append((n.lineno, f"changes {ast.unparse(x)}, reached through a "
+                                          f"call; {'the suite runs the code as its files say'}"))
+                    break
+                if isinstance(x, (ast.Attribute, ast.Subscript)) and \
+                        root_name(x) in platform:
+                    out.append((n.lineno, f"changes {ast.unparse(x)}, which core or service "
+                                          "holds; the suite runs the code as its files say"))
+                    break
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Attribute) and f.attr in _MUTATORS and \
+                    root_name(f.value) in platform:
+                out.append((n.lineno, f"calls {ast.unparse(f)}, changing what core or "
+                                      "service holds"))
+            fname = f.id if isinstance(f, ast.Name) else \
+                f.attr if isinstance(f, ast.Attribute) else ""
+            if fname in _SUITE_ESCAPE_CALLS:
+                out.append((n.lineno, f"calls {fname}; the suite does not patch or "
+                                      "rebind the code it runs"))
+        if isinstance(n, ast.Name) and n.id == "monkeypatch" or \
+                isinstance(n, ast.arg) and n.arg == "monkeypatch":
+            out.append((n.lineno, "uses monkeypatch; the suite runs the code as its files "
+                                  "say"))
+        if isinstance(n, ast.Attribute) and n.attr == "modules" and \
+                isinstance(n.value, ast.Name) and n.value.id == "sys":
+            out.append((n.lineno, "reads sys.modules; the suite does not reach past its "
+                                  "imports"))
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                n.name not in PROFILE_NAME_TESTS and not fixture(n) and \
+                any(a.arg == "profile_name" for a in n.args.args + n.args.kwonlyargs):
+            out.append((n.lineno, f"{n.name} takes profile_name; a test gets its profile as "
+                                  "`loaded`, the same for every profile"))
+        if _profile_identity(n) and not (isinstance(n, ast.Name) and
+                                         isinstance(n.ctx, ast.Store)) and \
+                not (isinstance(n, ast.Attribute) and n.attr == "param" and
+                     in_fixture(n)):
+            p = parent.get(n)
+            if not identity_allowed(n, p):
+                out.append((n.lineno, f"uses {ast.unparse(n)} other than in an assertion, "
+                                      "as the core's argument or against another profile's; "
+                                      "the suite is the same for every profile"))
+            q, c = p, n
+            while q is not None and not isinstance(q, (ast.stmt, ast.comprehension)):
+                c, q = q, parent.get(q)
+            test = getattr(q, "test", None) if isinstance(q, (ast.If, ast.While)) else None
+            for e in ast.walk(q) if q is not None else []:
+                if isinstance(e, ast.IfExp) and any(x is n for x in ast.walk(e.test)):
+                    test = e.test
+            if isinstance(q, ast.Match) and any(x is n for x in ast.walk(q.subject)):
+                test = q.subject
+            if isinstance(q, ast.comprehension) and any(
+                    any(x is n for x in ast.walk(i)) for i in q.ifs):
+                test = next(i for i in q.ifs if any(x is n for x in ast.walk(i)))
+            if test is not None and any(x is n for x in ast.walk(test)) and not (
+                    isinstance(test, ast.Compare) and len(test.comparators) == 1 and
+                    isinstance(test.ops[0], (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)) and
+                    _profile_identity(test.left) and _profile_identity(test.comparators[0])):
+                out.append((n.lineno, f"branches on {ast.unparse(n)}; the suite is the same "
+                                      "for every profile"))
+    lowered = [p.lower() for p in profile_names]
+
+    def text(c):                       # a str or bytes constant, as text
+        return c.value if isinstance(c.value, str) else \
+            c.value.decode("latin-1") if isinstance(c.value, bytes) else None
+
+    def a_profile(text):
+        t = text.lower()
+        return any(p in t or len(t) >= 3 and t in p for p in lowered)
+
+    def in_test(x):
+        """In a test's or a fixture's code (not its decorators), the pinned
+        checks aside."""
+        while x is not None and not isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            c, x = x, parent.get(x)
+            if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    any(c is d for d in x.decorator_list):
+                return False
+        return x is not None and id(x) not in reviewed
+    docstrings = {id(d.value) for d in _docstring_nodes(tree)}
+    in_branch = set()
+    for n in ast.walk(tree):
+        tests = [n.test] if isinstance(n, (ast.If, ast.While, ast.IfExp)) else \
+            list(n.ifs) if isinstance(n, ast.comprehension) else \
+            [n.subject] + [c.pattern for c in n.cases] if isinstance(n, ast.Match) else []
+        if tests and in_test(n):
+            for t in tests:
+                for c in ast.walk(t):
+                    if isinstance(c, ast.Constant) and text(c) is not None and \
+                            a_profile(text(c)):
+                        in_branch.add(id(c))
+                        out.append((c.lineno,
+                                    f"branches on {c.value!r}, a profile's name; {same}"))
+        if isinstance(n, ast.Attribute) and n.attr.startswith("__") and \
+                n.attr.endswith("__") and in_test(n) and \
+                not (n.attr == "__file__" and root_name(n.value) in platform):
+            out.append((n.lineno, f"reads {ast.unparse(n)}, which names where code comes "
+                                  f"from, a profile's package among them; {same}"
+                        if n.attr in _INTROSPECTION_ATTRS else
+                        f"uses {ast.unparse(n)}, a dunder, which reaches past what the "
+                        f"object offers (its text, its class); {same}"))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and \
+                n.func.id in _INTROSPECTION_CALLS and in_test(n):
+            out.append((n.lineno, f"calls {n.func.id}, asking what an object is; a profile's "
+                                  f"hook class tells the profiles apart; {same}"))
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else \
+                [n.module or ""] if (n.module or "") != "tests" else \
+                [f"tests.{a.name}" for a in n.names]
+            allowed_here = SUITE_IMPORTS + (_RUN_TIME_CHECK_IMPORTS if id(n) in reviewed else ())
+            for m in mods:
+                if not any(m == a or m.startswith(a + ".") for a in allowed_here):
+                    out.append((n.lineno, f"imports {m}; the suite imports the platform, the "
+                                          "packager and SUITE_IMPORTS, and reaches a profile "
+                                          "only through core's loader"))
+        if isinstance(n, ast.Name) and n.id == "PROFILE_NAMES" and in_test(n):
+            out.append((n.lineno, f"reads PROFILE_NAMES, the profiles this run selects; "
+                                  f"{same}"))
+        if isinstance(n, ast.Attribute) and n.attr == "source" and in_test(n):
+            out.append((n.lineno, f"reads {ast.unparse(n)}, a profile's directory; {same}"))
+        if isinstance(n, ast.Attribute) and (
+                n.attr in ("node", "config") and isinstance(n.value, ast.Name) and
+                n.value.id == "request" or n.attr in ("callspec", "getfixturevalue")):
+            out.append((n.lineno, f"reads {ast.unparse(n)}, pytest's record of the "
+                                  f"parameters; {same}"))
+    # A profile's hooks, which differ in class and text from profile to
+    # profile: called, handed to the core, or asserted present, nothing
+    # else (not repr, str, getattr of a dunder, an f-string, a comparison).
+    def hook(e, aliases):
+        return isinstance(e, ast.Attribute) and (
+            e.attr == "hooks" or isinstance(e.value, ast.Attribute) and
+            e.value.attr == "hooks") or \
+            isinstance(e, ast.Name) and isinstance(e.ctx, ast.Load) and e.id in aliases or \
+            isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and \
+            e.func.id == "getattr" and len(e.args) == 2 and hook(e.args[0], aliases) and \
+            not isinstance(e.args[1], ast.Constant)   # a field by name: getattr(hooks, f)
+    for f in ast.walk(tree):
+        if not isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) or id(f) in reviewed:
+            continue
+        aliases: set = set()
+        while True:
+            more = {t.id for a in ast.walk(f) if isinstance(a, ast.Assign) and
+                    hook(a.value, aliases) for t in a.targets if isinstance(t, ast.Name)}
+            if more <= aliases:
+                break
+            aliases |= more
+        for e in ast.walk(f):
+            if not hook(e, aliases) or not in_test(e):
+                continue
+            p = parent.get(e)
+            if isinstance(p, ast.Attribute) and p.value is e and hook(p, aliases) or \
+                    isinstance(p, ast.Call) and p.args and p.args[0] is e and hook(p, aliases):
+                continue               # on the way to a hook: judged as that
+            if isinstance(p, ast.Attribute) and p.value is e and \
+                    isinstance(parent.get(p), ast.Call) and parent[p].func is p:
+                continue               # a method called
+            if isinstance(p, ast.Assign) and p.value is e and \
+                    all(isinstance(t, ast.Name) for t in p.targets):
+                continue               # a name for it, judged where it is used
+            call = parent.get(p) if isinstance(p, ast.keyword) else p
+            if isinstance(call, ast.Call) and call.func is not e and \
+                    root_name(call.func) in platform:
+                continue               # handed to the core
+            s_ = p
+            while s_ is not None and not isinstance(s_, ast.stmt):
+                s_ = parent.get(s_)
+            if isinstance(s_, ast.Assert) and isinstance(p, ast.Compare) and p.left is e and \
+                    len(p.comparators) == 1 and isinstance(p.ops[0], (ast.Is, ast.IsNot)) \
+                    and isinstance(p.comparators[0], ast.Constant) and \
+                    p.comparators[0].value is None:
+                continue               # asserted present
+            out.append((e.lineno, f"uses the hook {ast.unparse(e)} other than to call it, "
+                                  "hand it to the core or assert it is there; a profile's "
+                                  f"hooks tell the profiles apart; {same}"))
+    for n in ast.walk(tree):
+        if not in_test(n) or not isinstance(n, ast.Call) or not isinstance(n.func, ast.Name):
+            continue
+        if n.func.id in _TEXT_OF_AN_OBJECT:
+            out.append((n.lineno, f"calls {n.func.id}, the text of an object, which names "
+                                  f"its class; {same}"))
+        if n.func.id in ("getattr", "hasattr", "setattr", "delattr") and len(n.args) > 1 and \
+                isinstance(n.args[1], ast.Constant) and \
+                str(n.args[1].value).startswith("__"):
+            out.append((n.lineno, f"calls {n.func.id} for {n.args[1].value!r}, which names "
+                                  f"where code comes from; {same}"))
+    # Anywhere else: a module binding, a default, a fixture, an argument.
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and text(n) is not None and \
+                id(n) not in docstrings and id(n) not in in_branch \
+                and a_profile(_SUITE_ENV.sub("", text(n))):
+            out.append((n.lineno, f"writes {n.value!r}, a profile's name; {same}"))
+    return sorted(set(out))
+
+
 def check_per_profile_suite(root: Path) -> List[str]:
-    """VP1-BND-021 / PLT-VER-001 — one suite per profile, same core (VP1-BND-006)."""
+    """VP1-BND-021 / PLT-VER-001 — one suite per profile, same core (VP1-BND-006).
+
+    tests/test_conformance.py:
+      * takes its profiles from the tree, written exactly
+        `ALL_PROFILES = sorted(... PROFILES.glob("*/profile.yaml"))` and
+        `PROFILE_NAMES = [MCX_PROFILE] if set else ALL_PROFILES`, each
+        bound once, and its profile fixture has `params=PROFILE_NAMES`
+        itself: every profile gets the suite, a new one without an edit;
+      * skips nothing: no pytest.skip, skipif, xfail or importorskip;
+      * has CORE_HASH_TEST, asserting that the core it imports hashes as its
+        profile's release image does (VP1-BND-006), and that no core or
+        service code it runs was replaced at run time.
+    The suite reads MCX_PROFILE only for PROFILE_NAMES and never compares a
+    profile's name with a literal (a string, tuple, list, set or f-string);
+    CORE_HASH_TEST also asserts `_replaced_at_run_time() == []`, and a
+    session fixture asserts it again once every test has run: the run-time
+    checks (RUN_TIME_CHECKS), pinned as reviewed together
+    (RUN_TIME_CHECK_FINGERPRINT: functions, wrapped ones included, and
+    module literals of core/ and service/, dicts, lists and sets too, as
+    their files say). Nothing reaches past that (`_suite_escapes`): each
+    check is bound once; module level only imports, binds and defines;
+    no test patches or changes what core or service holds; no test
+    branches on which profile is running; it imports only SUITE_IMPORTS
+    (never profiles.*), and its helper modules are pinned as reviewed
+    (SUITE_HELPERS).
+    tests/conftest.py, which runs before every suite, is pinned as reviewed
+    (`REVIEWED_FILES`), and tests/__init__.py is empty. Tests evidencing this case run the suite under
+    each profile and show every test passing, none skipped.
+    """
     violations: List[str] = []
     suite = root / TESTS / "test_conformance.py"
     if not suite.is_file():
         return ["no per-profile conformance suite (tests/test_conformance.py)"]
-    source = suite.read_text(encoding="utf-8")
-    if "MCX_PROFILE" not in source:
-        violations.append(
-            f"{suite.relative_to(root)}: suite is not parameterised by profile")
-    return violations
+    rel = suite.relative_to(root).as_posix()
+    try:
+        tree = _parse(suite)
+    except (SyntaxError, ValueError, UnicodeDecodeError, OSError):
+        return [f"{rel}: cannot be parsed, so this gate cannot clear it"]
+
+    def bindings(name):
+        return [n.value for n in ast.walk(tree) if isinstance(n, (ast.Assign, ast.AnnAssign))
+                and n.value is not None and any(
+                    isinstance(t, ast.Name) and t.id == name
+                    for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+
+    def same(node, text):
+        return ast.dump(node) == ast.dump(ast.parse(text, mode="eval").body)
+    every = bindings("ALL_PROFILES")
+    if len(every) != 1 or not same(every[0], _ALL_PROFILES_EXPR):
+        violations.append(f"{rel}: ALL_PROFILES is not read from profiles/*/profile.yaml")
+    names = bindings("PROFILE_NAMES")
+    if len(names) != 1 or not same(names[0], _PROFILE_NAMES_EXPR):
+        violations.append(f"{rel}: PROFILE_NAMES is not ALL_PROFILES narrowed by MCX_PROFILE")
+    fixtures = [d for n in tree.body if isinstance(n, ast.FunctionDef) for d in n.decorator_list
+                if isinstance(d, ast.Call) and ast.unparse(d.func).endswith("fixture")
+                and any(k.arg == "params" and isinstance(k.value, ast.Name)
+                        and k.value.id == "PROFILE_NAMES" for k in d.keywords)]
+    if not fixtures:
+        violations.append(f"{rel}: no fixture is parametrised by PROFILE_NAMES")
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and n.attr in _SKIPS and \
+                ast.unparse(n).startswith("pytest.") or \
+                isinstance(n, ast.Name) and n.id in _SKIPS:
+            what = n.attr if isinstance(n, ast.Attribute) else n.id
+            violations.append(f"{rel}:{n.lineno}: skips or expects failure ({what}); a "
+                              "profile's suite runs whole")
+    test = next((n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name == CORE_HASH_TEST), None)
+    for wanted in (_CORE_HASH_ASSERT, _RUN_TIME_ASSERT):
+        if test is None or not any(isinstance(n, ast.Assert) and
+                                   ast.dump(n) == ast.dump(ast.parse(wanted).body[0])
+                                   for n in ast.walk(test)):
+            violations.append(f"{rel}: {CORE_HASH_TEST} does not assert {wanted!r}")
+    pinned = [next((n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == name), None) for name in RUN_TIME_CHECKS]
+    if None in pinned or source_fingerprint(suite.read_text(encoding="utf-8"), pinned) \
+            != RUN_TIME_CHECK_FINGERPRINT:
+        violations.append(f"{rel}: {' and '.join(RUN_TIME_CHECKS)} have changed since they "
+                          "were reviewed; review them and update RUN_TIME_CHECK_FINGERPRINT")
+    in_tree = sorted(p.parent.name for p in (root / PROFILES).glob("*/profile.yaml"))
+    violations += [f"{rel}:{line}: {what}" for line, what in _suite_escapes(tree, in_tree)]
+    # The profile is the suite's parameter, never a branch: no MCX_PROFILE
+    # read but PROFILE_NAMES's, no profile name compared with a literal.
+    names_binding = {id(x) for v in names for x in ast.walk(v)}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Constant) and n.value == "MCX_PROFILE" and \
+                id(n) not in names_binding:
+            violations.append(f"{rel}:{n.lineno}: reads MCX_PROFILE outside PROFILE_NAMES")
+        if isinstance(n, ast.Compare) and any(
+                isinstance(x, ast.Name) and x.id == "profile_name" or
+                isinstance(x, ast.Attribute) and x.attr == "name"
+                for x in [n.left] + n.comparators) and any(
+                isinstance(x, (ast.Constant, ast.Tuple, ast.List, ast.Set, ast.JoinedStr))
+                for x in [n.left] + n.comparators):
+            violations.append(f"{rel}:{n.lineno}: branches on a profile's name; the suite "
+                              "is the same for every profile")
+    init = root / TESTS / "__init__.py"
+    if init.is_file() and init.read_text(encoding="utf-8").strip():
+        violations.append(f"{TESTS}/__init__.py: holds code; it runs before every suite and "
+                          "is kept empty")
+    violations += _reviewed_file(root, "tests/conftest.py")
+    for helper, pinned in SUITE_HELPERS.items():
+        if file_fingerprint(root, helper) != pinned:
+            violations.append(f"{helper}: has changed since it was reviewed; review it and "
+                              "update SUITE_HELPERS")
+    return sorted(set(violations), key=_by_line)
 
 
 RELEASE_MODULE = "core/release.py"

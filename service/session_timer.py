@@ -22,6 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+# PLT-PRF-032: this module implements the SIP-2 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "SIP-2"
+
 
 @dataclass
 class DialogTimer:

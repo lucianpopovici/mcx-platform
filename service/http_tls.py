@@ -19,6 +19,9 @@ from core.errors import StartupRefused
 
 from .config import HttpTlsConfig
 
+# PLT-PRF-032: this module implements the HTTP-1 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "HTTP-1"
+
 HANDSHAKE_TIMEOUT_S = 10
 # After the handshake, how long a connection may sit without completing a
 # request before it is closed; and how many may be open at once. Each holds a

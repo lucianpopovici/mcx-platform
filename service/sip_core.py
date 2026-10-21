@@ -53,6 +53,9 @@ from .session_timer import DialogTimer
 from .sip_txn import (ClientTransactions, ClientTxn, ServerTransactions,
                       ServerTxn, cseq_of, top_branch)
 
+# PLT-PRF-032: this module implements the SIP-2 reference point (PLT-SRS §3.1).
+REFERENCE_POINT = "SIP-2"
+
 log = logging.getLogger("mcx.sip")
 
 ALLOWED = ALLOW          # core/sip.py: UPDATE added for RFC 4028 refresh
