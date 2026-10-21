@@ -52,7 +52,8 @@ def env(tmp_path):
             "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
             "MCX_DATA_DIR": str(tmp_path / "data"),
             "MCX_HTTP_PORT": "0", "MCX_HTTP_TLS": "off",
-            "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse"}
+            "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse",
+            "MCX_ENV": "test"}
 
 
 def with_network(env, fname, **kw):
@@ -228,21 +229,133 @@ def test_the_profile_is_read_once_at_start(env, tmp_path):
         stop(proc)
 
 
-def test_vp1_sig_007_stub_idms_refused_under_production_indicator(env):
-    for indicator in ({"MCX_ENV": "production"}, {"MCX_PRODUCTION": "1"}):
-        with pytest.raises(StartupRefused, match="stub identity provider"):
-            build_runtime({**env, **indicator}, Clock())
+# VP-OP-05 (decided 2026-10-21): production is the network profile's
+# environment, which MCX_ENV, and MCX_PRODUCTION when set, must agree with.
+_PRODUCTION_FORMS = [{"MCX_ENV": "production"},
+                     *({"MCX_ENV": "production", "MCX_PRODUCTION": v}
+                       for v in ("1", "true", "yes"))]
+
+
+def _ids(e):
+    return "+".join(f"{k}={v}" for k, v in e.items())
+
+
+def in_production(env, indicator):
+    """`env` on a production network (the test PLMN may run as production),
+    with the indicator's variables."""
+    return {**with_network(env, "production.yaml", groups=GROUPS,
+                           environment="production"), **indicator}
+
+
+@pytest.mark.vp("VP1-SIG-007")
+@pytest.mark.parametrize("indicator", _PRODUCTION_FORMS, ids=_ids)
+def test_vp1_sig_007_stub_idms_refused_under_production_indicator(env, indicator):
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(in_production(env, indicator), Clock())
+    assert str(exc.value) == ("the stub identity provider is refused when a production "
+                              "indicator is set (PLT-IDM-007)")
     # ... and the refusal happened before anything durable was opened.
     assert not Path(env["MCX_DATA_DIR"]).exists()
-    # Same environment without the indicator starts.
-    build_runtime(env, Clock()).close()
 
 
-def test_vp1_sig_007_process_exits_nonzero(env):
-    proc = spawn({**env, "MCX_ENV": "production"}, free_port())
+@pytest.mark.vp("VP1-SIG-007")
+@pytest.mark.parametrize("environment", ["staging", "test", "dev"])
+def test_vp1_sig_007_the_same_deployment_starts_outside_production(env, environment):
+    """The control: the same deployment, with the stub, in each environment
+    that is not production, starts; so the refusal turns on the indicator."""
+    e = {**with_network(env, f"{environment}.yaml", groups=GROUPS,
+                        environment=environment), "MCX_ENV": environment}
+    rt = build_runtime(e, Clock())
+    try:
+        assert rt.health.snapshot()["environment"] == environment
+    finally:
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-007")
+@pytest.mark.parametrize("file_env,variables,says", [
+    ("production", {"MCX_ENV": "test"},
+     "MCX_ENV='test' disagrees with the network profile's environment 'production'"),
+    ("test", {"MCX_ENV": "production"},
+     "MCX_ENV='production' disagrees with the network profile's environment 'test'"),
+    ("production", {"MCX_ENV": "production", "MCX_PRODUCTION": "0"},
+     "MCX_PRODUCTION='0' disagrees with MCX_ENV='production'"),
+    ("test", {}, "MCX_ENV is not set"),
+], ids=["variable-says-test", "variable-says-production", "flag-disagrees", "unset"])
+def test_vp1_sig_007_the_variable_cannot_switch_the_file(env, file_env, variables, says):
+    """Changing a variable alone switches nothing: it must say what the
+    network profile says, or the process does not start."""
+    e = {k: v for k, v in env.items() if k not in ("MCX_ENV", "MCX_PRODUCTION")}
+    e = {**with_network(e, f"{file_env}-x.yaml", groups=GROUPS, environment=file_env),
+         **variables}
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, Clock())
+    assert says in str(exc.value)
+    assert not Path(env["MCX_DATA_DIR"]).exists()
+
+
+@pytest.mark.vp("VP1-SIG-007")
+@pytest.mark.parametrize("indicator", _PRODUCTION_FORMS, ids=_ids)
+def test_vp1_sig_007_process_exits_nonzero(env, indicator):
+    proc = spawn(in_production(env, indicator), free_port())
     try:
         assert proc.wait(timeout=15) == 2
-        assert b"PLT-IDM-007" in proc.stderr.read()
+        assert b"the stub identity provider is refused when a production indicator " \
+               b"is set (PLT-IDM-007)" in proc.stderr.read()
+        assert not Path(env["MCX_DATA_DIR"]).exists()
+    finally:
+        proc.stdout.close(); proc.stderr.close()
+
+
+@pytest.mark.vp("VP1-LOAD-005")
+@pytest.mark.parametrize("file_env,plmns,variable,says", [
+    ("production", ("001010",), "production",
+     "test mode requested while a production indicator is set (MCX_ENV=production); "
+     "multi-profile loading is refused"),
+    ("production", ("001010",), "test",
+     "MCX_ENV='test' disagrees with the network profile's environment 'production'"),
+    ("test", ("262010",), "test",
+     "environment: test, but plmns 262010 are not test PLMNs"),
+], ids=["production-file", "variable-says-test", "test-on-an-operational-network"])
+def test_vp1_load_005_test_mode_against_the_network_profile(env, file_env, plmns, variable,
+                                                             says):
+    """End to end: two profiles in test mode, the process started, and the
+    network profile deciding (review of VP-OP-05, finding 2)."""
+    e = {**with_network(env, f"tm-{file_env}-{variable}.yaml", groups=GROUPS,
+                        environment=file_env, plmns=plmns),
+         "MCX_PROFILE": "mcx,frmcs", "MCX_TEST_MODE": "1", "MCX_ENV": variable}
+    proc = spawn(e, free_port())
+    try:
+        assert proc.wait(timeout=15) == 2
+        assert says.encode() in proc.stderr.read()
+        assert not Path(env["MCX_DATA_DIR"]).exists()
+    finally:
+        proc.stdout.close(); proc.stderr.close()
+
+
+@pytest.mark.vp("VP1-LOAD-005")
+def test_vp1_load_005_test_mode_starts_on_a_test_network(env):
+    """The control: the same two profiles and test mode, on a test network
+    that says test, start."""
+    e = {**env, "MCX_PROFILE": "mcx,frmcs", "MCX_TEST_MODE": "1"}
+    port = free_port()
+    proc = spawn(e, port)
+    try:
+        wait_ready(port, proc)
+        health = json.loads(get(port, "/healthz")[1])
+        assert (health["environment"], health["network"]["environment"]) == ("test", "test")
+    finally:
+        stop(proc)
+
+
+@pytest.mark.vp("VP1-SIG-007")
+def test_vp1_sig_007_a_process_without_mcx_env_exits_nonzero(env):
+    """A forgotten MCX_ENV does not run the stub: it does not run at all."""
+    proc = spawn({k: v for k, v in env.items() if k != "MCX_ENV"}, free_port())
+    try:
+        assert proc.wait(timeout=15) == 2
+        assert b"MCX_ENV is not set" in proc.stderr.read()
+        assert not Path(env["MCX_DATA_DIR"]).exists()
     finally:
         proc.stdout.close(); proc.stderr.close()
 
@@ -358,7 +471,7 @@ def test_vp1_oam_003_admission_refusal_establishment_release_audited(env):
         # the wire. NET-OP-01 adds the network profile: which cells meant
         # which location, and which cores could assert any identity.
         ident = (f"{rt.loaded.profile.identifier()}+Rel-19"
-                 f"+test-net/1/{rt.network.content_hash[:16]}")
+                 f"+test-net/1/{rt.network.content_hash[:16]}+test")
         assert all(r["profile"] == ident for r in rt.store.audit_records())
         assert rt.loaded.profile.identifier() in ident and "Rel-19" in ident
     finally:
@@ -632,10 +745,10 @@ def test_a_production_indicator_refuses_every_stub(env):
     below are therefore unreachable in R1 and are here to be reached in R2,
     when a real IdMS exists (recorded as SVC-OP-05).
     """
-    for indicator in ({"MCX_ENV": "production"}, {"MCX_PRODUCTION": "true"}):
+    for indicator in _PRODUCTION_FORMS:
         for stubbed in ({"MCX_RECORDER": "stub"}, {"MCX_BEARER": "stub"}, {}):
-            with pytest.raises(StartupRefused):
-                build_runtime({**env, **stubbed, **indicator}, _clock())
+            with pytest.raises(StartupRefused, match="stub identity provider"):
+                build_runtime({**in_production(env, indicator), **stubbed}, _clock())
 
     from service.runtime import fail_closed_platform
     assert fail_closed_platform().recording_available() is False

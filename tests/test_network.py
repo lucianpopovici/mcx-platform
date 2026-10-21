@@ -75,7 +75,7 @@ def core_net(tmp_path, core_ca):
     return network_yaml(tmp_path, trusted_cores=["c.example"], core_ca=core_ca)
 
 
-GOOD = {"name": "rail-ops", "version": "3", "plmns": [PLMN], "cells": [],
+GOOD = {"name": "rail-ops", "version": "3", "environment": "test", "plmns": [PLMN], "cells": [],
         "sip": {"trusted_cores": [], "core_ca": "none"}, "groups": [], "users": []}
 
 
@@ -134,7 +134,8 @@ def test_a_missing_file_is_refused(tmp_path):
     {**GOOD, "trusted_peers": []}])
 def test_the_keys_are_exactly_these(tmp_path, doc):
     text = refused(raw_yaml(tmp_path, doc))
-    assert "expected exactly the keys cells, groups, name, plmns, sip, users, version" in text
+    assert ("expected exactly the keys cells, environment, groups, name, plmns, sip, users, "
+            "version") in text
 
 
 def test_bad_yaml_is_refused(tmp_path):
@@ -515,14 +516,15 @@ def test_every_audit_record_names_the_network(rt):
     record = rt.auditor.emit(__import__("core.audit", fromlist=["RecordType"])
                              .RecordType.SESSION_REFUSED, "c1")
     assert record.profile == \
-        f"{rt.loaded.profile.identifier()}+{rt.config.release}+{net}"
+        f"{rt.loaded.profile.identifier()}+{rt.config.release}+{net}+test"
 
 
 def test_the_health_document_names_the_network(rt):
     got = rt.health.snapshot()["network"]
     assert got == {"name": "test-net", "version": "1",
                    "hash": rt.network.content_hash,
-                   "identifier": rt.network.identifier()}
+                   "identifier": rt.network.identifier(), "environment": "test"}
+    assert rt.health.snapshot()["environment"] == "test"
 
 
 def shared_key_ca(tmp_path, pki):
@@ -559,3 +561,81 @@ def test_the_example_in_the_repository_loads():
     """CLAUDE.md runs the process with it; it must not rot."""
     n = load_network(ROOT / "examples" / "network.yaml", {"track_section", "yard_id"})
     assert (n.name, n.plmns, n.trusted_cores) == ("example", ("001010",), ())
+    assert n.environment == "dev"          # CLAUDE.md runs it with MCX_ENV=dev
+
+
+# ============================================================ the environment (VP-OP-05)
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+@pytest.mark.parametrize("environment,plmns", [
+    ("production", ["262010"]), ("production", ["001010"]), ("production", ["999001"]),
+    ("staging", ["001010", "001999"]), ("test", ["999999"]), ("dev", ["999990", "001001"]),
+], ids=["production-anywhere", "production-on-a-test-plmn", "production-on-a-private-network",
+        "staging-on-mcc-001", "test-on-999-999", "dev-on-999-99"])
+def test_an_environment_is_read_where_it_may_run(tmp_path, environment, plmns):
+    n = load_network(raw_yaml(tmp_path, {**GOOD, "environment": environment,
+                                         "plmns": plmns}), set())
+    assert n.environment == environment
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+@pytest.mark.parametrize("environment,plmns,live", [
+    ("test", ["262010"], "262010"),
+    ("staging", ["001010", "262010"], "262010"),
+    ("dev", ["999001"], "999001"),
+    ("test", ["999099", "991001"], "991001, 999099"),
+    ("dev", ["002010"], "002010"),
+], ids=["an-operational-plmn", "one-of-two", "a-private-network-is-not-a-test-one",
+        "trials-and-other-999-mncs", "mcc-002"])
+def test_a_non_production_environment_needs_a_test_network(tmp_path, environment, plmns,
+                                                            live):
+    text = refused(raw_yaml(tmp_path, {**GOOD, "environment": environment, "plmns": plmns}))
+    assert (f"environment: {environment}, but plmns {live} are not test PLMNs (MCC 001, "
+            "or 999-999 / 999-99 of ITU-T E.212 Appendix III); a network that is not a "
+            "test network runs as production") in text
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+@pytest.mark.parametrize("value", ["prod", "Production", "", None, 1, ["test"]],
+                         ids=["an-alias", "case", "empty", "null", "a-number", "a-list"])
+def test_the_environment_is_one_of_four(tmp_path, value):
+    text = refused(raw_yaml(tmp_path, {**GOOD, "environment": value}))
+    assert f"environment: expected one of production, staging, test, dev (found {value!r})" \
+        in text
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+def test_the_environment_is_part_of_the_hash(tmp_path):
+    a = load_network(raw_yaml(tmp_path, {**GOOD, "environment": "test"}, "a.yaml"), set())
+    b = load_network(raw_yaml(tmp_path, {**GOOD, "environment": "production"}, "b.yaml"),
+                     set())
+    assert a.content_hash != b.content_hash
+
+
+def test_the_test_plmns_are_these():
+    from service.network import TEST_MCCS, TEST_PLMNS, is_test_plmn
+    assert (TEST_MCCS, TEST_PLMNS) == (("001",), ("999999", "999990"))
+    assert [is_test_plmn(p) for p in ("001000", "001999", "999999", "999990", "999991",
+                                      "999099", "991001", "010010", "262001")] == \
+        [True, True, True, True, False, False, False, False, False]
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+@pytest.mark.parametrize("text,key", [
+    ('environment: production\nname: n\nversion: "1"\nplmns: ["001010"]\ncells: []\n'
+     'sip: {trusted_cores: [], core_ca: none}\ngroups: []\nusers: []\nenvironment: dev\n',
+     "'environment' repeated (first at line 1)"),
+    ('environment: dev\nname: n\nversion: "1"\nplmns: ["262010"]\ncells: []\n'
+     'sip: {trusted_cores: [], core_ca: none}\ngroups: []\nusers: []\nplmns: ["001010"]\n',
+     "'plmns' repeated (first at line 4)"),
+    ('environment: dev\nname: n\nversion: "1"\nplmns: ["001010"]\ncells: []\n'
+     'sip: {trusted_cores: [], core_ca: none, core_ca: x.pem}\ngroups: []\nusers: []\n',
+     "'core_ca' repeated (first at line 6)"),
+], ids=["environment", "plmns", "nested"])
+def test_a_repeated_key_is_refused(tmp_path, text, key):
+    """Review of VP-OP-05: the file reviewed must be the file that runs, and
+    YAML keeps a repeated key's last value without a word."""
+    p = tmp_path / "net.yaml"
+    p.write_text(text)
+    assert key in refused(p)

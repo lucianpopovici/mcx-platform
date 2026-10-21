@@ -345,24 +345,78 @@ def test_vp1_load_004_two_profiles_refused_outside_test_mode():
     assert "exactly one" in str(exc.value)
 
 
-def test_vp1_load_005_test_mode_refused_in_production():
-    env = {"MCX_TEST_MODE": "1", "MCX_ENV": "production"}
+# VP-OP-05 (decided 2026-10-21): the indicator is MCX_ENV=production, which
+# MCX_PRODUCTION, when set, must agree with. These are every form it takes.
+_PRODUCTION_FORMS = [{"MCX_ENV": "production"},
+                     *({"MCX_ENV": "production", "MCX_PRODUCTION": v}
+                       for v in ("1", "true", "yes", "TRUE", " Yes "))]
+_OTHER_FORMS = [*({"MCX_ENV": e} for e in ("staging", "test", "dev")),
+                *({"MCX_ENV": "test", "MCX_PRODUCTION": v}
+                  for v in ("0", "false", "no", "NO"))]
+
+
+@pytest.mark.vp("VP1-LOAD-005")
+@pytest.mark.parametrize("indicator", _PRODUCTION_FORMS,
+                         ids=lambda e: "+".join(f"{k}={v}" for k, v in e.items()))
+def test_vp1_load_005_test_mode_refused_in_production(indicator):
     with pytest.raises(StartupRefused) as exc:
-        loader.startup(["mcx", "frmcs"], PROFILES, env=env)
-    assert "production" in str(exc.value)
+        loader.startup(["mcx", "frmcs"], PROFILES, env={"MCX_TEST_MODE": "1", **indicator})
+    assert str(exc.value) == ("test mode requested while a production indicator is set "
+                              "(MCX_ENV=production); multi-profile loading is refused")
 
 
+@pytest.mark.vp("VP1-LOAD-005")
+@pytest.mark.parametrize("other", _OTHER_FORMS,
+                         ids=lambda e: "+".join(f"{k}={v}" for k, v in e.items()))
+def test_vp1_load_005_the_same_test_mode_starts_without_the_indicator(other):
+    """The control: the identical profile set and test mode, without the
+    indicator, starts; so the refusal turns on the indicator alone."""
+    loaded = loader.startup_all(["mcx", "frmcs"], PROFILES,
+                                env={"MCX_TEST_MODE": "1", **other})
+    assert [lp.profile.name for lp in loaded] == ["mcx", "frmcs"]
+
+
+@pytest.mark.vp("VP1-LOAD-005")
 def test_vp1_load_005_production_indicator_variants():
-    for env in ({"MCX_ENV": "production"}, {"MCX_ENV": "PROD"},
-                {"MCX_PRODUCTION": "1"}, {"MCX_PRODUCTION": "true"}):
-        assert loader.is_production(env), env
-    for env in ({}, {"MCX_ENV": "staging"}, {"MCX_PRODUCTION": "0"}):
+    for env in _PRODUCTION_FORMS:
+        assert loader.is_production(env) and loader.environment(env) == "production", env
+    for env in _OTHER_FORMS:
         assert not loader.is_production(env), env
+    assert loader.ENVIRONMENTS == ("production", "staging", "test", "dev")
+
+
+@pytest.mark.vp("VP1-LOAD-005")
+@pytest.mark.parametrize("env,says", [
+    ({}, "MCX_ENV is not set: state the environment this deployment runs in (production, "
+         "staging, test, dev)"),
+    ({"MCX_ENV": "  "}, "MCX_ENV is not set"),
+    ({"MCX_PRODUCTION": "1"}, "MCX_ENV is not set"),
+    ({"MCX_ENV": "prod"}, "MCX_ENV='prod' must be one of production, staging, test, dev"),
+    ({"MCX_ENV": "Production"}, "MCX_ENV='Production' must be one of production, staging, "
+                                "test, dev"),
+    ({"MCX_ENV": "test", "MCX_PRODUCTION": "1"},
+     "MCX_PRODUCTION='1' disagrees with MCX_ENV='test'; leave it unset or make the two agree"),
+    ({"MCX_ENV": "production", "MCX_PRODUCTION": "no"},
+     "MCX_PRODUCTION='no' disagrees with MCX_ENV='production'"),
+    ({"MCX_ENV": "production", "MCX_PRODUCTION": "maybe"},
+     "MCX_PRODUCTION='maybe' must be one of 1, true, yes, 0, false, no, or be left unset"),
+    ({"MCX_ENV": "test", "MCX_PRODUCTION": ""},
+     "MCX_PRODUCTION='' must be one of 1, true, yes, 0, false, no"),
+], ids=["unset", "blank", "flag-only", "an-old-spelling", "case", "flag-says-production",
+        "flag-says-not", "flag-unreadable", "flag-empty"])
+def test_vp1_load_005_the_environment_is_stated_and_agreed(env, says):
+    """No default, no aliases, and a second spelling that cannot disagree:
+    a forgotten or contradictory setting refuses, it does not run the stubs."""
+    with pytest.raises(StartupRefused) as exc:
+        loader.environment(env)
+    assert says in str(exc.value)
+    with pytest.raises(StartupRefused):
+        loader.startup(["mcx", "frmcs"], PROFILES, env={"MCX_TEST_MODE": "1", **env})
 
 
 def test_vp1_load_006_test_mode_loads_both():
     loaded = loader.startup_all(["mcx", "frmcs"], PROFILES,
-                                env={"MCX_TEST_MODE": "1"})
+                                env={"MCX_TEST_MODE": "1", "MCX_ENV": "test"})
     assert {lp.profile.name for lp in loaded} == {"mcx", "frmcs"}
 
 
@@ -381,6 +435,39 @@ def test_vp1_load_031_malformed_yaml_reports_clearly(tmp_path):
     with pytest.raises(StartupRefused) as exc:
         loader.startup(["broken"], tmp_path, env={})
     assert "YAML" in str(exc.value) or "well-formed" in str(exc.value)
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+def test_a_profile_with_a_repeated_key_is_refused(tmp_path):
+    """Review of VP-OP-05: YAML keeps a repeated key's last value silently, and
+    the hash is of what was parsed, so the profile reviewed could differ from
+    the profile run. A repeated key is a malformed profile."""
+    import shutil
+    shutil.copytree(PROFILES / "mcx", tmp_path / "mcx",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    p = tmp_path / "mcx" / "profile.yaml"
+    lines = p.read_text(encoding="utf-8").splitlines()
+    at, first = next((i, l) for i, l in enumerate(lines, 1)
+                     if l[:1].isalpha() and ":" in l)
+    p.write_text("\n".join(lines + [first]) + "\n", encoding="utf-8")
+    with pytest.raises(StartupRefused) as exc:
+        loader.startup(["mcx"], tmp_path, env={})
+    assert "not well-formed YAML" in str(exc.value)
+    assert f"key {first.split(':')[0]!r} repeated (first at line {at})" in str(exc.value)
+
+
+@pytest.mark.vp("VP1-LOAD-005", "VP1-SIG-007")
+def test_safe_load_unique_is_safe_load_without_repeats():
+    for text in ("a: 1\nb: {c: [1, {d: 2}]}\n", "x: &r {a: 1}\ny:\n  <<: *r\n  a: 2\n",
+                 "1: a\n'1': b\n", "[1, 1]\n", "~\n"):
+        assert loader.safe_load_unique(text) == yaml.safe_load(text), text
+    for text, says in (("{a: 1, a: 2}", "key 'a' repeated (first at line 1)"),
+                       ("a:\n  b: 1\n  b: 2\n", "key 'b' repeated (first at line 2)"),
+                       ("yes: 1\ntrue: 2\n", "key True repeated (first at line 1)"),
+                       ("- {k: 1}\n- {k: 1, k: 1}\n", "key 'k' repeated (first at line 2)")):
+        with pytest.raises(yaml.YAMLError) as exc:
+            loader.safe_load_unique(text)
+        assert says in str(exc.value), text
 
 
 def test_vp1_load_042_call_type_set_is_profile_determined():

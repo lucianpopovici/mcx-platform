@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import List, Mapping, Optional, Tuple
 
 from core.errors import StartupRefused
+from core.loader import environment as loader_environment
 from core.release import Release, parse as parse_release
 from core.sip import MIN_SE_S
 
@@ -362,6 +363,8 @@ class Config:
     floor_unrecorded: str = ""
     # RES-OP-11: "refuse" or "allow". Required, no default.
     foreign_initiator: str = ""
+    # VP-OP-05: MCX_ENV, which the network profile's environment must equal.
+    environment: str = ""
     sip: Optional[SipConfig] = None
     media: Optional[MediaConfig] = None
     # RES-OP-05, owner ruling 2026-10-16: None is MCX_HTTP_TLS=off.
@@ -369,6 +372,9 @@ class Config:
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> "Config":
+        # VP-OP-05: first, so that nothing below runs in an environment the
+        # deployment did not state.
+        environment = loader_environment(env)
         raw_profiles = env.get("MCX_PROFILE", "")
         names = [n.strip() for n in raw_profiles.split(",") if n.strip()]
 
@@ -489,6 +495,7 @@ class Config:
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             network=Path(network),
+            environment=environment,
             floor_unrecorded=floor_unrecorded,
             foreign_initiator=foreign_initiator,
             sip=sip,

@@ -121,7 +121,8 @@ Known gaps, all recorded rather than hidden:
 
 - The FRMCS profile is a **stub**. Its values are placeholders and are not
   reconciled with the UIC FRS/SRS. It must not be used as safety-case input.
-- 25 open points across the documents, several needing decisions rather than
-  work — notably the undefined "production indicator" three requirements depend
-  on, and which components fall under which SIL.
+- Open points across the documents, several needing decisions rather than
+  work — notably which components fall under which SIL. (The "production
+  indicator" three requirements depend on was decided on 2026-10-21: the
+  network profile's `environment`, VP-OP-05.)
 - Only the 83 R1 requirements have a verification plan. R2–R4 do not yet.

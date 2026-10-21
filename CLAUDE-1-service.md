@@ -35,10 +35,11 @@ PLT-GRP-001; PLT-IDM-007.
   several, test mode refused under a production indicator, strict validation,
   hook resolution with arity checking, content hashing. **Call it. Do not
   reimplement any part of it.**
-- `loader.is_production(env)` and `loader.is_test_mode(env)` define the
-  production indicator (`MCX_ENV` in {production, prod}, or `MCX_PRODUCTION`
-  truthy). This is a *proposal* pending confirmation — see VP-OP-05 — but it is
-  what the tests currently assert.
+- `loader.is_production(env)` and `loader.is_test_mode(env)` read the
+  production indicator: `MCX_ENV` (required: production, staging, test, dev),
+  which must equal the network profile's `environment`, and `MCX_PRODUCTION`
+  when set. Decided 2026-10-21 (VP-OP-05, option B); a non-production
+  environment is refused off a test PLMN (PLT-ICD-001 ICD-NET-006).
 - `LoadedProfile.profile.identifier()` returns the `name/version/hash16` triple
   the health endpoint and every audit record must carry.
 - `core/audit.py` — `Auditor` and `MemorySink` exist. You need a durable sink;

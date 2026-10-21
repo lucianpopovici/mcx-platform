@@ -1879,7 +1879,11 @@ LOADER_ENTRY_POINTS = frozenset({"startup", "startup_all", "load", "read_package
                                  "resolve_hooks", "_load_named", "_import_symbol"})
 # What else the process may use of the loader: names that read no profile.
 LOADER_PUBLIC = frozenset({"LoadedProfile", "LoadedHooks", "declared_view", "content_hash",
-                           "canonicalise", "is_production", "is_test_mode"})
+                           "canonicalise", "is_production", "is_test_mode",
+                           # VP-OP-05: the environment, read from MCX_ENV.
+                           "environment", "ENVIRONMENTS", "PRODUCTION",
+                           # ... and YAML read with a repeated key refused.
+                           "safe_load_unique"})
 # Attributes that hold the loaded profile: set at construction only (an
 # `__init__`), or in the one start-time report of it (`HOLDER_SETTERS`).
 PROFILE_HOLDERS = frozenset({"loaded", "_loaded", "profile", "_profile", "hooks", "_hooks"})

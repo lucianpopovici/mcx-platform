@@ -2,6 +2,7 @@
 # Every key is required; [] and "none" state that there is nothing there.
 name: example
 version: "1"
+environment: dev             # production, staging, test or dev; only production off a test PLMN (VP-OP-05)
 plmns: ["001010"]           # 001/01 is the test PLMN; see ICD-OP-12 on two-digit MNCs
 cells: []                   # [{cell: <ECGI or NCGI>, location: {<location_key>: <value>}}]
 sip:
