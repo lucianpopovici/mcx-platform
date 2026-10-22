@@ -405,6 +405,77 @@ def test_parse_invite_selects_the_call_type_declaring_the_signature():
     assert parsed.target == "sip:g@x"      # from <mcptt-request-uri>, not the R-URI
 
 
+def _chosen(*pairs, by_group=()):
+    from types import SimpleNamespace
+    from core.mcinfo import Signature
+    return [SimpleNamespace(id=i, mc_signature=Signature(*sig), group_selected=i in by_group)
+            for i, sig in pairs]
+
+
+def test_the_target_group_chooses_its_call_type_for_its_own_signature():
+    """PRF-OP-01 (decided 2026-10-22): a call to a group that names a
+    group-selected call type is that call type, when it carries exactly that
+    call type's signature; anything else is what its signature says."""
+    from tests import mcpttinfo_fixture as mcf
+    declared = _chosen(("crew", ("prearranged",)), ("switch", ("prearranged",)),
+                       ("emg", ("prearranged", True)), ("p2p", ("private",)),
+                       by_group={"switch"})
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19, declared,
+                      group_call_types={"grp:sw": "switch", "grp:mixed": "emg"})
+    sdp = build_offer([AMR_WB])
+    for xml, want in (
+            (mcf.mcinfo_xml("prearranged", "grp:sw"), "switch"),
+            (mcf.mcinfo_xml("prearranged", "grp:crew"), "crew"),     # names none
+            (mcf.mcinfo_xml("prearranged", "grp:sw", emergency=True), "emg"),
+            (mcf.mcinfo_xml("private", "grp:sw"), "p2p"),
+            (mcf.mcinfo_xml("chat", "grp:sw"), ""),
+            # A group naming a call type of another signature changes nothing.
+            (mcf.mcinfo_xml("prearranged", "grp:mixed"), "crew")):
+        parsed = adapter.parse_invite(well_formed(body=mcf.multipart(sdp, xml),
+                                                  content_type=mcf.CONTENT_TYPE))
+        assert parsed.call_type == want, xml
+    # ... and never by the signature alone, with no group naming it.
+    alone = Adapter("sip:server@mcptt.example", Release.REL_19, declared)
+    parsed = alone.parse_invite(well_formed(
+        body=mcf.multipart(sdp, mcf.mcinfo_xml("prearranged", "grp:sw")),
+        content_type=mcf.CONTENT_TYPE))
+    assert (parsed.call_type, parsed.target) == ("crew", "grp:sw")
+
+
+def test_a_chosen_call_type_the_release_cannot_carry_is_not_chosen():
+    """The release gate comes first: a signature the release has no session
+    type for selects nothing, whatever the group names (ICD-SIG-004)."""
+    from tests import mcpttinfo_fixture as mcf
+    body = mcf.multipart(build_offer([AMR_WB]), mcf.mcinfo_xml("adhoc", "grp:a"))
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_17,
+                      _chosen(("plain", ("adhoc",)), ("chosen", ("adhoc",)),
+                              by_group={"chosen"}),
+                      group_call_types={"grp:a": "chosen"})
+    parsed = adapter.parse_invite(well_formed(body=body, content_type=mcf.CONTENT_TYPE))
+    assert parsed.call_type == ""
+
+
+def test_a_group_selected_call_is_rendered_with_its_signature(wired):
+    """ICD-SIG-005: the members' INVITEs of a coordination call say what the
+    caller's said, a prearranged group call (PRF-OP-01)."""
+    manager, _, _ = wired
+    mcx = loader.load(PROFILES / "mcx")
+    adapter = Adapter("sip:server@mcptt.example", Release.REL_19, mcx.profile.call_types)
+    request = SessionRequest(request_id="c9", initiator="sip:u0@mcptt.example",
+                             target="grp:alpha", call_type="coordination-group",
+                             media=(MediaKind.VOICE,))
+    session, signals, refusal = manager.establish(request)
+    assert refusal is None
+    ctx = DialogContext(call_id="c9", local_uri="sip:server@mcptt.example",
+                        sdp=build_offer([AMR_WB]))
+    rendered = [adapter.render(s, ctx, request) for s in signals
+                if s.type is SignalType.INVITE]
+    assert len(rendered) == 2
+    for msg in rendered:
+        assert "<session-type>prearranged</session-type>" in msg.body
+        assert "<emergency-ind>" not in msg.body
+
+
 def test_ad_hoc_does_not_exist_before_rel_18():
     """An ad hoc request at Rel-17 selects nothing, even where a call type
     declares it: TS 24.379 has no ad hoc group call before Rel-18."""
@@ -990,3 +1061,44 @@ def test_the_participant_limit_code_is_the_core_s_own():
     from core.errors import CORE_ORIGINATED, RESERVED_REASON_CODES
     assert "participant-limit-exceeded" in RESERVED_REASON_CODES
     assert "participant-limit-exceeded" in CORE_ORIGINATED
+
+
+# ---- PRF-OP-01, review: the switching order's own rules apply after the choice
+
+
+def _utility_switching(roles_of_u0=()):
+    from tests import mcpttinfo_fixture as mcf
+    utility = loader.load(PROFILES / "utility")
+    resolver = utility.hooks.identity_resolver
+    members = [f"sip:u{i}@utility.example" for i in range(8)]
+    for m in members:
+        resolver.register_user(m)
+    resolver.register_group("grp:sw", members)
+    if roles_of_u0:
+        # Nothing in the service binds a functional identity yet (SVC-OP-06):
+        # the engineer's binding is stood in for here.
+        real = resolver.identities_of
+        resolver.identities_of = lambda sid: tuple(roles_of_u0) \
+            if sid == "sip:u0@utility.example" else real(sid)
+    manager = SessionManager(utility, Auditor(MemorySink(), utility.profile.identifier(),
+                                              clock=Clock()), clock=Clock())
+    adapter = Adapter("sip:server@utility.example", Release.REL_19,
+                      utility.profile.call_types, group_call_types={"grp:sw": "switching-order"})
+    body = mcf.multipart(build_offer([AMR_WB]), mcf.mcinfo_xml("prearranged", "grp:sw"))
+    msg = well_formed(body=body, content_type=mcf.CONTENT_TYPE)
+    msg.headers.set("From", "<sip:u0@utility.example>;tag=1")
+    request = adapter.parse_invite(msg)
+    return request, manager.establish(request)
+
+
+def test_a_switching_order_is_refused_to_a_caller_without_the_role():
+    request, (session, signals, refusal) = _utility_switching()
+    assert request.call_type == "switching-order"
+    assert session is None and refusal.reason_code == "not-authorised"
+
+
+def test_a_switching_order_from_an_engineer_is_held_to_its_limit():
+    request, (session, signals, refusal) = _utility_switching(["control-engineer"])
+    assert refusal is None and request.call_type == "switching-order"
+    invited = [s for s in signals if s.type is SignalType.INVITE]
+    assert len(invited) == 3            # max_participants 4: the caller and three

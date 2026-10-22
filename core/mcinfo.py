@@ -382,6 +382,10 @@ def reachability(call_types: Sequence[object], release: Release
     undeclared, blocked = [], []
     for ct in call_types:
         sig = getattr(ct, "mc_signature", None)
+        # A group-selected call type (PRF-OP-01) is reachable through the
+        # groups that name it, with its signature: blocked like any other when
+        # the release cannot carry that, and otherwise reported by
+        # group_selected() with its groups, not here.
         if sig is None:
             undeclared.append(ct.id)
         elif not supports_session_type(release, sig.session_type):
@@ -390,6 +394,11 @@ def reachability(call_types: Sequence[object], release: Release
               and not supports_mc_indicator(release, "adhoc-emergency-ind")):
             blocked.append((ct.id, f"{release} has no ad hoc emergency indication"))
     return tuple(undeclared), tuple(blocked)
+
+
+def group_selected(call_types: Sequence[object]) -> Tuple[str, ...]:
+    """The call types a target group chooses (PRF-OP-01), in declaration order."""
+    return tuple(ct.id for ct in call_types if getattr(ct, "group_selected", False))
 
 
 # -- RFC 5366 URI list ---------------------------------------------------------

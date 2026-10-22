@@ -1472,9 +1472,9 @@ up, and the callee received the body naming the caller and the group.
   the platform resolves only prearranged groups (PLT-VP-R1 ADHOC-OP-01).
 - **Two pairs of call types cannot be told apart.** mcx `prearranged-group`
   and `coordination-group`, and utility `crew-call` and `switching-order`,
-  are the same prearranged voice group call to TS 24.379. The second of each
-  pair is declared `null` until the profile owner decides how to separate
-  them (PLT-VP-R1 PRF-OP-01).
+  are the same prearranged voice group call to TS 24.379. Decided 2026-10-22
+  (PLT-VP-R1 PRF-OP-01): the second of each pair is chosen by the target
+  group, for a call with exactly its signature (PLT-ICD-001 ICD-SIG-008).
 - **The specification's own example is malformed.** TS 24.379 V20.0.0 clause
   4.8 EXAMPLE 5 closes `<mcpttinfo>` with `</mcptt-info>`, so it is not
   well-formed; it also lacks the namespace, so it would not be schema-valid

@@ -225,3 +225,17 @@ def test_an_encrypted_indication_selects_no_call_type():
 def test_ad_hoc_bodies_are_schema_valid(release, info):
     schema = _schema(release)
     assert schema.validate(_doc(mcinfo.render(info, release))), schema.error_log
+
+
+def test_a_group_selected_call_type_is_reported_apart():
+    """PRF-OP-01: reached through the groups that name it, so neither
+    undeclared nor blocked, unless the release cannot carry its signature."""
+    from types import SimpleNamespace as NS
+    cts = [NS(id="crew", mc_signature=mcinfo.Signature("prearranged"), group_selected=False),
+           NS(id="switch", mc_signature=mcinfo.Signature("prearranged"), group_selected=True),
+           NS(id="adhoc", mc_signature=mcinfo.Signature("adhoc"), group_selected=True),
+           NS(id="data", mc_signature=None)]
+    assert mcinfo.group_selected(cts) == ("switch", "adhoc")
+    assert mcinfo.reachability(cts, Release.REL_18) == (("data",), ())
+    undeclared, blocked = mcinfo.reachability(cts, Release.REL_17)
+    assert undeclared == ("data",) and [b[0] for b in blocked] == ["adhoc"]

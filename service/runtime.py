@@ -228,7 +228,8 @@ def _network(config: Config, loaded: LoadedProfile) -> Network:
     keys = {f.location_key for f in loaded.profile.identity.functional
             if f.location_key}
     return load_network(config.network, keys,
-                        config.sip.ca if config.sip is not None else None)
+                        config.sip.ca if config.sip is not None else None,
+                        loaded.profile.call_types)
 
 
 STARTUP_CORRELATION_ID = "process-start"
@@ -474,10 +475,28 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                 + "; ".join(f"{cid} ({why})" for cid, why in blocked)
                 + ". Raise MCX_RELEASE, or set MCX_STRICT_RELEASE=false to start "
                 "without them")
+        # PRF-OP-01: a group-selected call type is reached through the groups
+        # that name it; one that no group names is reachable by no client.
+        by_group = {cid: [g.id for g in network.groups if g.call_type == cid]
+                    for cid in mcinfo.group_selected(loaded.profile.call_types)}
         health.set_call_types({
             "strict_release": config.strict_release,
             "not_requestable_by_mcptt_clients": list(undeclared),
-            "unreachable_at_release": {cid: why for cid, why in blocked}})
+            "unreachable_at_release": {cid: why for cid, why in blocked},
+            "selected_by_group": by_group})
+        # SVC-OP-06: a functional identity is held only once something binds
+        # it, and nothing in this service does yet; so a call type that needs
+        # one is refused not-authorised to every caller. Said, not discovered.
+        for ct in loaded.profile.call_types:
+            if ct.initiator_roles:
+                log.warning("call type %r needs the initiator to hold %s, and this "
+                            "service has no path that binds a functional identity "
+                            "(PLT-VP-R1 SVC-OP-06): every caller is refused "
+                            "not-authorised", ct.id, ", ".join(ct.initiator_roles))
+        for cid, gids in by_group.items():
+            if not gids:
+                log.warning("call type %r is chosen by its group, and no group in the "
+                            "network profile names it: no client can request it", cid)
         for cid, why in blocked:
             log.warning("call type %r cannot be requested by any client at this "
                         "release: %s (MCX_STRICT_RELEASE=false)", cid, why)

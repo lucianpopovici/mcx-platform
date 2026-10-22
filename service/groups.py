@@ -53,6 +53,9 @@ class Group:
     id: str
     display_name: str
     members: Tuple[str, ...]
+    # PRF-OP-01: the group-selected call type a call to this group is, when
+    # it carries that call type's signature; None for the signature's own.
+    call_type: Optional[str] = None
 
 
 def _q(ns: str, tag: str) -> str:

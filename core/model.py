@@ -89,6 +89,12 @@ class CallType:
     # "truncate" to the first members with warning 122 (TS 24.379 6.3.5.5,
     # 10.1.1.4.1), or "refuse" it 486 + 122, a recorded deviation. Required.
     group_over_limit: str = "truncate"
+    # PRF-OP-01 (owner decision 2026-10-22): a call type TS 24.379 cannot
+    # tell apart from another one with the same mc_signature, chosen by the
+    # target group instead (the network profile's `groups[].call_type`), and
+    # only for a call carrying exactly that signature. Not chosen by its
+    # signature alone, so it is left out of ICD-SIG-003 (PLT-ICD-001 2.6).
+    group_selected: bool = False
 
 
 @dataclass(frozen=True)

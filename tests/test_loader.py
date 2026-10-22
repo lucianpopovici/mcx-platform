@@ -954,6 +954,69 @@ def test_every_call_type_must_state_its_mcptt_signature(mutate):
     expect_defects(raw, path_contains="call_types[0]")
 
 
+def _by_id(raw, ident):
+    return next(c for c in raw["call_types"] if c["id"] == ident)
+
+
+def test_a_group_selected_call_type_shares_its_signature(mutate):
+    """PRF-OP-01 (decided 2026-10-22): coordination-group has prearranged-
+    group's signature and is chosen by its group, so ICD-SIG-003 is not
+    broken; without group_selected it would be."""
+    raw = mutate()
+    assert _by_id(raw, "coordination-group")["mc_signature"] == \
+        _by_id(raw, "prearranged-group")["mc_signature"] == {"session_type": "prearranged"}
+    built = build(raw, "test-hash")
+    ct = next(c for c in built.call_types if c.id == "coordination-group")
+    assert ct.group_selected is True and ct.mc_signature.session_type == "prearranged"
+    assert next(c for c in built.call_types if c.id == "prearranged-group").group_selected \
+        is False
+    del _by_id(raw, "coordination-group")["group_selected"]
+    defects = expect_defects(raw, codes=["ambiguous-signature"])
+    assert [str(d) for d in defects if d.code == "ambiguous-signature"] and \
+        "'prearranged-group' and 'coordination-group' declare the same mc_signature" in \
+        " ".join(str(d) for d in defects)
+
+
+def test_a_group_selected_call_type_needs_a_signature(mutate):
+    raw = mutate()
+    _by_id(raw, "coordination-group")["mc_signature"] = None
+    defects = expect_defects(raw, codes=["bad-value"],
+                             path_contains="call_types[coordination-group].group_selected")
+    assert any("a call type chosen by its group still needs the mc_signature a call to "
+               "the group carries (PRF-OP-01)" in str(d) for d in defects)
+
+
+@pytest.mark.parametrize("ident,sig,says", [
+    ("emergency-group", None,
+     "no call type that is not group-selected declares this mc_signature: a call with it "
+     "to any other group would be refused. A group chooses between call types TS 24.379 "
+     "cannot tell apart (PRF-OP-01)"),
+    ("coordination-group", {"session_type": "chat"},
+     "no call type that is not group-selected declares this mc_signature"),
+    ("private", None,
+     "a group chooses only a call to it: session_type must be one of prearranged, chat, "
+     "not 'private'"),
+], ids=["sole-owner-of-its-signature", "a-signature-nobody-else-has", "a-private-call"])
+def test_a_group_selects_only_between_twins(mutate, ident, sig, says):
+    """Review of PRF-OP-01: a group-selected call type shares its signature
+    with exactly one ordinary call type, which every other group's calls get,
+    and is a call to a group."""
+    raw = mutate()
+    ct = _by_id(raw, ident)
+    ct["group_selected"] = True
+    if sig is not None:
+        ct["mc_signature"] = sig
+    defects = expect_defects(raw, codes=["bad-value"],
+                             path_contains=f"call_types[{ident}].group_selected")
+    assert any(says in str(d) for d in defects), [str(d) for d in defects]
+
+
+def test_group_selected_is_a_boolean(mutate):
+    raw = mutate()
+    _by_id(raw, "coordination-group")["group_selected"] = "yes"
+    expect_defects(raw, codes=["bad-type"], path_contains="group_selected")
+
+
 def test_two_call_types_may_not_claim_one_signature(mutate):
     """The core would have to guess which one a client meant."""
     raw = mutate()

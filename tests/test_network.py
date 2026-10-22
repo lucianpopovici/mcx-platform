@@ -639,3 +639,44 @@ def test_a_repeated_key_is_refused(tmp_path, text, key):
     p = tmp_path / "net.yaml"
     p.write_text(text)
     assert key in refused(p)
+
+
+# ============================================================ a group's call type (PRF-OP-01)
+
+
+def _mcx_call_types():
+    from core import loader
+    return loader.load(ROOT / "profiles" / "mcx").profile.call_types
+
+
+def test_a_group_may_choose_a_group_selected_call_type(tmp_path):
+    groups = [{"id": "grp:coord", "members": ["sip:a@x"], "call_type": "coordination-group"},
+              {"id": "grp:plain", "members": ["sip:b@x"]}]
+    n = load_network(network_yaml(tmp_path, groups=groups), set(), None, _mcx_call_types())
+    assert [(g.id, g.call_type) for g in n.groups] == [("grp:coord", "coordination-group"),
+                                                       ("grp:plain", None)]
+
+
+@pytest.mark.parametrize("chosen,says", [
+    ("prearranged-group", "groups[0].call_type: 'prearranged-group' is not a call type the "
+     "service profile lets a group choose (group_selected: true); known: coordination-group"),
+    ("switching-order", "groups[0].call_type: 'switching-order' is not a call type the "
+     "service profile lets a group choose"),
+    ("", "groups[0].call_type: expected a call type id"),
+    (7, "groups[0].call_type: expected a call type id"),
+], ids=["an-ordinary-call-type", "another-profiles", "empty", "a-number"])
+def test_a_group_chooses_only_what_the_profile_lets_it(tmp_path, chosen, says):
+    groups = [{"id": "grp:x", "members": ["sip:a@x"], "call_type": chosen}]
+    assert says in _refused_with(tmp_path, groups)
+
+
+def _refused_with(tmp_path, groups):
+    with pytest.raises(StartupRefused) as exc:
+        load_network(network_yaml(tmp_path, groups=groups), set(), None, _mcx_call_types())
+    return str(exc.value)
+
+
+def test_a_group_key_other_than_these_is_refused(tmp_path):
+    groups = [{"id": "grp:x", "members": ["sip:a@x"], "calltype": "coordination-group"}]
+    assert "groups[0]: expected 'id', 'members' and optionally 'display_name' and " \
+           "'call_type'" in _refused_with(tmp_path, groups)

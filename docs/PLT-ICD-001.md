@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.25 (draft)
-**Date:** 2026-10-21
+**Version:** 0.26 (draft)
+**Date:** 2026-10-22
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -116,11 +116,12 @@ mc_signature: null     # no native MCPTT client can request this call type
 |---|---|
 | ICD-SIG-001 | `mc_signature` is required on every call type. `null` states that the call type cannot be requested by a native MCPTT client. An absent key is a load error, so that no profile is silent on the question. |
 | ICD-SIG-002 | `session_type` is one of the six annex F.1 values; `emergency`, `imminent_peril` and `broadcast` are booleans defaulting to false. |
-| ICD-SIG-003 | No two call types in a profile may declare the same signature (`ambiguous-signature`). The core does not guess which one a client meant. |
+| ICD-SIG-003 | No two call types in a profile may declare the same signature (`ambiguous-signature`). The core does not guess which one a client meant. A call type declared `group_selected: true` (ICD-SIG-008) is not counted: it is never chosen by its signature alone. |
 | ICD-SIG-004 | The core selects the call type whose signature equals the request's exactly, and only if the configured release has that session type (`core/release.py`). Otherwise `call_type` is `""` and IF-SES refuses. |
 | ICD-SIG-005 | The core renders the same signature into the INVITE it sends each invited member, together with `<mcptt-request-uri>`, `<mcptt-calling-user-id>` and `<mcptt-calling-group-id>` (TS 24.379 6.3.2.2.3 item 8, 10.1.1.4.1.1 item 4). |
 | ICD-SIG-006 | At startup the core reports call types declared `null` and call types whose signature the configured release cannot carry, in the log and in the health document. Whether the second case is fatal is the deployment's stated choice, `MCX_STRICT_RELEASE` (required, no default): `true` refuses to start and names the call types; `false` starts and warns (REL-OP-02, decided 2026-09-24). |
 | ICD-SIG-007 | `SessionRequest.application` and `urgency` are never taken from a native request, because TS 24.379 has no element for either. They come from the call type's declaration. |
+| ICD-SIG-008 | A call type TS 24.379 cannot tell apart from another may be chosen by the target group (PLT-VP-R1 PRF-OP-01, decided 2026-10-22). It declares `group_selected: true` (optional, default false) with the signature a call to the group carries. That signature must be a call to a group (`prearranged` or `chat`) and must be declared by exactly one call type that is not group-selected, which every other group's calls get; otherwise, or without a signature, the profile does not load. A group in the network profile names it with `call_type` (ICD-NET-005). A call whose `<mcptt-request-uri>` is that group (compared exactly, as the resolver compares it) and whose signature equals that call type's exactly is that call type; any other call to the group (an emergency one, a private one) is what its signature says, and a group naming no call type changes nothing. The call type is then subject to everything a call type is: its initiator roles at `authorise`, its limits and its floor. Its members' INVITEs carry its signature (ICD-SIG-005). The health document's `call_types.selected_by_group` lists each group-selected call type with the groups that name it (beside ICD-SIG-006's report), and one no group names is warned of at startup. Two consequences, accepted: a caller without the call type's role is refused `not-authorised` calling the group but `unknown-target` calling a group that does not exist, so a group's group-selected call type shows through the refusal (an exception to §5.0's same-refusal property, which holds for a given call type); and a request through IF-IWF names its call type itself and is not subject to the group's choice. |
 
 ### 2.7 Ring limit (declared data, not a hook)
 
@@ -192,6 +193,7 @@ sip:
 groups:                               # [] when there is no group
   - id: "grp:alpha"
     display_name: "Alpha team"        # optional; the id when absent
+    call_type: coordination-group     # optional: a group-selected call type (ICD-SIG-008)
     members: ["sip:u1@rail.example", "sip:u2@rail.example"]
 users: ["sip:u9@rail.example"]         # known users in no group; [] for none
 ```
@@ -202,7 +204,7 @@ users: ["sip:u9@rail.example"]         # known users in no group; [] for none
 | ICD-NET-002 | The file and the core CA certificate are hashed together (SHA-256 over the canonical form, as PLT-PRF-011 does for the service profile). `name/version/hash[:16]` is the network identifier. It joins the service profile identifier and the release in every audit record (`<profile>+<release>+<network>+<environment>`, extending PLT-REL-005; the environment since 0.25) and appears in the health document. |
 | ICD-NET-003 | `trusted_cores` lists fully qualified DNS names. A non-empty list needs `core_ca`: a file, relative to the network profile, holding exactly one certificate, and only CERTIFICATE PEM blocks. The core CA must be self-signed, have `pathLenConstraint` 0, have keyCertSign if it has keyUsage, and be valid at startup. When SIP is enabled it must not share a key or a subject name with any CA in `MCX_SIP_TLS_CA` (which also may hold only CERTIFICATE blocks), and must not have issued any of them. |
 | ICD-NET-004 | The TLS listener trusts the core CA certificate as parsed and hashed at startup, not the file re-read. A peer is a trusted core when the core CA issued its certificate directly and the certificate carries a DNS name in `trusted_cores`. It may then assert any identity (RFC 3325 trust domain). A peer whose certificate the core CA issued asserts nothing else: no URI in it is a user's identity, so a core removed from the list asserts nothing at all. |
-| ICD-NET-005 | `groups` is a list of groups, each with `id` and `members` and optionally `display_name`, nothing else. Ids are distinct non-empty strings; a display name is a non-empty string; members are a non-empty list of non-empty strings, deduplicated in declaration order. `users` is a list of non-empty strings, deduplicated. No id may be both a group and a user, and no group may be a member of a group. Every group member is a known user. The groups and users provision the identity resolver (whose declared-domain check, PLT-IDM-008, applies to every member and user) and are the content of the group documents served (VP1-DOC-001). Being registered does not make a user known (PLT-VP-R1 SIP-OP-05). |
+| ICD-NET-005 | `groups` is a list of groups, each with `id` and `members` and optionally `display_name` and `call_type` (since 0.26, ICD-SIG-008: a call type the service profile declares `group_selected: true`, or startup is refused), nothing else. Ids are distinct non-empty strings; a display name is a non-empty string; members are a non-empty list of non-empty strings, deduplicated in declaration order. `users` is a list of non-empty strings, deduplicated. No id may be both a group and a user, and no group may be a member of a group. Every group member is a known user. The groups and users provision the identity resolver (whose declared-domain check, PLT-IDM-008, applies to every member and user) and are the content of the group documents served (VP1-DOC-001). Being registered does not make a user known (PLT-VP-R1 SIP-OP-05). |
 | ICD-NET-006 | `environment` is the production indicator of PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008 (PLT-VP-R1 VP-OP-05, decided 2026-10-21): exactly one of `production`, `staging`, `test`, `dev`. Anything but `production` is refused unless every PLMN is a test PLMN: MCC 001 (the test network of the 3GPP test specifications), or 999-999 or 999-99 (ITU-T E.212 (06/2024) Appendix III.2.4, which suggests them for testing under MCC 999; 999-99 is written `999990`, pending ICD-OP-12). MCC 999 otherwise is for internal use within a private network, which may be operational, and codes assigned for testing by a regulator or for trials (E.212 Annex B, A.5.6, Annex G) cannot be told from operational ones, so a network on them runs as production. `production` is accepted on any PLMN. `MCX_ENV` (required, no default, the same four values) must equal it, and `MCX_PRODUCTION`, if set, must be `1`/`true`/`yes` exactly when it is `production` and `0`/`false`/`no` otherwise; any disagreement refuses startup. The environment is in every audit record (ICD-NET-002) and in the health document (`environment`, and `network.environment`). |
 | ICD-LOC-001 | Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Its first six digits must be one of `plmns`. Each `location` key must be the `location_key` of some functional identity in the loaded service profile, and a cell may appear once. |
 | ICD-LOC-002 | The core reads the serving cell from the report. It prefers the NCGI, which Rel-18 carries in `<anyExt>`, to the ECGI. The cell becomes `LocationContext.cell_id`. Neighbour cells, coordinates and the rest are not read. |
@@ -432,7 +434,10 @@ request carried.
    construction: the core passes a copy of the request with `target`,
    `participants`, `participant_criteria` and `adhoc_alert_group` emptied.
    The initiator, call type, media, application, urgency, location and
-   attributes remain.
+   attributes remain. Since 0.26 the call type of a prearranged or chat call
+   can itself depend on the target group (ICD-SIG-008): `authorise` still
+   cannot see the target, but a group's group-selected call type shows
+   through its answer (accepted, PLT-VP-R1 PRF-OP-01).
 2. Anything that depends on the called party (participant limits, capacity
    per group, the partner's rights) belongs to `admit` or later.
 
@@ -815,6 +820,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.26 | 2026-10-22 | §2.6: ICD-SIG-008, a call type chosen by the target group (PLT-VP-R1 PRF-OP-01 decided, option 2 with matching signature): `group_selected: true` on the call type, `call_type` on the network profile's group (§2.8, ICD-NET-005); ICD-SIG-003 does not count it, and it must share its prearranged or chat signature with exactly one call type that is not group-selected (review). §5.0 INV-1 notes that a group-selected call type shows through the authorise refusal. The mcx `coordination-group` and utility `switching-order` become group-selected prearranged calls. A minor change: an optional profile key and an optional network key, no hook change. |
 | 0.25 | 2026-10-21 | §2.8: the network profile gains `environment` (ICD-NET-006; PLT-VP-R1 VP-OP-05 decided, option B): the production indicator, declared with the radio plan, refused off a test PLMN unless it is `production`; `MCX_ENV` is required and must agree, and so must `MCX_PRODUCTION` when set (the `prod` spelling is withdrawn). The audit identity gains the environment. A key repeated in the network profile or a service profile is refused (review). A minor change: no hook or parameter object changes. |
 | 0.24 | 2026-10-18 | PLT-GEN-011 as amended (PLT-SRS 0.5; PLT-VP-R1 RES-OP-09 batch B): a duration in a profile may be stated in milliseconds or in seconds. §2.7: the ring limit is `no_answer_ms` or `no_answer_s`, or both, `no_answer_ms` applying and a disagreement warned of at startup; `CallType` gains `no_answer_s` (as stated, or None). §5.3: a profile's `call_types[].floor` takes `timers_s` beside `timers_ms` per timer, the same way; `FloorConfig` gains `timers_s`. The hook's `FloorPolicy.timers_ms` stays in milliseconds. The in-tree profiles are unchanged. |
 | 0.23 | 2026-10-17 | §9: core code `initiator-not-served` (PLT-VP-R1 RES-OP-11, owner ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required). A minor change: no hook or parameter object changes. |

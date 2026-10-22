@@ -79,6 +79,10 @@ call_types:
       emergency: bool?            # default false
       imminent_peril: bool?       # default false
       broadcast: bool?            # default false
+    group_selected: bool?         # default false; true = chosen by the target
+                                  # group (network profile groups[].call_type),
+                                  # for a call with exactly this mc_signature,
+                                  # which another call type may share (PRF-OP-01)
     floor:
       initial_grant_to_initiator: bool
       queueing_enabled: bool
