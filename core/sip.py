@@ -37,6 +37,10 @@ from .errors import (
     PARTICIPANT_LIMIT_EXCEEDED,
     INITIATOR_NOT_SERVED,
     CAPACITY_EXHAUSTED,
+    FUNCTIONAL_ALIAS_HELD,
+    FUNCTIONAL_ALIAS_LOCATION_UNKNOWN,
+    FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+    FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
     PARTNER_UNAVAILABLE,
@@ -54,7 +58,8 @@ from .errors import (
 from .hooks import LocationContext, MediaKind, SessionRequest
 from . import codec as codec_mod
 from . import mcinfo
-from .release import Release, supports_session_type, supports_sip_warning
+from .release import (Release, supports_procedure, supports_session_type,
+                      supports_sip_warning)
 from .session import Signal, SignalType
 
 # PLT-PRF-032: this module implements the SIP-2 reference point (PLT-SRS §3.1).
@@ -231,6 +236,12 @@ def _pct(value: str) -> str:
 # here for session refresh (RFC 4028); REFER is not implemented.
 ALLOW = "INVITE, ACK, BYE, CANCEL, UPDATE, REGISTER, OPTIONS"
 
+
+def allow(release: Release) -> str:
+    """The Allow header for this release: PUBLISH from Rel-15, where TS 24.379
+    clause 9A gives it a use (functional alias management, SVC-OP-06)."""
+    return ALLOW + (", PUBLISH" if supports_procedure(release, "functional-alias") else "")
+
 # Content types carried on MC signalling.
 CT_MC_INFO = "application/vnd.3gpp.mcptt-info+xml"
 CT_RESOURCE_LISTS = "application/resource-lists+xml"
@@ -263,6 +274,7 @@ class Status(Enum):
     FORBIDDEN = (403, "Forbidden")
     NOT_FOUND = (404, "Not Found")
     REQUEST_TIMEOUT = (408, "Request Timeout")
+    INTERVAL_TOO_BRIEF = (423, "Interval Too Brief")
     SESSION_INTERVAL_TOO_SMALL = (422, "Session Interval Too Small")
     TEMPORARILY_UNAVAILABLE = (480, "Temporarily Unavailable")
     CALL_DOES_NOT_EXIST = (481, "Call/Transaction Does Not Exist")
@@ -270,6 +282,7 @@ class Status(Enum):
     BUSY_HERE = (486, "Busy Here")
     REQUEST_TERMINATED = (487, "Request Terminated")
     NOT_ACCEPTABLE_HERE = (488, "Not Acceptable Here")
+    BAD_EVENT = (489, "Bad Event")
     REQUEST_PENDING = (491, "Request Pending")
     SERVER_ERROR = (500, "Server Internal Error")
     NOT_IMPLEMENTED = (501, "Not Implemented")
@@ -317,6 +330,11 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     # TS 24.379 10.1.1.3.1.1 step 2a and the other participating-function
     # procedures: no binding of the caller to an MCPTT ID is 404, warning 141.
     INITIATOR_NOT_SERVED: Status.NOT_FOUND,
+    # TS 24.379 9A.2.2.2.3 steps 4A-4B and 9A.2.2.3.3 steps 4a, 5 and 6: 403.
+    FUNCTIONAL_ALIAS_NOT_AUTHORISED: Status.FORBIDDEN,
+    FUNCTIONAL_ALIAS_HELD: Status.FORBIDDEN,
+    FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED: Status.FORBIDDEN,
+    FUNCTIONAL_ALIAS_LOCATION_UNKNOWN: Status.FORBIDDEN,
 }
 
 # Not covered by that setting: a resolver that cannot answer is a back-end
@@ -371,6 +389,11 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     # identity with an MCPTT ID." A caller outside the domains this
     # deployment serves is one it has no MCPTT ID for (RES-OP-11).
     INITIATOR_NOT_SERVED: (141, "user unknown to the participating function"),
+    # Rel-20 onwards (V20.0.0 table 4.4.2-2 and 9A.2.2.2.3 step 4B): a
+    # functional alias the user may not hold. Before Rel-20 the step is a
+    # bare 403, and the phrase goes out without the code (reject()).
+    FUNCTIONAL_ALIAS_NOT_AUTHORISED: (201, "user not authorized to change the "
+                                           "functional alias status"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -401,6 +424,10 @@ LOCAL_WARNING_TEXTS: Mapping[str, str] = {
     QOS_UNAVAILABLE: "requested quality of service unavailable",
     GATEWAY_UNAVAILABLE: "interworking gateway unavailable",
     PARTNER_UNAVAILABLE: "partner system unavailable",
+    # 9A.2.2.3.3 steps 5 and 6 send a bare 403; these say which.
+    FUNCTIONAL_ALIAS_HELD: "functional alias held by another user",
+    FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED: "take-over of the functional alias not allowed",
+    FUNCTIONAL_ALIAS_LOCATION_UNKNOWN: "no location to hold the functional alias at",
 }
 
 # The same two refusals of an ad hoc group call, when step 0 (authorisation,
@@ -875,6 +902,7 @@ class Adapter:
                              f"is not one of {sorted(SERVICE_REFUSAL_STATUS)}")
         self._service_status = SERVICE_REFUSAL_STATUS[service_refusal_status]
         self._read_location = read_location is True
+        self.reads_location = self._read_location
         self._local = local_uri
         self._host = _host_of(local_uri)
         self._by_signature: Dict[mcinfo.Signature, str] = {}
@@ -1392,6 +1420,51 @@ def canonical_uri(uri: str) -> str:
         return uri
     user, at, host = rest.rpartition("@")
     return f"{scheme.lower()}:{user}{at}{host.lower()}"
+
+
+# TS 24.379 9A.2.1.2: a functional alias PUBLISH activates with Expires
+# 4294967295 (the RFC 3261 maximum) and deactivates with 0; anything else is
+# answered 423 with this as Min-Expires (9A.2.2.2.3 step 5).
+FUNCTIONAL_ALIAS_EXPIRES = 4294967295
+
+
+@dataclass(frozen=True)
+class AliasPublish:
+    """A functional alias status change as the SIP request carries it
+    (TS 24.379 9A.2.1.2): the user it is for (<mcptt-request-uri>), who sent
+    it (P-Asserted-Identity or From), what it asks (the PIDF body), Expires,
+    and the location it reports, if any."""
+    served: str
+    originating: str
+    change: "mcinfo.AliasStatusChange"
+    expires: Optional[int]
+    location: Optional[LocationContext]
+
+
+def parse_publish(message: Request, read_location: bool = True) -> AliasPublish:
+    """A functional alias PUBLISH (Rel-15 on). A body without the MCPTT info
+    naming the served user, or without the PIDF, raises SipError."""
+    if message.method != "PUBLISH":
+        raise SipError(f"expected PUBLISH, found {message.method}")
+    content_type = message.headers.get("Content-Type") or ""
+    try:
+        raw = mcinfo.mcinfo_of(content_type, message.body)
+        info = mcinfo.parse(raw) if raw is not None else mcinfo.McInfo()
+        change = mcinfo.alias_status_change(content_type, message.body)
+    except mcinfo.McInfoError as exc:
+        raise SipError(f"functional alias status change: {exc}") from None
+    if not info.request_uri:
+        raise SipError("functional alias status change names no user "
+                       "(<mcptt-request-uri>)")
+    originating = _asserted_identity(message.headers.get_all("P-Asserted-Identity")) \
+        or _uri(message.headers.get("From") or "")
+    raw_expires = (message.headers.get("Expires") or "").strip()
+    expires = int(raw_expires) if raw_expires.isascii() and raw_expires.isdigit() else None
+    return AliasPublish(
+        served=canonical_uri(_uri(info.request_uri)),
+        originating=canonical_uri(originating),
+        change=change, expires=expires,
+        location=_location(content_type, message.body) if read_location else None)
 
 
 def _location(content_type: str, body: str) -> Optional["LocationContext"]:

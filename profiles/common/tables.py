@@ -452,12 +452,11 @@ class DirectoryResolver:
 class FunctionalResolver(DirectoryResolver):
     """Directory resolution plus functional and location-dependent addressing.
 
-    `bind` on a held single-holder identity REPLACES the existing holder.
-
-    OPEN (ICD-OP-02): replace-versus-refuse is operationally significant for
-    driver handover and must be confirmed against the UIC FRS. Replacement is
-    implemented here because a stale binding blocking a handover is the worse
-    failure of the two, but this is a provisional choice.
+    `bind` on a held single-holder identity replaces the existing holder.
+    The core decides before it binds (ICD-OP-02, closed 2026-10-23): a held
+    single-holder identity is refused unless taken over, and the holder it is
+    taken from is unbound first (core/functional.py, PLT-ICD-001 §3.3), so
+    this replacement is only a backstop.
     """
 
     def __init__(self, profile: Profile) -> None:

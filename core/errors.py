@@ -41,6 +41,16 @@ PARTICIPANT_LIMIT_EXCEEDED = "participant-limit-exceeded"
 # TS 24.379 answers a participating function that cannot associate the
 # caller with an MCPTT ID with 404 and warning 141.
 INITIATOR_NOT_SERVED = "initiator-not-served"
+# Functional alias management (TS 24.379 clause 9A, Rel-15 on; PLT-VP-R1
+# SVC-OP-06): an activation refused, each 403 there. Not authorised is steps
+# 4A/4B of 9A.2.2.2.3 and 4a of 9A.2.2.3.3; held is step 5
+# (<max-simultaneous-activations> reached); take-over not allowed is step 6.
+# A location-dependent identity with no location to hold it at is the
+# platform's (owner decision 2026-10-23).
+FUNCTIONAL_ALIAS_NOT_AUTHORISED = "functional-alias-not-authorised"
+FUNCTIONAL_ALIAS_HELD = "functional-alias-held"
+FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED = "functional-alias-take-over-not-allowed"
+FUNCTIONAL_ALIAS_LOCATION_UNKNOWN = "functional-alias-location-unknown"
 
 RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
     {
@@ -64,6 +74,10 @@ RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
         IDENTITY_NOT_AUTHENTICATED,
         PARTICIPANT_LIMIT_EXCEEDED,
         INITIATOR_NOT_SERVED,
+        FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+        FUNCTIONAL_ALIAS_HELD,
+        FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
+        FUNCTIONAL_ALIAS_LOCATION_UNKNOWN,
     }
 )
 
@@ -85,6 +99,10 @@ CORE_ORIGINATED: FrozenSet[str] = frozenset(
         IDENTITY_NOT_AUTHENTICATED,
         PARTICIPANT_LIMIT_EXCEEDED,
         INITIATOR_NOT_SERVED,
+        FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+        FUNCTIONAL_ALIAS_HELD,
+        FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
+        FUNCTIONAL_ALIAS_LOCATION_UNKNOWN,
     }
 )
 

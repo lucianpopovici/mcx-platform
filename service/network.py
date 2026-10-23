@@ -58,13 +58,16 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from core import mcinfo
 from core.errors import StartupRefused
+from core.functional import AliasPolicy
 from core.loader import ENVIRONMENTS, PRODUCTION, content_hash, safe_load_unique
 
 from .config import is_fqdn
 from .groups import Group
 
 NONE = "none"
-KEYS = {"name", "version", "environment", "plmns", "cells", "sip", "groups", "users"}
+KEYS = {"name", "version", "environment", "plmns", "cells", "sip", "groups", "users",
+        "functional_aliases"}
+ALIAS_KEYS = {"id", "users", "take_over"}
 GROUP_KEYS = {"id", "display_name", "members", "call_type"}
 SIP_KEYS = {"trusted_cores", "core_ca"}
 # "/" and "+" separate the parts of the audit identifier, so neither may occur.
@@ -101,6 +104,8 @@ class Network:
     # VP-OP-05: production, staging, test or dev; only production on a
     # network that is not a test network.
     environment: str = ""
+    # SVC-OP-06: functional identity -> who may hold it and take it over.
+    functional_aliases: Mapping[str, AliasPolicy] = field(default_factory=dict)
     # Parsed once, and handed to the TLS context as data: what was checked
     # and hashed is what is trusted, whatever happens to the file later.
     core_ca: Optional[x509.Certificate] = field(default=None, compare=False)
@@ -331,9 +336,62 @@ def _groups(raw_groups: Any, raw_users: Any, defects: List[str],
     return tuple(groups), tuple(dict.fromkeys(users))
 
 
+def _functional_aliases(raw: Any, known: Set[str], defects: List[str],
+                        functional: Optional[Sequence[Any]]) -> Dict[str, AliasPolicy]:
+    """SVC-OP-06 (decided 2026-10-23): for each functional identity, the users
+    who may activate it and those of them who may take it over from another
+    holder (TS 24.484 <FunctionalAliasList>, <allow-takeover-functional-alias-
+    other-user>). Checked against the service profile when it is given."""
+    out: Dict[str, AliasPolicy] = {}
+    if not isinstance(raw, list):
+        defects.append("functional_aliases: expected a list ([] when no user may "
+                       "hold a functional identity)")
+        return out
+    declared = None if functional is None else \
+        {f.id: f for f in functional if f.resolves_to == "user"}
+    for i, entry in enumerate(raw):
+        where = f"functional_aliases[{i}]"
+        if not isinstance(entry, dict) or set(entry) != ALIAS_KEYS:
+            defects.append(f"{where}: expected exactly 'id', 'users' and 'take_over'")
+            continue
+        ident = entry["id"]
+        if not isinstance(ident, str) or not ident.strip():
+            defects.append(f"{where}.id: expected a functional identity id")
+            continue
+        if ident in out:
+            defects.append(f"{where}.id: {ident!r} already listed")
+            continue
+        if declared is not None and ident not in declared:
+            defects.append(f"{where}.id: {ident!r} is not a functional identity the service "
+                           "profile declares for users; known: "
+                           f"{', '.join(sorted(declared)) or 'none'}")
+            continue
+        users = _ids(entry["users"], f"{where}.users", defects)
+        takers = _ids(entry["take_over"], f"{where}.take_over", defects)
+        if users is None or takers is None:
+            continue
+        if not users:
+            defects.append(f"{where}.users: list at least one user, or leave the "
+                           "identity out")
+            continue
+        unknown = sorted(set(users) - known)
+        if unknown:
+            defects.append(f"{where}.users: not known users (users or group members): "
+                           f"{', '.join(map(repr, unknown))}")
+            continue
+        outside = sorted(set(takers) - set(users))
+        if outside:
+            defects.append(f"{where}.take_over: may take over but may not hold: "
+                           f"{', '.join(map(repr, outside))}")
+            continue
+        out[ident] = AliasPolicy(users=frozenset(users), take_over=frozenset(takers))
+    return out
+
+
 def load_network(path: Path, location_keys: Set[str],
                  user_ca: Optional[Path] = None,
-                 call_types: Optional[Sequence[Any]] = None) -> Network:
+                 call_types: Optional[Sequence[Any]] = None,
+                 functional: Optional[Sequence[Any]] = None) -> Network:
     """`user_ca` is MCX_SIP_TLS_CA when SIP is enabled: the core CA must be
     kept apart from its anchors, or a user certificate could be a core's.
     `call_types` are the service profile's, against which each group's
@@ -432,6 +490,8 @@ def load_network(path: Path, location_keys: Set[str],
             ca = _load_ca(ca_path, anchors, defects)
 
     groups, users = _groups(raw["groups"], raw["users"], defects, call_types)
+    known = set(users) | {m for g in groups for m in g.members}
+    aliases = _functional_aliases(raw["functional_aliases"], known, defects, functional)
 
     if defects:
         raise StartupRefused(f"network profile {path}: {len(defects)} defect(s)\n  "
@@ -440,5 +500,5 @@ def load_network(path: Path, location_keys: Set[str],
     return Network(name=ident["name"], version=ident["version"],
                    content_hash=content_hash({"network": raw, "core_ca": ca_hash}),
                    plmns=tuple(sorted(plmns)), environment=environment,
-                   cells=cells, trusted_cores=trusted,
+                   functional_aliases=aliases, cells=cells, trusted_cores=trusted,
                    groups=groups, users=users, core_ca=ca)

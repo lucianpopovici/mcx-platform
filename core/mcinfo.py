@@ -509,3 +509,63 @@ def location_of(content_type: str, body: str) -> Optional[LocationReport]:
         value = (el.text or "").strip() if el is not None else ""
         ncgi = value if NCGI.fullmatch(value) else None
     return LocationReport(serving_ecgi=ecgi, serving_ncgi=ncgi)
+
+
+# -- functional alias status (TS 24.379 clause 9A.3.1, Rel-15 on) ------------------
+
+CT_PIDF = "application/pidf+xml"
+_PIDF = "{urn:ietf:params:xml:ns:pidf}"
+_FA = "{urn:3gpp:ns:mcpttPresInfoFA:1.0}"
+
+
+@dataclass(frozen=True)
+class AliasStatusChange:
+    """What a client's functional alias status change asks for (9A.2.1.2,
+    9A.3.1.2): the user it is for (`entity`), the client (`client_id`), the
+    functional aliases it wants, and whether it takes them over."""
+
+    entity: str
+    client_id: str
+    aliases: Tuple[str, ...]
+    take_over: bool = False
+
+
+def alias_status_change(content_type: str, body: str) -> AliasStatusChange:
+    """The application/pidf+xml part of a functional alias PUBLISH. A body
+    without one, or one that is not the 9A.3.1 per-user form, is refused
+    (McInfoError): a PUBLISH that changes who holds a role is not guessed at."""
+    raw = None
+    for p in split_body(content_type, body):
+        if p.content_type == CT_PIDF:
+            raw = p.body
+    if raw is None:
+        raise McInfoError("no application/pidf+xml part")
+    if "<!DOCTYPE" in raw or "<!ENTITY" in raw:
+        raise McInfoError("document type declarations are not accepted")
+    decl = re.match(r'\s*<\?xml[^>]*?encoding\s*=\s*["\']([^"\']+)["\']', raw)
+    if decl and decl.group(1).strip().lower().replace("_", "-") not in ("utf-8", "utf8"):
+        raise McInfoError(f"encoding {decl.group(1)!r} is not accepted; use UTF-8")
+    try:
+        root = ET.fromstring(raw.strip().encode("utf-8"))
+    except (ET.ParseError, ValueError, LookupError) as exc:
+        raise McInfoError(f"not well-formed XML: {exc}") from None
+    if root.tag != _PIDF + "presence":
+        raise McInfoError("the root element is not PIDF <presence>")
+    entity = (root.get("entity") or "").strip()
+    tuples = root.findall(_PIDF + "tuple")
+    if not entity or len(tuples) != 1:
+        raise McInfoError("expected one <tuple> for the user named in entity")
+    status = tuples[0].find(_PIDF + "status")
+    if status is None:
+        raise McInfoError("the <tuple> has no <status>")
+    aliases = []
+    for fa in status.findall(_FA + "functionalAlias"):
+        ident = (fa.get("functionalAliasID") or "").strip()
+        if not ident:
+            raise McInfoError("a <functionalAlias> without functionalAliasID")
+        aliases.append(ident)
+    take_over = status.find(_FA + "take-over")
+    return AliasStatusChange(
+        entity=entity, client_id=(tuples[0].get("id") or "").strip(),
+        aliases=tuple(dict.fromkeys(aliases)),
+        take_over=bool(_boolean(take_over.text)) if take_over is not None else False)

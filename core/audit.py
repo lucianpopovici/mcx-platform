@@ -28,7 +28,11 @@ class RecordType(Enum):
     SESSION_RELEASED = "session-released"
     SESSION_FAILED = "session-failed"
     FLOOR_TRANSITION = "floor-transition"
+    # A functional identity activated, deactivated, taken over, restored or
+    # dropped at restart (core/functional.py, TS 24.379 clause 9A).
     BINDING_CHANGED = "binding-changed"
+    # A functional alias request refused, with its reason code.
+    BINDING_REFUSED = "binding-refused"
     # Once per process start, when the configuration has been accepted and
     # before any listener binds: the deployment's stated behaviour settings
     # and which of them depart from the standard (owner ruling 2026-10-16).

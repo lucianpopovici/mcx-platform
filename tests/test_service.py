@@ -865,18 +865,18 @@ def test_a_group_naming_a_call_type_it_may_not_choose_refuses_start(env):
 
 def test_startup_says_what_no_caller_can_obtain(env, caplog):
     """Review of PRF-OP-01: a group-selected call type no group names, and a
-    call type needing a role nothing binds (SVC-OP-06), are said at start."""
+    call type needing a role no user may activate (SVC-OP-06), are said at start."""
     with caplog.at_level("WARNING", logger="mcx.service"):
         build_runtime(env, _clock()).close()
         build_runtime(_frmcs(with_network(env, "frmcs2.yaml"), "19", "true"), _clock()).close()
     said = [r.getMessage() for r in caplog.records]
     assert ("call type 'coordination-group' is chosen by its group, and no group in the "
             "network profile names it: no client can request it") in said
-    roles = sorted(m for m in said if "has no path that binds a functional identity" in m)
+    roles = sorted(m for m in said if "lets no user activate one" in m)
     assert roles == sorted(
-        f"call type {cid!r} needs the initiator to hold {held}, and this service has no "
-        "path that binds a functional identity (PLT-VP-R1 SVC-OP-06): every caller is "
-        "refused not-authorised"
+        f"call type {cid!r} needs the initiator to hold {held}, and the network profile "
+        "lets no user activate one (functional_aliases): every caller is refused "
+        "not-authorised"
         for cid, held in (("driver-controller", "train-driver, track-controller"),
                           ("shunting-group", "shunting-team-leader"),
                           ("rec-broadcast", "train-driver, track-controller")))

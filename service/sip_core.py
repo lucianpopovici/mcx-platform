@@ -39,7 +39,9 @@ from core.sip import (
     parse_message, parse_sdp,
     OPTION_TIMER, SUPPORTED_ON_ANSWER, SUPPORTED_ON_PROVISIONAL, allows,
     parse_min_se, uac_session_timer, uas_session_timer, valid_call_id,
+    FUNCTIONAL_ALIAS_EXPIRES, allow, parse_publish,
 )
+from core.release import supports_procedure
 
 from core import codec as codec_mod
 from core import identity
@@ -318,6 +320,9 @@ class SipCore:
         self.server = ServerTransactions(clock, t1=t1)
         self.client = ClientTransactions(clock, t1=t1)
         self.flows_by_user: Dict[str, Any] = {}
+        # SVC-OP-06: the cell each user last reported, from an authenticated
+        # request, for a functional alias PUBLISH that reports none.
+        self.last_location: Dict[str, Any] = {}
         # RFC 4028: the interval asked for, and the cap on a longer one, in
         # the seconds of the Session-Expires header (configured in ms, a
         # whole number of seconds: service/config.py).
@@ -443,9 +448,12 @@ class SipCore:
                    "BYE": self._bye, "CANCEL": self._cancel,
                    "UPDATE": self._in_dialog,
                    "OPTIONS": self._options}.get(req.method)
+        if req.method == "PUBLISH" and \
+                supports_procedure(self.rt.config.release, "functional-alias"):
+            handler = self._publish
         if handler is None:
             resp = Response(Status.NOT_IMPLEMENTED,
-                            Headers([("Allow", ALLOWED)]))
+                            Headers([("Allow", allow(self.rt.config.release))]))
             return self._final(txn, resp)
         try:
             handler(req, txn, flow)
@@ -503,7 +511,46 @@ class SipCore:
     # -- REGISTER / OPTIONS ----------------------------------------------------
 
     def _options(self, req, txn, flow) -> None:
-        self._final(txn, Response(Status.OK, Headers([("Allow", ALLOWED)])))
+        self._final(txn, Response(Status.OK,
+                                  Headers([("Allow", allow(self.rt.config.release))])))
+
+    # -- PUBLISH: functional alias status change (TS 24.379 9A, Rel-15 on) ----
+
+    def _publish(self, req: Request, txn: ServerTxn, flow: Any) -> None:
+        """9A.2.2.2.3 and 9A.2.2.3.3, for the functional identities this
+        platform owns (SVC-OP-06, decided 2026-10-23). The core decides; this
+        reads the request, answers it and keeps the holders durable."""
+        event = (req.headers.get("Event") or "").split(";")[0].strip().lower()
+        if event != "presence":
+            return self._final(txn, Response(Status.BAD_EVENT,
+                                             Headers([("Allow-Events", "presence")])))
+        pub = parse_publish(req, read_location=self.adapter.reads_location)
+        # Step 4: only the user may change the user's own aliases, and the
+        # request must come from that user, authenticated (ICD-OP-08).
+        if pub.originating != pub.served or not self._authenticated_as(flow, pub.served):
+            return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        # Steps 5-7: activation is 4294967295, deactivation 0, nothing else.
+        if pub.expires is None or pub.expires not in (0, FUNCTIONAL_ALIAS_EXPIRES):
+            return self._final(txn, Response(
+                Status.INTERVAL_TOO_BRIEF,
+                Headers([("Min-Expires", str(FUNCTIONAL_ALIAS_EXPIRES))])))
+        if canonical_uri(pub.change.entity) != pub.served:
+            raise SipError("the PIDF entity is not the user named in <mcptt-request-uri>")
+        location = pub.location or self.last_location.get(pub.served)
+        wanted = pub.change.aliases if pub.expires else ()
+        # The store is written ahead of the resolver (SessionManager.change_
+        # functional_aliases): a store that fails is a 500 with nothing changed.
+        outcome = self.rt.manager.change_functional_aliases(
+            txn.call_id, pub.served, wanted, pub.change.take_over, location,
+            persist=lambda held: self.rt.store.save_holdings(
+                [(h.identity, h.slot, h.holder) for h in held]))
+        if not outcome.accepted:
+            return self._reject(txn, outcome.reason_code)
+        if pub.location is not None:
+            self.last_location[pub.served] = pub.location
+        # RFC 3903 6: a 2xx to PUBLISH carries the entity-tag of the state.
+        self._final(txn, Response(Status.OK, Headers([
+            ("SIP-ETag", secrets.token_hex(8)), ("Expires", str(pub.expires))])))
 
     def _register(self, req: Request, txn: ServerTxn, flow: Any) -> None:
         # Canonical form (scheme and host lower-cased, RFC 3261 19.1.4), so
@@ -562,6 +609,12 @@ class SipCore:
             # Checked before anything is established or anyone invited: the
             # initiator's identity decides priority, roles and admission.
             return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        if sr.location is not None and sr.location.cell_id:
+            # SVC-OP-06: the cell this user last reported (owner decision
+            # 2026-10-23), for a functional alias PUBLISH that reports none.
+            # Kept from an authenticated INVITE whatever its outcome: the
+            # location is the client's claim either way (accepted residue).
+            self.last_location[canonical_uri(sr.initiator)] = sr.location
         if self.rt.config.foreign_initiator == "refuse" and identity.outside(
                 [sr.initiator], self.rt.loaded.profile.identity.domains):
             # RES-OP-11: the participating function's check (TS 24.379

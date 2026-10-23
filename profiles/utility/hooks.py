@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from profiles.common.tables import (
     DirectoryResolver,
+    FunctionalResolver,
     PrefixInterworkingGateway,
     TableBearerSelector,
     TableInterconnectionGateway,
@@ -19,6 +20,9 @@ from profiles.common.tables import (
 
 __all__ = [
     "DirectoryResolver",
+    # SVC-OP-06: control-engineer is a functional identity users activate,
+    # so the resolver is the one that can bind it.
+    "FunctionalResolver",
     "TablePriorityPolicy",
     "TableSessionPolicy",
     "TableBearerSelector",

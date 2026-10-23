@@ -63,6 +63,7 @@ from .hooks import (
     SessionDecision,
     SessionRequest,
 )
+from .functional import AliasOutcome, AliasPolicy, FunctionalAliases, Holding
 from .invoke import HookFailure, Invoker
 from .loader import LoadedProfile
 from .loader import declared_view
@@ -185,7 +186,8 @@ class SessionManager:
                  adhoc_list_max: Optional[int] = None,
                  cells: Optional[Mapping[str, Mapping[str, str]]] = None,
                  floor_unrecorded: str = "deny",
-                 foreign_initiator: str = "refuse") -> None:
+                 foreign_initiator: str = "refuse",
+                 functional_aliases: Optional[Mapping[str, AliasPolicy]] = None) -> None:
         self._loaded = loaded
         # The core holds each hook through a view that exposes only the
         # methods its Protocol declares (VP1-BND-003; review of RES-OP-09):
@@ -233,6 +235,178 @@ class SessionManager:
             raise ValueError(f"foreign_initiator {foreign_initiator!r} is not one of "
                              f"{', '.join(FOREIGN_INITIATOR)}")
         self._foreign_initiator = foreign_initiator
+        # SVC-OP-06 (decided 2026-10-23): who holds which functional identity,
+        # activated by the users the deployment allows (TS 24.379 clause 9A).
+        # The host feeds it requests; the holders it keeps are what
+        # `identities_of` answers through the profile's resolver.
+        self.functional = FunctionalAliases(
+            self._profile, self._auditor, functional_aliases or {},
+            self._location_attributes)
+
+    def change_functional_aliases(
+            self, correlation_id: str, user: str, wanted: Sequence[str], take_over: bool,
+            location: Optional[LocationContext],
+            persist: Optional[Callable[[Tuple[Holding, ...]], None]] = None) -> AliasOutcome:
+        """A user's functional alias status change (TS 24.379 9A.2.2.2.3 and
+        9A.2.2.3.3): planned by `self.functional`, bound and unbound here
+        through IF-IDR, then committed.
+
+        `persist` keeps the holders durable, written ahead: before any IF-IDR
+        call it is given the holders less what this request removes, so a
+        restart never brings back a holder a take-over or a deactivation took
+        away; once the resolver has taken the change, the holders after it,
+        before the ledger is changed. A `persist` that raises before any
+        IF-IDR call changes nothing; one that raises after them has the
+        resolver put back and the exception passed on (fail closed: the store
+        may then lack a holder that still holds, never the reverse).
+
+        A resolver that refuses or fails part way leaves the request refused
+        and the ledger saying what the resolver holds: a holder it could not
+        bind again is dropped (`dropped-on-rollback`), a holding it could not
+        unbind is kept (`rollback-incomplete`), so the user can deactivate it.
+        Both are recorded, and the holders then persisted."""
+        outcome = self.functional.plan(correlation_id, user, wanted, take_over, location)
+        if not outcome.accepted:
+            return outcome
+        removed = {*outcome.displaced, *outcome.deactivated}
+
+        def not_persisted(stage: str, exc: BaseException) -> None:
+            self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
+                               action="not-persisted", stage=stage, user=user,
+                               wanted=list(wanted), detail=str(exc))
+        if persist is not None:
+            try:
+                persist(tuple(h for h in self.functional.holdings() if h not in removed))
+            except Exception as store_exc:                      # noqa: BLE001
+                not_persisted("before-resolver", store_exc)
+                raise
+        invoker = Invoker(self._auditor, correlation_id)
+        undone: List[Holding] = []
+        bound: List[Holding] = []
+        pending: Optional[Holding] = None
+        try:
+            for h in (*outcome.displaced, *outcome.deactivated):
+                invoker.call("IF-IDR", "unbind", self._hooks.identity_resolver.unbind,
+                             h.identity, h.holder)
+                undone.append(h)
+            for h in outcome.activated:
+                pending = h
+                invoker.call("IF-IDR", "bind", self._hooks.identity_resolver.bind,
+                             h.identity, h.holder, self.functional.location_for(h, location))
+                bound.append(h)
+        except HookFailure as exc:
+            self._roll_back_aliases(correlation_id, invoker, bound, undone, pending)
+            if persist is not None:
+                try:
+                    persist(self.functional.holdings())
+                except Exception as store_exc:                  # noqa: BLE001
+                    not_persisted("after-refusal", store_exc)
+            return self.functional.refuse(correlation_id, user, wanted,
+                                          exc.reason_code, str(exc))
+        if persist is not None:
+            after = {*self.functional.holdings()} - removed | set(outcome.activated)
+            try:
+                persist(tuple(sorted(after, key=lambda h: (h.identity, h.slot, h.holder))))
+            except Exception as store_exc:                      # noqa: BLE001
+                not_persisted("after-resolver", store_exc)
+                self._roll_back_aliases(correlation_id, invoker, bound, undone)
+                raise
+        self.functional.commit(correlation_id, user, outcome, take_over)
+        return outcome
+
+    def _roll_back_aliases(self, correlation_id: str, invoker: Invoker,
+                           bound: Sequence[Holding], undone: Sequence[Holding],
+                           pending: Optional[Holding] = None) -> None:
+        """Put the resolver back as the ledger has it: what was bound is
+        unbound, what was unbound is bound again. Where the resolver will not
+        go back, the ledger follows the resolver, recorded.
+
+        `pending` is the holding whose bind failed (the last one tried): the
+        resolver may have taken it all the same (a deadline overrun, an
+        unrecordable result), so it is unbound too; unbinding nothing is a no-op (§3.3 POST-2). A
+        single-holder identity the taker could not be unbound from keeps the
+        taker: the holder it was taken from is not bound again (the resolver
+        would replace the taker) but dropped, as taken over."""
+        stuck = set()
+        for h in (*bound, *((pending,) if pending else ())):
+            try:
+                invoker.call("IF-IDR", "unbind", self._hooks.identity_resolver.unbind,
+                             h.identity, h.holder)
+            except HookFailure as exc:
+                if h is pending:
+                    self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
+                                       action="rollback-uncertain", identity=h.identity,
+                                       slot=h.slot, holder=h.holder, reason=exc.reason_code)
+                    continue
+                self.functional.add(h)
+                stuck.add((h.identity, h.slot))
+                self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
+                                   action="rollback-incomplete", identity=h.identity,
+                                   slot=h.slot, holder=h.holder, reason=exc.reason_code)
+        for h in undone:
+            # Only a take-over displaces, and only of a single-holder identity.
+            if (h.identity, h.slot) in stuck:
+                self.functional.drop(h)
+                self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
+                                   action="dropped-on-rollback", identity=h.identity,
+                                   slot=h.slot, holder=h.holder, reason="taken-over")
+                continue
+            try:
+                invoker.call("IF-IDR", "bind", self._hooks.identity_resolver.bind,
+                             h.identity, h.holder, self.functional.location_for(h, None))
+            except HookFailure as exc:
+                self.functional.drop(h)
+                self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
+                                   action="dropped-on-rollback", identity=h.identity,
+                                   slot=h.slot, holder=h.holder, reason=exc.reason_code)
+
+    def restore_functional_aliases(self, holdings: Sequence[Holding],
+                                   correlation_id: str) -> Tuple[Holding, ...]:
+        """Holders the host kept across a restart, bound again. One the
+        deployment no longer allows, one at a location value no cell of the
+        cell map gives any more, one a single-holder identity already has a
+        holder for (the first kept wins), or one the resolver refuses, is
+        dropped and recorded. Returns what was restored."""
+        invoker = Invoker(self._auditor, correlation_id)
+        kept: List[Holding] = []
+        for h in dict.fromkeys(holdings):
+            reason = None
+            if not self.functional.restorable(h):
+                reason = "not-allowed"
+            elif h.slot and not self._slot_mapped(h):
+                reason = "unknown-location"
+            elif self.functional.single_held(h):
+                reason = "already-held"
+            else:
+                try:
+                    invoker.call("IF-IDR", "bind", self._hooks.identity_resolver.bind,
+                                 h.identity, h.holder, self.functional.location_for(h, None))
+                except HookFailure as exc:
+                    reason = exc.reason_code
+            if reason is not None:
+                self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
+                                   action="dropped-at-restart", identity=h.identity,
+                                   slot=h.slot, holder=h.holder, reason=reason)
+                continue
+            self.functional.add(h)
+            kept.append(h)
+        if kept:
+            self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id, action="restored",
+                               holdings=[dataclasses.asdict(h) for h in kept])
+        return tuple(kept)
+
+    def _slot_mapped(self, h: Holding) -> bool:
+        """Whether some cell of the cell map gives `h`'s slot under its
+        identity's location key: a slot comes only from the cell map (a
+        reported location carries a cell, core/sip.py)."""
+        key = self.functional.location_key(h.identity)
+        return any(attrs.get(key) == h.slot for attrs in self._cells.values())
+
+    def _location_attributes(self, location: Optional[LocationContext]) -> Mapping[str, str]:
+        """A reported location's attributes, the cell map filling in (§2.8)."""
+        if location is None:
+            return {}
+        return {**self._cells.get(location.cell_id or "", {}), **location.attributes}
 
     # -- observation ----------------------------------------------------
 

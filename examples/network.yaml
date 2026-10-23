@@ -10,3 +10,4 @@ sip:
   core_ca: none             # their CA: a file beside this one, when the list is not empty
 groups: []                  # [{id: "grp:alpha", display_name: "Alpha", members: [<user URI>, ...]}]
 users: []                   # known users in no group; group members are users already
+functional_aliases: []      # [{id: <functional identity>, users: [...], take_over: [...]}] (SVC-OP-06)

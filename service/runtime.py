@@ -7,6 +7,8 @@ refusal leaves no store opened and no socket bound.
 
 from __future__ import annotations
 
+import dataclasses
+
 import logging
 import ssl
 import threading
@@ -14,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional, Sequence, Tuple
 
 from core import loader
+from core.functional import Holding
+from core.release import supports_procedure
 from core.audit import Auditor, RecordType
 from core.errors import StartupRefused
 from core.hooks import SessionRequest
@@ -69,6 +73,7 @@ class Health:
         self._network: Optional[dict] = None
         self._lock = threading.Lock()
         self._extra: Callable[[], dict] = lambda: {}
+        self._holdings: Callable[[], list] = lambda: []
         self._call_types: dict = {}
         self._settings: dict = {}
         self._deviations: list = []
@@ -92,6 +97,10 @@ class Health:
 
     def set_extra(self, fn: Callable[[], dict]) -> None:
         self._extra = fn
+
+    def set_holdings(self, fn: Callable[[], list]) -> None:
+        """SVC-OP-06: who holds which functional identity, read live."""
+        self._holdings = fn
 
     def set_profile(self, loaded: LoadedProfile) -> None:
         p = loaded.profile
@@ -133,6 +142,7 @@ class Health:
                     "environment": (self._network or {}).get("environment"),
                     "network": self._network,
                     "call_types": self._call_types,
+                    "functional_aliases": self._holdings(),
                     "settings": self._settings,
                     "deviations": self._deviations,
                     "warnings": self._warnings,
@@ -229,7 +239,7 @@ def _network(config: Config, loaded: LoadedProfile) -> Network:
             if f.location_key}
     return load_network(config.network, keys,
                         config.sip.ca if config.sip is not None else None,
-                        loaded.profile.call_types)
+                        loaded.profile.call_types, loaded.profile.identity.functional)
 
 
 STARTUP_CORRELATION_ID = "process-start"
@@ -445,7 +455,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                  adhoc_list_max=config.adhoc_list_max,
                                  cells=network.cells,
                                  floor_unrecorded=config.floor_unrecorded,
-                                 foreign_initiator=config.foreign_initiator)
+                                 foreign_initiator=config.foreign_initiator,
+                                 functional_aliases=network.functional_aliases)
 
         groups = GroupDirectory(network.groups, network.users)
         # Provision the resolver from the same source the documents are served
@@ -462,6 +473,17 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
             raise StartupRefused(
                 "groups are configured but the profile's identity resolver has no "
                 "provisioning surface to receive them")
+
+        # SVC-OP-06: the functional identity holders kept across a restart,
+        # bound again where the network profile in force still allows them.
+        # A release without functional alias activation binds none and
+        # leaves the store as it is, so a release set wrongly loses nothing.
+        if supports_procedure(config.release, "functional-alias"):
+            kept = manager.restore_functional_aliases(
+                [Holding(*h) for h in store.holdings()], STARTUP_CORRELATION_ID)
+            store.save_holdings([(h.identity, h.slot, h.holder) for h in kept])
+        health.set_holdings(lambda: [dataclasses.asdict(h)
+                                     for h in manager.functional.holdings()])
 
         # PLT-ICD-001 2.6: say which call types no conformant client can request,
         # and why, rather than leave an operator to discover it from refusals.
@@ -484,14 +506,23 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
             "not_requestable_by_mcptt_clients": list(undeclared),
             "unreachable_at_release": {cid: why for cid, why in blocked},
             "selected_by_group": by_group})
-        # SVC-OP-06: a functional identity is held only once something binds
-        # it, and nothing in this service does yet; so a call type that needs
-        # one is refused not-authorised to every caller. Said, not discovered.
+        # SVC-OP-06: a functional identity is held once a user the network
+        # profile allows activates it (TS 24.379 clause 9A, Rel-15 on). A
+        # call type none of whose roles anyone can hold is refused to every
+        # caller: said at start, not discovered from refusals.
+        activation = supports_procedure(config.release, "functional-alias")
         for ct in loaded.profile.call_types:
-            if ct.initiator_roles:
-                log.warning("call type %r needs the initiator to hold %s, and this "
-                            "service has no path that binds a functional identity "
-                            "(PLT-VP-R1 SVC-OP-06): every caller is refused "
+            if not ct.initiator_roles:
+                continue
+            if not activation:
+                log.warning("call type %r needs the initiator to hold %s, and %s has no "
+                            "functional alias activation (TS 24.379 clause 9A, Rel-15 "
+                            "on): every caller is refused not-authorised", ct.id,
+                            ", ".join(ct.initiator_roles), config.release)
+            elif not set(ct.initiator_roles) & set(network.functional_aliases):
+                log.warning("call type %r needs the initiator to hold %s, and the "
+                            "network profile lets no user activate one "
+                            "(functional_aliases): every caller is refused "
                             "not-authorised", ct.id, ", ".join(ct.initiator_roles))
         for cid, gids in by_group.items():
             if not gids:
