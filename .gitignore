@@ -168,3 +168,4 @@ kb/
 
 # Claude Code local config
 .claude/
+.mcp.json
