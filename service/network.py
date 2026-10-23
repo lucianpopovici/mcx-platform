@@ -65,7 +65,7 @@ from .groups import Group
 
 NONE = "none"
 KEYS = {"name", "version", "environment", "plmns", "cells", "sip", "groups", "users"}
-GROUP_KEYS = {"id", "display_name", "members"}
+GROUP_KEYS = {"id", "display_name", "members", "call_type"}
 SIP_KEYS = {"trusted_cores", "core_ca"}
 # "/" and "+" separate the parts of the audit identifier, so neither may occur.
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -266,8 +266,11 @@ def _ids(raw: Any, where: str, defects: List[str]) -> Optional[List[str]]:
     return raw
 
 
-def _groups(raw_groups: Any, raw_users: Any,
-            defects: List[str]) -> Tuple[Tuple[Group, ...], Tuple[str, ...]]:
+def _groups(raw_groups: Any, raw_users: Any, defects: List[str],
+            call_types: Optional[Sequence[Any]] = None
+            ) -> Tuple[Tuple[Group, ...], Tuple[str, ...]]:
+    selectable = None if call_types is None else \
+        {ct.id for ct in call_types if getattr(ct, "group_selected", False)}
     groups: List[Group] = []
     if not isinstance(raw_groups, list):
         defects.append("groups: expected a list ([] when there is no group)")
@@ -277,7 +280,7 @@ def _groups(raw_groups: Any, raw_users: Any,
         where = f"groups[{i}]"
         if not isinstance(g, dict) or not {"id", "members"} <= set(g) <= GROUP_KEYS:
             defects.append(f"{where}: expected 'id', 'members' and optionally "
-                           "'display_name'")
+                           "'display_name' and 'call_type'")
             continue
         gid, name = g["id"], g.get("display_name")
         if not isinstance(gid, str) or not gid.strip():
@@ -290,6 +293,19 @@ def _groups(raw_groups: Any, raw_users: Any,
         if name is not None and (not isinstance(name, str) or not name.strip()):
             defects.append(f"{where}.display_name: expected a non-empty string")
             continue
+        # PRF-OP-01: a call to the group carrying the signature of a call type
+        # the profile lets a group choose (`group_selected`) is that call type.
+        chosen = g.get("call_type")
+        if chosen is not None:
+            if not isinstance(chosen, str) or not chosen.strip():
+                defects.append(f"{where}.call_type: expected a call type id")
+                continue
+            if selectable is not None and chosen not in selectable:
+                defects.append(
+                    f"{where}.call_type: {chosen!r} is not a call type the service "
+                    "profile lets a group choose (group_selected: true); known: "
+                    f"{', '.join(sorted(selectable)) or 'none'}")
+                continue
         members = _ids(g["members"], f"{where}.members", defects)
         if members is None:
             continue
@@ -297,7 +313,7 @@ def _groups(raw_groups: Any, raw_users: Any,
             defects.append(f"{where}.members: a group needs at least one member")
             continue
         # Deduplicated in declaration order, as the resolver does.
-        groups.append(Group(gid, name or gid, tuple(dict.fromkeys(members))))
+        groups.append(Group(gid, name or gid, tuple(dict.fromkeys(members)), chosen))
     users = _ids(raw_users, "users", defects)
     if users is None:
         users = []
@@ -316,9 +332,12 @@ def _groups(raw_groups: Any, raw_users: Any,
 
 
 def load_network(path: Path, location_keys: Set[str],
-                 user_ca: Optional[Path] = None) -> Network:
+                 user_ca: Optional[Path] = None,
+                 call_types: Optional[Sequence[Any]] = None) -> Network:
     """`user_ca` is MCX_SIP_TLS_CA when SIP is enabled: the core CA must be
-    kept apart from its anchors, or a user certificate could be a core's."""
+    kept apart from its anchors, or a user certificate could be a core's.
+    `call_types` are the service profile's, against which each group's
+    `call_type` is checked (PRF-OP-01); the process always passes them."""
     try:
         with open(path, encoding="utf-8") as fh:
             raw = safe_load_unique(fh)
@@ -412,7 +431,7 @@ def load_network(path: Path, location_keys: Set[str],
                 anchors = _pem_certificates(user_ca, "MCX_SIP_TLS_CA", defects) or ()
             ca = _load_ca(ca_path, anchors, defects)
 
-    groups, users = _groups(raw["groups"], raw["users"], defects)
+    groups, users = _groups(raw["groups"], raw["users"], defects, call_types)
 
     if defects:
         raise StartupRefused(f"network profile {path}: {len(defects)} defect(s)\n  "

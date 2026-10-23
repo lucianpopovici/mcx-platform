@@ -2145,3 +2145,34 @@ def test_a_fault_escaping_a_request_is_logged_in_its_scope_not_raised(core, worl
     core.on_bytes(msg("BYE", LOCAL, "h1", 2, U[0], LOCAL, to_tag="t"), world[U[0]])
     [fault] = [r for r in caplog.records if r.getMessage() == "fault handling a BYE request"]
     assert fault.correlation_id == "h1" and fault.exc_info
+
+
+# ============================================================ PRF-OP-01: the group chooses
+
+
+def test_a_prearranged_call_to_a_choosing_group_is_its_call_type(tmp_path, pki, clock):
+    """PRF-OP-01 (decided 2026-10-22), end to end: the network profile's group
+    names coordination-group, and a native client's prearranged call to it is
+    a coordination call; its emergency call is still an emergency call."""
+    groups = [{"id": "grp:coord", "members": list(U), "call_type": "coordination-group"},
+              {"id": "grp:alpha", "members": list(U)}]
+    env = sip_env(tmp_path, pki, MCX_NETWORK_FILE=str(network_yaml(
+        tmp_path, fname="choosing.yaml", trusted_cores=["core-client.example"],
+        core_ca=pki / "core-ca.crt", groups=groups)))
+    r = build_runtime(env, clock, platform=Platform())
+    c = SipCore(r, LOCAL, clock)
+    try:
+        assert r.health.snapshot()["call_types"]["selected_by_group"] == \
+            {"coordination-group": ["grp:coord"]}
+        flows = {u: Flow(u) for u in U}
+        for u in U:
+            register(c, u, flows[u])
+        for cid, to, sent, want in (("k1", "grp:coord", "prearranged-group", "coordination-group"),
+                                    ("k2", "grp:coord", "emergency-group", "emergency-group"),
+                                    ("k3", "grp:alpha", "prearranged-group", "prearranged-group")):
+            c.on_bytes(invite(cid, U[0], to, sent), flows[U[0]])
+            admitted = [x for x in r.store.audit_records(cid) if x["type"] == "session-admitted"]
+            assert [x["detail"]["call_type"] for x in admitted] == [want], cid
+    finally:
+        c.close()
+        r.close()

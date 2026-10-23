@@ -304,7 +304,11 @@ class SipCore:
         self.adapter = Adapter(local_uri, runtime.config.release,
                                runtime.loaded.profile.call_types,
                                service_refusal_status=sip_cfg.service_refusal_status,
-                               read_location=sip_cfg.location_reports == "read")
+                               read_location=sip_cfg.location_reports == "read",
+                               # PRF-OP-01: the network profile's groups.
+                               group_call_types={g.id: g.call_type
+                                                 for g in runtime.network.groups
+                                                 if g.call_type})
         # SIP-OP-18 item 6, a deployment setting since 2026-10-16
         # (MCX_DIALOG_TAKEOVER): "never" keeps every dialog on the connection
         # it was established on.

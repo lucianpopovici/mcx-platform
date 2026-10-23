@@ -1398,7 +1398,7 @@ def test_bnd_008_leaves_the_stop_and_plain_stat_alone(tmp_path):
       "without stating milliseconds (_ms) (PLT-GEN-011)",
       "service/config.py:{L:MCX_IDLE_TIMEOUT}: setting MCX_RETRY_S counts in a unit other "
       "than milliseconds (PLT-GEN-011)"]),
-    ({}, {"core/validation.py": ('"no_answer_ms", "no_answer_s", "group_over_limit"),',
+    ({}, {"core/validation.py": ('"no_answer_ms", "no_answer_s", "group_over_limit", "group_selected"),',
                                  '"no_answer_ms", "no_answer_s", "group_over_limit", "hold_timeout",\n'
                                  '                "ring_s"),')},
      ["core/validation.py:{L:\"hold_timeout\"}: schema key 'hold_timeout' names a duration "
@@ -1734,7 +1734,7 @@ def test_bnd_016_the_profile_seconds_forms_are_exempt_only_while_declared(tmp_pa
     root = _runtime(tmp_path, patches={"core/validation.py": (_RING_FORM, "SECONDS_FORMS = {}")})
     text = (root / "core/validation.py").read_text().splitlines()
     ct = next(n for n, l in enumerate(text, 1)
-              if '"no_answer_ms", "no_answer_s", "group_over_limit")' in l)
+              if '"no_answer_ms", "no_answer_s", "group_over_limit",' in l)
     floor = next(n for n, l in enumerate(text, 1) if '"timers_ms", "timers_s"' in l)
     model_text = (root / "core/model.py").read_text().splitlines()
     fields = [(next(n for n, l in enumerate(model_text, 1) if l.startswith(f"    {f}:")), f)

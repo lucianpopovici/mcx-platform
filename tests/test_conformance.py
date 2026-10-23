@@ -383,11 +383,19 @@ def test_every_call_type_is_requestable_or_reported_unreachable(loaded, release)
     adapter = Adapter("sip:server@example", release, loaded.profile.call_types)
     undeclared, blocked = mcinfo.reachability(loaded.profile.call_types, release)
     blocked_ids = {ct for ct, _ in blocked}
+    by_group = set(mcinfo.group_selected(loaded.profile.call_types))
     for ct in loaded.profile.call_types:
         if ct.mc_signature is None:
             assert ct.id in undeclared
             continue
         got = adapter.parse_invite(_invite_for(ct.mc_signature)).call_type
+        if ct.id in by_group:
+            # PRF-OP-01: never by its signature alone, and through a group
+            # that names it, with that signature, whenever the release can.
+            assert got != ct.id and ct.id not in undeclared, ct.id
+            chooser = Adapter("sip:server@example", release, loaded.profile.call_types,
+                              group_call_types={"grp:chooser": ct.id})
+            got = chooser.parse_invite(_invite_for(ct.mc_signature, "grp:chooser")).call_type
         if ct.id in blocked_ids:
             assert got == "", (ct.id, str(release))
         else:

@@ -763,9 +763,11 @@ def test_health_says_which_call_types_no_client_can_request(env):
     rt = build_runtime({**env, "MCX_RELEASE": "17"}, _clock())
     report = rt.health.snapshot()["call_types"]
     assert set(report) == {"strict_release", "not_requestable_by_mcptt_clients",
-                           "unreachable_at_release"}
+                           "unreachable_at_release", "selected_by_group"}
     assert report["strict_release"] is False
-    assert "sds" in report["not_requestable_by_mcptt_clients"]
+    assert report["not_requestable_by_mcptt_clients"] == ["sds"]
+    # PRF-OP-01: chosen by its group, and the fixture's groups name none.
+    assert report["selected_by_group"] == {"coordination-group": []}
     assert report["unreachable_at_release"] == {}      # mcx declares no ad hoc call type
 
 
@@ -847,3 +849,34 @@ def test_the_stated_ad_hoc_list_cap_reaches_the_session_layer(env, value):
     rt = build_runtime({**env, "MCX_ADHOC_LIST_MAX": value}, _clock())
     assert rt.config.adhoc_list_max == int(value)
     assert rt.manager._adhoc_list_max == int(value)
+
+
+def test_a_group_naming_a_call_type_it_may_not_choose_refuses_start(env):
+    """PRF-OP-01: the process checks each group's call_type against the
+    loaded service profile, before anything durable is opened."""
+    bad = [{**GROUPS[0], "call_type": "prearranged-group"}, *GROUPS[1:]]
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(with_network(env, "bad-choice.yaml", groups=bad), Clock())
+    assert "groups[0].call_type: 'prearranged-group' is not a call type the service " \
+           "profile lets a group choose (group_selected: true); known: coordination-group" \
+        in str(exc.value)
+    assert not Path(env["MCX_DATA_DIR"]).exists()
+
+
+def test_startup_says_what_no_caller_can_obtain(env, caplog):
+    """Review of PRF-OP-01: a group-selected call type no group names, and a
+    call type needing a role nothing binds (SVC-OP-06), are said at start."""
+    with caplog.at_level("WARNING", logger="mcx.service"):
+        build_runtime(env, _clock()).close()
+        build_runtime(_frmcs(with_network(env, "frmcs2.yaml"), "19", "true"), _clock()).close()
+    said = [r.getMessage() for r in caplog.records]
+    assert ("call type 'coordination-group' is chosen by its group, and no group in the "
+            "network profile names it: no client can request it") in said
+    roles = sorted(m for m in said if "has no path that binds a functional identity" in m)
+    assert roles == sorted(
+        f"call type {cid!r} needs the initiator to hold {held}, and this service has no "
+        "path that binds a functional identity (PLT-VP-R1 SVC-OP-06): every caller is "
+        "refused not-authorised"
+        for cid, held in (("driver-controller", "train-driver, track-controller"),
+                          ("shunting-group", "shunting-team-leader"),
+                          ("rec-broadcast", "train-driver, track-controller")))

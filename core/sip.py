@@ -855,7 +855,8 @@ class Adapter:
     def __init__(self, local_uri: str, release: Release,
                  call_types: Sequence[Any] = (), *,
                  service_refusal_status: int = 503,
-                 read_location: bool = True) -> None:
+                 read_location: bool = True,
+                 group_call_types: Optional[Mapping[str, str]] = None) -> None:
         """`call_types` are the loaded profile's; the adapter reads only each
         one's `id` and `mc_signature` (PLT-ICD-001 2.6) and learns nothing
         else about the profile.
@@ -865,7 +866,10 @@ class Adapter:
         KEEP_503: 503, or 480.
         `read_location` (MCX_LOCATION_REPORTS, ADHOC-OP-03): False ignores
         the client's location report. The defaults are the decided behaviour;
-        the service always passes the deployment's stated values."""
+        the service always passes the deployment's stated values.
+        `group_call_types` (PRF-OP-01): group id -> the call type a call to
+        that group is, from the network profile's groups, when the call
+        carries that call type's signature exactly."""
         if service_refusal_status not in SERVICE_REFUSAL_STATUS:
             raise ValueError(f"service refusal status {service_refusal_status!r} "
                              f"is not one of {sorted(SERVICE_REFUSAL_STATUS)}")
@@ -878,8 +882,12 @@ class Adapter:
         for ct in call_types:
             sig = getattr(ct, "mc_signature", None)
             if sig is not None:
-                self._by_signature[sig] = ct.id
+                # A group-selected call type shares its signature with
+                # another (PRF-OP-01): never chosen by the signature alone.
+                if not getattr(ct, "group_selected", False):
+                    self._by_signature[sig] = ct.id
                 self._signature_of[ct.id] = sig
+        self._group_call_types: Dict[str, str] = dict(group_call_types or {})
         # Step 5 (186) is for a system with no ad hoc call type at all.
         self._any_adhoc = any(sig.session_type == "adhoc" for sig in self._by_signature)
         # PLT-REL-009. Table 4.4.2-2 grew from 44 codes in Rel-13 to 95 in
@@ -1171,8 +1179,15 @@ class Adapter:
             raise SipError(f"MCPTT info body: {exc}") from None
         sig = info.signature()
         call_type = ""
+        to = _uri(info.request_uri) if info.request_uri else target
         if sig is not None and supports_session_type(self._release, sig.session_type):
             call_type = self._by_signature.get(sig, "")
+            # PRF-OP-01: the target group's call type, when the call carries
+            # its signature exactly; any other call to the group (an
+            # emergency one, say) is what its signature says.
+            chosen = self._group_call_types.get(to)
+            if chosen is not None and self._signature_of.get(chosen) == sig:
+                call_type = chosen
 
         attributes = {}
         answer_mode = message.headers.get("Answer-Mode")
@@ -1187,7 +1202,7 @@ class Adapter:
         return SessionRequest(
             request_id=message.headers.get("Call-ID") or "",
             initiator=initiator,
-            target=_uri(info.request_uri) if info.request_uri else target,
+            target=to,
             call_type=call_type,
             media=media,
             # TS 24.379 has no element for either. The profile's declaration

@@ -57,10 +57,11 @@ call_types:
   - id: switching-order
     label: Switching order call
     # TS 24.379 cannot tell this apart from crew-call: both are prearranged
-    # voice group calls with no indication set. Until the profile decides
-    # how to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
-    # request it.
-    mc_signature: null
+    # voice group calls with no indication set. The target group chooses it
+    # (PLT-VP-R1 PRF-OP-01, decided 2026-10-22): a prearranged call to a
+    # group whose network profile entry says `call_type: switching-order`.
+    mc_signature: {session_type: prearranged}
+    group_selected: true
     no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]

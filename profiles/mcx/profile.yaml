@@ -149,10 +149,11 @@ call_types:
     label: Multi-agency coordination call
     # TS 24.379 cannot tell this apart from prearranged-group: both are
     # prearranged voice group calls, and 'coordination' is an application
-    # the MCPTT info body has no element for. Until the profile decides how
-    # to distinguish them (PLT-VP-R1 PRF-OP-01), a native client cannot
-    # request it.
-    mc_signature: null
+    # the MCPTT info body has no element for. The target group chooses it
+    # (PLT-VP-R1 PRF-OP-01, decided 2026-10-22): a prearranged call to a
+    # group whose network profile entry says `call_type: coordination-group`.
+    mc_signature: {session_type: prearranged}
+    group_selected: true
     no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
     group_over_limit: truncate        # TS 24.379 6.3.5.5
     media: [voice]

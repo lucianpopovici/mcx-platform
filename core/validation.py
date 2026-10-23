@@ -459,7 +459,7 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                 "id", "label", "media", "session_model", "urgency", "application",
                 "auto_answer", "acknowledgement_required", "recording_required",
                 "max_participants", "initiator_roles", "floor", "mc_signature",
-                "no_answer_ms", "no_answer_s", "group_over_limit"),
+                "no_answer_ms", "no_answer_s", "group_over_limit", "group_selected"),
                 required=("id", "label", "media", "session_model", "urgency",
                           "auto_answer", "acknowledgement_required",
                           "recording_required", "initiator_roles", "floor",
@@ -526,6 +526,8 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
             mc_signature=_mc_signature(c, f"{p}.mc_signature", item.get("mc_signature")),
             no_answer_ms=no_answer,
             no_answer_s=no_answer_s,
+            group_selected=bool(c.typed(p, item, "group_selected", bool, False,
+                                        required=False)),
             group_over_limit=_required_choice(c, f"{p}.group_over_limit",
                                               item.get("group_over_limit"),
                                               GROUP_OVER_LIMIT),
@@ -535,7 +537,11 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
     # guess which one a client meant -- and must not (PLT-ICD-001 2.6).
     claimed: Dict[mcinfo.Signature, str] = {}
     for ct in out:
-        if ct.mc_signature is None:
+        if ct.group_selected and ct.mc_signature is None:
+            c.add(f"call_types[{ct.id}].group_selected", "bad-value",
+                  "a call type chosen by its group still needs the mc_signature a "
+                  "call to the group carries (PRF-OP-01)")
+        if ct.mc_signature is None or ct.group_selected:
             continue
         other = claimed.get(ct.mc_signature)
         if other is not None:
@@ -544,7 +550,30 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                   f"cannot tell them apart, so at most one of them may have it")
         else:
             claimed[ct.mc_signature] = ct.id
+    # PRF-OP-01 (review): a group chooses between call types TS 24.379 cannot
+    # tell apart, so a group-selected call type shares its signature with
+    # exactly one that is not, which every other group's calls get; and it is
+    # a call to a group, prearranged or chat (a private call or an ad hoc
+    # call names no group to choose).
+    for ct in out:
+        if not ct.group_selected or ct.mc_signature is None:
+            continue
+        where = f"call_types[{ct.id}].group_selected"
+        if ct.mc_signature.session_type not in GROUP_SELECTABLE_SESSION_TYPES:
+            c.add(where, "bad-value",
+                  f"a group chooses only a call to it: session_type must be one of "
+                  f"{', '.join(GROUP_SELECTABLE_SESSION_TYPES)}, not "
+                  f"{ct.mc_signature.session_type!r}")
+        elif ct.mc_signature not in claimed:
+            c.add(where, "bad-value",
+                  "no call type that is not group-selected declares this mc_signature: "
+                  "a call with it to any other group would be refused. A group chooses "
+                  "between call types TS 24.379 cannot tell apart (PRF-OP-01)")
     return tuple(out)
+
+
+# A group-selected call type is a call to a group (PRF-OP-01).
+GROUP_SELECTABLE_SESSION_TYPES = ("prearranged", "chat")
 
 
 def _mc_signature(c: _Checker, p: str, node: Any) -> Optional[mcinfo.Signature]:
