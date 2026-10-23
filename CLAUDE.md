@@ -17,7 +17,7 @@ one release image per profile around a core that is identical in every image,
 and the profile still named at deploy time.
 
 **Current state: a process that has completed calls through third-party SIP
-cores.** 1243 tests pass and 20 boundary gates pass. `python3 -m service` runs.
+cores.** 2948 tests pass and 21 boundary gates pass (`kb/STATE.md` is the current count). `python3 -m service` runs.
 Registration and group-call setup have passed through Kamailio 5.7.4 as a
 proxy, and the terminating path has passed through Asterisk 20.6 as a B2BUA
 (PLT-VP-R1 §7.1.1). The first thing those runs found was that the shipped
@@ -33,7 +33,7 @@ core cannot enumerate, compare against literals, or order. Everything
 deployment-specific lives in a profile: a YAML package plus six hook
 implementations.
 
-This is enforced. `python3 tools/check_boundary.py --root .` runs 20 static gates
+This is enforced. `python3 tools/check_boundary.py --root .` runs 21 static gates
 and will fail the build for `if profile.name == "frmcs"`, for an import from
 `core/` into `profiles/`, or for the word "railway" in a `core/` docstring.
 

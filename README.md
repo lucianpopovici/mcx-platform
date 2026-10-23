@@ -17,7 +17,7 @@ a deployment different lives in a profile: a YAML package plus six hook
 implementations. That is the whole design, and it is why adding a deployment is a
 config change rather than a release.
 
-This is enforced, not encouraged. `tools/check_boundary.py` runs 18 static gates
+This is enforced, not encouraged. `tools/check_boundary.py` runs 21 static gates
 in CI and **will fail your build** for a line like `if profile.name == "frmcs"`,
 for an import from `core/` into `profiles/`, or for the word "railway" in a
 docstring under `core/`. If a gate blocks you, the gate is usually right — see
@@ -30,8 +30,8 @@ docstring under `core/`. If a gate blocks you, the gate is usually right — see
 ```bash
 pip install pyyaml pytest
 
-python3 -m pytest tests/ -q              # 280 tests
-python3 tools/check_boundary.py --root . # 18 boundary gates
+python3 -m pytest tests/ -q              # 2948 tests (kb/STATE.md has the current count)
+python3 tools/check_boundary.py --root . # 21 boundary gates
 
 # the conformance suite runs once per profile, against the same code
 MCX_PROFILE=mcx     python3 -m pytest tests/test_conformance.py -q
@@ -105,7 +105,7 @@ defect**, not a test to fix. Classify it in your PR (procedure in
 |---|---|
 | `docs/PLT-SRS.md` | 207 numbered requirements, phased R1–R4, traced to 3GPP TSs |
 | `docs/PLT-ICD-001.md` | The six hook contracts: PRE / POST / INV, sequences, reason codes |
-| `docs/PLT-VP-R1.md` | R1 verification plan — 99 cases, full traceability matrix |
+| `docs/PLT-VP-R1.md` | R1 verification plan — 108 cases (101 gate R1 exit), full traceability matrix |
 | `docs/PLT-ANL-R1.md` | The three R1 analyses, performed as worked changes |
 | `docs/PROFILE_BOUNDARY.md` | Why the boundary is where it is |
 
@@ -113,9 +113,11 @@ defect**, not a test to fix. Classify it in your PR (procedure in
 
 ## Status
 
-R1 is **not** complete. 83 of 99 verification cases pass; the remaining 16 need a
-live SIP core, RTCP on the wire, or media endpoints, and no further design closes
-them. Standing up that environment is the next milestone.
+R1 is **not** complete. Of the 101 verification cases that gate R1 exit, 49 are
+PASS, 49 are PARTIAL (the evidence does not yet show the whole pass criterion)
+and 3 are NOT SIGNED (`docs/PLT-VP-R1-RESULTS.md`, 2026-10-22). Registration and
+call setup have run against Kamailio and Asterisk, so a live SIP core is no
+longer the blocker; closing the PARTIAL cases is the next milestone.
 
 Known gaps, all recorded rather than hidden:
 
@@ -125,4 +127,4 @@ Known gaps, all recorded rather than hidden:
   work — notably which components fall under which SIL. (The "production
   indicator" three requirements depend on was decided on 2026-10-21: the
   network profile's `environment`, VP-OP-05.)
-- Only the 83 R1 requirements have a verification plan. R2–R4 do not yet.
+- Only the 92 R1 requirements have a verification plan. R2–R4 do not yet.
