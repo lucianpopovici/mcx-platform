@@ -55,26 +55,96 @@ HOOK_INTERFACES: Mapping[str, Tuple[type, Tuple[str, ...]]] = {
 # --------------------------------------------------------------------------
 # Environment predicates
 #
-# OPEN (VP-OP-05): PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008 all turn on a
-# "production indicator" that PLT-SRS does not define. The definition below is
-# this implementation's proposal and requires confirmation before baselining.
-# Its weaknesses (opt-in, switchable by whoever configures the stubs, recorded
-# nowhere) and the options for R1 are in PLT-VP-R1 VP-OP-05.
+# VP-OP-05, decided 2026-10-21 (option B): the production indicator that
+# PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008 turn on is the deployment's
+# environment. It is declared in the network profile (PLT-ICD-001 2.8, hashed
+# and change-controlled with the radio plan), and a non-production one is
+# refused on a network that is not a test network (service/network.py).
+# MCX_ENV is required, has no default and must agree with the file; so must
+# MCX_PRODUCTION when it is set. The environment is in every audit record and
+# in the health document, so a switch shows on every call.
 # --------------------------------------------------------------------------
 
-PRODUCTION_ENV_VALUES = ("production", "prod")
+ENVIRONMENTS = ("production", "staging", "test", "dev")
+PRODUCTION = "production"
+_YES = ("1", "true", "yes")
+_NO = ("0", "false", "no")
+
+
+def environment(env: Optional[Mapping[str, str]] = None) -> str:
+    """MCX_ENV, checked: one of ENVIRONMENTS, no default; MCX_PRODUCTION, when
+    set, a yes or a no that agrees with it."""
+    e = os.environ if env is None else env
+    raw = (e.get("MCX_ENV") or "").strip()
+    if not raw:
+        raise StartupRefused(
+            "MCX_ENV is not set: state the environment this deployment runs in "
+            f"({', '.join(ENVIRONMENTS)}), the same as its network profile's "
+            "`environment` (PLT-VP-R1 VP-OP-05); there is no default, so a "
+            "forgotten setting cannot run the stubs in production")
+    if raw not in ENVIRONMENTS:
+        raise StartupRefused(
+            f"MCX_ENV={raw!r} must be one of {', '.join(ENVIRONMENTS)}")
+    flag = e.get("MCX_PRODUCTION")
+    if flag is not None:
+        f = flag.strip().lower()
+        if f not in _YES + _NO:
+            raise StartupRefused(
+                f"MCX_PRODUCTION={flag!r} must be one of {', '.join(_YES + _NO)}, "
+                "or be left unset")
+        if (f in _YES) != (raw == PRODUCTION):
+            raise StartupRefused(
+                f"MCX_PRODUCTION={flag!r} disagrees with MCX_ENV={raw!r}; "
+                "leave it unset or make the two agree")
+    return raw
 
 
 def is_production(env: Optional[Mapping[str, str]] = None) -> bool:
-    e = os.environ if env is None else env
-    if (e.get("MCX_ENV") or "").strip().lower() in PRODUCTION_ENV_VALUES:
-        return True
-    return (e.get("MCX_PRODUCTION") or "").strip().lower() in ("1", "true", "yes")
+    """The production indicator: MCX_ENV is production. Refuses, through
+    environment(), when MCX_ENV is unset or does not agree with MCX_PRODUCTION."""
+    return environment(env) == PRODUCTION
 
 
 def is_test_mode(env: Optional[Mapping[str, str]] = None) -> bool:
     e = os.environ if env is None else env
     return (e.get("MCX_TEST_MODE") or "").strip().lower() in ("1", "true", "yes")
+
+
+# --------------------------------------------------------------------------
+# Reading YAML
+# --------------------------------------------------------------------------
+
+
+class _UniqueKeys(yaml.SafeLoader):
+    """safe_load, refusing a key repeated in a mapping. PyYAML keeps the last
+    value without a word, and the hash is taken of what was parsed, so a file
+    reviewed as `environment: production` could run as the `dev` written
+    further down (review of VP-OP-05)."""
+
+
+def _unique_mapping(loader: yaml.SafeLoader, node: yaml.MappingNode, deep: bool = False):
+    seen: Dict[Any, int] = {}
+    for key_node, _ in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue                   # `<<`: merged keys may be overridden
+        key = loader.construct_object(key_node, deep=True)
+        try:
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"key {key!r} repeated (first at line {seen[key]})",
+                    key_node.start_mark)
+            seen[key] = key_node.start_mark.line + 1
+        except TypeError:              # an unhashable key: SafeLoader refuses it
+            continue
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_UniqueKeys.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
+def safe_load_unique(stream: Any) -> Any:
+    """yaml.safe_load, with a repeated mapping key an error (yaml.YAMLError)."""
+    return yaml.load(stream, Loader=_UniqueKeys)
 
 
 # --------------------------------------------------------------------------
@@ -254,7 +324,7 @@ def read_package(directory: Path) -> Any:
             f"profile package {str(directory)!r} contains no {PROFILE_FILENAME}")
     try:
         with path.open("r", encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = safe_load_unique(fh)
     except yaml.YAMLError as exc:
         raise ProfileLoadError(f"{path}: not well-formed YAML: {exc}") from exc
     if not isinstance(raw, dict):
@@ -297,8 +367,8 @@ def startup(profile_names: Sequence[str], profiles_root: Path,
                 "one is permitted outside test mode")
         if is_production(env):
             raise StartupRefused(
-                "test mode requested while a production indicator is set; "
-                "multi-profile loading is refused")
+                "test mode requested while a production indicator is set "
+                "(MCX_ENV=production); multi-profile loading is refused")
 
     loaded = [_load_named(n, profiles_root) for n in names]
 

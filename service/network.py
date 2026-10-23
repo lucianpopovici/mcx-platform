@@ -9,6 +9,7 @@ their own file, named by MCX_NETWORK_FILE (required, no default):
 
     name: rail-ops
     version: "3"
+    environment: test                     # production, staging, test or dev
     plmns: ["001010"]                     # MCC + MNC, as tPlmnIdentityFormat
     cells:
       - {cell: "0010100000000000000000000100100011", location: {track_section: S1}}
@@ -27,6 +28,10 @@ learn, and it changes with the organisation, not with the service. Every group
 member is also a known user. Registering over SIP does not make a user known
 (SIP-OP-05): being registered says where a user can be reached, this file says
 who exists.
+
+The environment is the production indicator (VP-OP-05, decided 2026-10-21):
+it is stated here, beside the PLMNs, MCX_ENV must agree with it, and anything
+but production is refused on a network that is not a test network.
 
 Every key is required; an empty list or "none" is how a deployment says it has
 nothing there. The file and the core CA certificate are hashed together, and
@@ -53,18 +58,34 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from core import mcinfo
 from core.errors import StartupRefused
-from core.loader import content_hash
+from core.loader import ENVIRONMENTS, PRODUCTION, content_hash, safe_load_unique
 
 from .config import is_fqdn
 from .groups import Group
 
 NONE = "none"
-KEYS = {"name", "version", "plmns", "cells", "sip", "groups", "users"}
+KEYS = {"name", "version", "environment", "plmns", "cells", "sip", "groups", "users"}
 GROUP_KEYS = {"id", "display_name", "members"}
 SIP_KEYS = {"trusted_cores", "core_ca"}
 # "/" and "+" separate the parts of the audit identifier, so neither may occur.
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 PLMN = re.compile(r"[0-9]{6}")                # tPlmnIdentityFormat, \d{3}\d{3}
+# VP-OP-05 (owner decision 2026-10-21): the PLMNs on which a non-production
+# environment may run. MCC 001 is the test network of the 3GPP test
+# specifications (any MNC); 999-999 and 999-99 are the MNCs ITU-T E.212
+# (06/2024) Appendix III.2.4 suggests for testing under MCC 999. MCC 999 as a
+# whole is not a test code: it is for internal use within a private network,
+# which may be operational (a railway's FRMCS network). 999-99 is written
+# with a trailing 0 like the example's 001-01 (`001010`), pending ICD-OP-12
+# on how a two-digit MNC fills six digits. Codes a regulator assigns for
+# testing (E.212 Annex B item 5, A.5.6, the 991 trials of Annex G) cannot be
+# told from operational ones, so a network on them runs as production.
+TEST_MCCS = ("001",)
+TEST_PLMNS = ("999999", "999990")
+
+
+def is_test_plmn(plmn: str) -> bool:
+    return plmn[:3] in TEST_MCCS or plmn in TEST_PLMNS
 
 
 @dataclass(frozen=True)
@@ -77,6 +98,9 @@ class Network:
     trusted_cores: Tuple[str, ...]
     groups: Tuple[Group, ...] = ()
     users: Tuple[str, ...] = ()           # declared in no group; members are users too
+    # VP-OP-05: production, staging, test or dev; only production on a
+    # network that is not a test network.
+    environment: str = ""
     # Parsed once, and handed to the TLS context as data: what was checked
     # and hashed is what is trusted, whatever happens to the file later.
     core_ca: Optional[x509.Certificate] = field(default=None, compare=False)
@@ -297,7 +321,7 @@ def load_network(path: Path, location_keys: Set[str],
     kept apart from its anchors, or a user certificate could be a core's."""
     try:
         with open(path, encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
+            raw = safe_load_unique(fh)
     except (OSError, yaml.YAMLError) as exc:
         raise StartupRefused(f"network profile {path}: {exc}") from exc
     if not isinstance(raw, dict) or set(raw) != KEYS:
@@ -331,6 +355,23 @@ def load_network(path: Path, location_keys: Set[str],
                 plmns.add(p)
 
     cells = _cells(raw["cells"], location_keys, plmns, defects)
+
+    # VP-OP-05: the environment is stated here, with the radio plan, and a
+    # network that is not a test network runs in production: the stubs the
+    # other environments allow cannot be switched on in an operational one by
+    # changing a variable.
+    environment = raw["environment"]
+    if environment not in ENVIRONMENTS:
+        defects.append(f"environment: expected one of {', '.join(ENVIRONMENTS)} "
+                       f"(found {environment!r})")
+    elif environment != PRODUCTION:
+        live = sorted(p for p in plmns if not is_test_plmn(p))
+        if live:
+            defects.append(
+                f"environment: {environment}, but plmns {', '.join(live)} "
+                "are not test PLMNs (MCC 001, or 999-999 / 999-99 of ITU-T "
+                "E.212 Appendix III); a network that is not a test network "
+                "runs as production")
 
     sip = raw["sip"]
     trusted: Tuple[str, ...] = ()
@@ -379,5 +420,6 @@ def load_network(path: Path, location_keys: Set[str],
     ca_hash = hashlib.sha256(ca.public_bytes(Encoding.DER)).hexdigest() if ca else None
     return Network(name=ident["name"], version=ident["version"],
                    content_hash=content_hash({"network": raw, "core_ca": ca_hash}),
-                   plmns=tuple(sorted(plmns)), cells=cells, trusted_cores=trusted,
+                   plmns=tuple(sorted(plmns)), environment=environment,
+                   cells=cells, trusted_cores=trusted,
                    groups=groups, users=users, core_ca=ca)

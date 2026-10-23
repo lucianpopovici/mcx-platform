@@ -125,7 +125,7 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
     network = work / f"network-{recorder}.yaml"
     cores = [] if trusted == "none" else [trusted]
     network.write_text(json.dumps({
-        "name": "interop", "version": "1", "plmns": ["001010"], "cells": [],
+        "name": "interop", "version": "1", "environment": "test", "plmns": ["001010"], "cells": [],
         "sip": {"trusted_cores": cores,
                 "core_ca": str(work / "pki/core-ca.crt") if cores else "none"},
         "groups": [{"id": "grp:alpha", "display_name": "Alpha", "members": [U1, U2]}],
@@ -148,6 +148,7 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         # are since 2026-10-16. Plain HTTP: the harness reads /healthz.
         "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
         "MCX_FOREIGN_INITIATOR": "refuse",
+        "MCX_ENV": "test",
         "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
         "MCX_LOCATION_REPORTS": "read",
         # The core under test authenticates its users; by its certificate's

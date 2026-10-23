@@ -103,7 +103,8 @@ class Health:
         with self._lock:
             self._network = {"name": network.name, "version": network.version,
                              "hash": network.content_hash,
-                             "identifier": network.identifier()}
+                             "identifier": network.identifier(),
+                             "environment": network.environment}
 
     def set_release(self, release) -> None:
         """PLT-REL-001. An operator looking at a running instance must be able
@@ -128,6 +129,8 @@ class Health:
                                 "hash": self._hash,
                                 "identifier": self._profile},
                     "release": self._release,
+                    # VP-OP-05: the production indicator, at a glance.
+                    "environment": (self._network or {}).get("environment"),
                     "network": self._network,
                     "call_types": self._call_types,
                     "settings": self._settings,
@@ -369,9 +372,22 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     #    it refuses.
     loaded = loader.startup(config.profile_names, config.profiles_root, env)
 
-    # 2. PLT-IDM-007: the stub identity provider is refused under any
-    #    production indicator. (VP-OP-05: the indicator is still a proposal.)
-    if config.idms == IDMS_STUB and loader.is_production(env):
+    # 2. VP-OP-05 (decided 2026-10-21): the environment is the network
+    #    profile's, MCX_ENV must agree with it, and it is the production
+    #    indicator for everything below. The network is read here, before
+    #    the stubs are judged, so the file decides and not the variable.
+    network = _network(config, loaded)
+    if network.environment != config.environment:
+        raise StartupRefused(
+            f"MCX_ENV={config.environment!r} disagrees with the network profile's "
+            f"environment {network.environment!r} ({config.network}); the "
+            "environment is declared with the network and the variable must "
+            "say the same (PLT-VP-R1 VP-OP-05)")
+    production = network.environment == loader.PRODUCTION
+
+    # 3. PLT-IDM-007: the stub identity provider is refused under the
+    #    production indicator.
+    if config.idms == IDMS_STUB and production:
         raise StartupRefused(
             "the stub identity provider is refused when a production "
             "indicator is set (PLT-IDM-007)")
@@ -379,12 +395,12 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     # Same rule, same reason: a stub recorder claims a capability the process
     # does not have, and PLT-OAM-008 exists so that a session which must be
     # recorded is not established when it cannot be.
-    if config.recorder == RECORDER_STUB and loader.is_production(env):
+    if config.recorder == RECORDER_STUB and production:
         raise StartupRefused(
             "the stub recorder is refused when a production indicator is set "
             "(PLT-OAM-008): it reports recording available with no recorder")
 
-    if config.bearer == BEARER_STUB and loader.is_production(env):
+    if config.bearer == BEARER_STUB and production:
         raise StartupRefused(
             "the stub bearer reservation is refused when a production "
             "indicator is set: it grants a reservation the network never made")
@@ -400,12 +416,14 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     # NET-OP-01: and so does the network profile. Which cells meant which
     # track section, and which cores could assert any identity, are facts of
     # the day a call was made, not of the day someone asks.
-    network = _network(config, loaded)
+    # VP-OP-05: and the environment, so a deployment switched out of
+    # production shows on every record it writes, not only in its files.
     health.set_network(network)
     identifier = (f"{loaded.profile.identifier()}+{config.release}"
-                  f"+{network.identifier()}")
-    log.info("profile loaded: %s (3GPP %s) on network %s",
-             loaded.profile.identifier(), config.release, network.identifier())
+                  f"+{network.identifier()}+{network.environment}")
+    log.info("profile loaded: %s (3GPP %s) on network %s, environment %s",
+             loaded.profile.identifier(), config.release, network.identifier(),
+             network.environment)
 
     # RES-OP-05: the HTTPS context, built here so that a certificate that
     # cannot be loaded refuses startup before anything is opened, and the

@@ -83,18 +83,36 @@ VP1-LOAD-004:
   - tests/test_loader.py::test_vp1_load_004_two_profiles_refused_outside_test_mode
   note: startup(['mcx','frmcs'], env={}) raises StartupRefused with 'exactly one' in the message.
 VP1-LOAD-005:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-21'
   evidence:
-  - tests/test_loader.py::test_vp1_load_005_production_indicator_variants
-  - tests/test_loader.py::test_vp1_load_005_test_mode_refused_in_production
-  gap: 'The production indicator is still undefined. VP-OP-05 is open and states that it blocks this case,
-    so the tests only check the proposed is_production() and cannot demonstrate the criterion against
-    an indicator that has not been decided. Attribution rests on the substring ''production'' appearing
-    in the message. Close this once VP-OP-05 is decided: parametrize startup over each defined indicator
-    form, and add a control asserting that the identical profile set with the same test mode but no indicator
-    starts, so the refusal is shown to depend on the indicator alone.'
+    - tests/test_loader.py::test_a_profile_with_a_repeated_key_is_refused
+    - tests/test_loader.py::test_safe_load_unique_is_safe_load_without_repeats
+    - tests/test_loader.py::test_vp1_load_005_production_indicator_variants
+    - tests/test_loader.py::test_vp1_load_005_test_mode_refused_in_production
+    - tests/test_loader.py::test_vp1_load_005_the_environment_is_stated_and_agreed
+    - tests/test_loader.py::test_vp1_load_005_the_same_test_mode_starts_without_the_indicator
+    - tests/test_network.py::test_a_non_production_environment_needs_a_test_network
+    - tests/test_network.py::test_a_repeated_key_is_refused
+    - tests/test_network.py::test_an_environment_is_read_where_it_may_run
+    - tests/test_network.py::test_the_environment_is_one_of_four
+    - tests/test_network.py::test_the_environment_is_part_of_the_hash
+    - tests/test_service.py::test_vp1_load_005_test_mode_against_the_network_profile
+    - tests/test_service.py::test_vp1_load_005_test_mode_starts_on_a_test_network
+  note: >-
+    Re-reviewed after VP-OP-05 was decided (2026-10-21, option B). The production indicator is
+    the network profile's environment (PLT-ICD-001 ICD-NET-006), which MCX_ENV (required, no
+    default) and MCX_PRODUCTION (when set) must agree with. Startup in test mode is refused over
+    every indicator form, with the exact diagnostic; a control over staging, test and dev, and
+    MCX_PRODUCTION=0/false/no, shows the identical profile set and test mode starting, so the
+    refusal turns on the indicator alone; end to end, two profiles in test mode against a
+    production network profile, a disagreeing MCX_ENV or a test environment on an operational
+    PLMN exit 2 before any data dir, and start on a test network that says test. Unset, alias
+    and contradicting settings are refused; a key repeated in the network or a service profile
+    is refused (found by this review). Accepted residue: an administrator who controls every
+    file can declare a test PLMN for an operational network (option C, not in R1); the declared
+    PLMNs are not checked against the cells seen in traffic.
 VP1-LOAD-006:
   verdict: partial
   by: independent review (agent)
@@ -1520,20 +1538,35 @@ VP1-SIG-006:
   note: 'The SIP listener evidence is solid: plaintext gets no bytes back and is counted, missing and
     untrusted client certificates are refused, and mutual auth is counted.'
 VP1-SIG-007:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-21'
   evidence:
-  - tests/test_service.py::test_vp1_sig_007_process_exits_nonzero
-  - tests/test_service.py::test_vp1_sig_007_stub_idms_refused_under_production_indicator
-  gap: 'VP-OP-05 (§11) is open and lists VP1-SIG-007 as blocked: the production indicator is undefined,
-    and today it is opt-in (MCX_ENV=production|prod or MCX_PRODUCTION=1|true|yes). A deployment with no
-    indicator runs the stub. The tests show refusal only for the proposed values. The process test covers
-    MCX_ENV=production only, not MCX_PRODUCTION or the ''prod''/''true''/''yes'' spellings. To close:
-    once VP-OP-05 is decided, a process-level test parametrised over every value the decided indicator
-    accepts (and, under option A, over an absent MCX_ENV) asserting exit 2 and the PLT-IDM-007 diagnostic.'
-  note: 'What is tested is tested properly: exit 2, a named diagnostic, no data dir created, and a positive
-    control without the indicator.'
+    - tests/test_loader.py::test_a_profile_with_a_repeated_key_is_refused
+    - tests/test_loader.py::test_safe_load_unique_is_safe_load_without_repeats
+    - tests/test_network.py::test_a_non_production_environment_needs_a_test_network
+    - tests/test_network.py::test_a_repeated_key_is_refused
+    - tests/test_network.py::test_an_environment_is_read_where_it_may_run
+    - tests/test_network.py::test_the_environment_is_one_of_four
+    - tests/test_network.py::test_the_environment_is_part_of_the_hash
+    - tests/test_service.py::test_vp1_sig_007_a_process_without_mcx_env_exits_nonzero
+    - tests/test_service.py::test_vp1_sig_007_process_exits_nonzero
+    - tests/test_service.py::test_vp1_sig_007_stub_idms_refused_under_production_indicator
+    - tests/test_service.py::test_vp1_sig_007_the_same_deployment_starts_outside_production
+    - tests/test_service.py::test_vp1_sig_007_the_variable_cannot_switch_the_file
+  note: >-
+    Re-reviewed after VP-OP-05 was decided (2026-10-21, option B). A process-level test over
+    each accepted production form (the network profile at production, MCX_ENV=production alone
+    or with MCX_PRODUCTION 1, true or yes) asserts exit 2, the exact PLT-IDM-007 diagnostic and
+    no data dir; a process without MCX_ENV exits 2 (MCX_ENV is not set); controls show the same
+    deployment starting in staging, test and dev; a variable that disagrees with the file, in
+    either direction, refuses; a non-production environment off a test PLMN (MCC 001, 999-999,
+    999-99) is refused. Accepted residue: upper-case and whitespace spellings of MCX_PRODUCTION
+    are tested at unit level only (the same loader.environment); an administrator who controls
+    every file can declare a test PLMN for an operational network (option C, not in R1); the
+    declared PLMNs are not checked against the cells seen in traffic; stub is still the only
+    identity provider, so a production deployment cannot start in R1 and the stub recorder and
+    bearer refusals stay unreachable (SVC-OP-05).
 VP1-CC-001:
   verdict: partial
   by: independent review (agent)

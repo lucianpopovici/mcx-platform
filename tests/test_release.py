@@ -192,7 +192,7 @@ def test_config_refuses_a_deployment_that_did_not_state_a_release():
     from service.config import Config
     base = {"MCX_PROFILE": "mcx", "MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
             "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": "/tmp/x/network.yaml",
-            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse",
+            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ENV": "test",
             "MCX_DATA_DIR": "/tmp/x"}
     with pytest.raises(StartupRefused) as exc:
         Config.from_env(base)
@@ -206,7 +206,7 @@ def test_the_release_is_independent_of_the_profile():
     from service.config import Config
     base = {"MCX_IDMS": "stub", "MCX_RECORDER": "none", "MCX_BEARER": "none", "MCX_STRICT_RELEASE": "false",
             "MCX_ADHOC_LIST_MAX": "100", "MCX_NETWORK_FILE": "/tmp/x/network.yaml",
-            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse",
+            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ENV": "test",
             "MCX_DATA_DIR": "/tmp/x"}
     from core.release import SUPPORTED
     profiles = sorted(p.parent.name for p in (ROOT / "profiles").glob("*/profile.yaml"))
