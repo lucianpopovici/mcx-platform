@@ -40,6 +40,7 @@ from .errors import (
     FUNCTIONAL_ALIAS_HELD,
     FUNCTIONAL_ALIAS_LOCATION_UNKNOWN,
     FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+    NOT_GROUP_MEMBER,
     FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
     GATEWAY_UNAVAILABLE,
     PARTNER_NOT_PERMITTED,
@@ -57,6 +58,7 @@ from .errors import (
 )
 from .hooks import LocationContext, MediaKind, SessionRequest
 from . import codec as codec_mod
+from . import identity
 from . import mcinfo
 from .release import (Release, supports_procedure, supports_session_type,
                       supports_sip_warning)
@@ -335,6 +337,8 @@ REASON_TO_STATUS: Mapping[str, Status] = {
     FUNCTIONAL_ALIAS_HELD: Status.FORBIDDEN,
     FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED: Status.FORBIDDEN,
     FUNCTIONAL_ALIAS_LOCATION_UNKNOWN: Status.FORBIDDEN,
+    # TS 24.379 6.3.5.2 step 5b: 403.
+    NOT_GROUP_MEMBER: Status.FORBIDDEN,
 }
 
 # Not covered by that setting: a resolver that cannot answer is a back-end
@@ -394,6 +398,10 @@ WARNING_TEXTS: Mapping[str, Tuple[int, str]] = {
     # bare 403, and the phrase goes out without the code (reject()).
     FUNCTIONAL_ALIAS_NOT_AUTHORISED: (201, "user not authorized to change the "
                                            "functional alias status"),
+    # "The MCPTT user is not authorised to join the group call because the
+    # MCPTT user is not a member of the MCPTT group." 6.3.5.2 step 5b, every
+    # release from Rel-13 (V13.19.0 and V17.15.0 tables agree).
+    NOT_GROUP_MEMBER: (116, "user is not part of the MCPTT group"),
 }
 
 # Refusals that TS 24.379 table 4.4.2-2 has no code for, with the reason each
@@ -1414,12 +1422,7 @@ def canonical_uri(uri: str) -> str:
     """A SIP URI for comparison: scheme and host lower-cased, the user part
     left as it is -- RFC 3261 19.1.4 compares the user part case-sensitively,
     and so do the directory and the registration store."""
-    uri = uri.strip()
-    scheme, colon, rest = uri.partition(":")
-    if not colon:
-        return uri
-    user, at, host = rest.rpartition("@")
-    return f"{scheme.lower()}:{user}{at}{host.lower()}"
+    return identity.canonical(uri)
 
 
 # TS 24.379 9A.2.1.2: a functional alias PUBLISH activates with Expires

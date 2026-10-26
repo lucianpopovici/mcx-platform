@@ -44,6 +44,7 @@ from .errors import (
     PARTNER_NOT_PERMITTED,
     PARTICIPANT_LIMIT_EXCEEDED,
     INITIATOR_NOT_SERVED,
+    NOT_GROUP_MEMBER,
     PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
@@ -473,6 +474,30 @@ class SessionManager:
                                           self._hooks.identity_resolver.resolve,
                                           request.target, request,
                                           post=self._check_resolution)
+                if resolution.kind is ResolutionKind.GROUP:
+                    # The caller, where it is a member, as the caller wrote
+                    # itself: compared as SIP compares URIs (scheme and host
+                    # without case, RFC 3261 19.1.4), as it was authenticated,
+                    # so it is not invited to its own call and counts once.
+                    caller = identity.canonical(request.initiator)
+                    resolution = dataclasses.replace(resolution, members=tuple(
+                        dict.fromkeys(request.initiator if identity.canonical(m) == caller
+                                      else m for m in resolution.members)))
+                # 1a — a call to a group is made by a member of the group
+                # (TS 24.379 6.3.5.2 step 5b; PLT-VP-R1 SVC-OP-07, decided
+                # 2026-10-26: no call type exempt, emergency and imminent
+                # peril included, as the standard has it; nor a private call
+                # aimed at a group, which would otherwise reach a group small
+                # enough for its limit). Before anything is prioritised,
+                # admitted or invited. A group named by a functional identity
+                # is a binding, not a group document's, and is not checked; a
+                # relayed request is, like any other (§7.2).
+                if resolution.kind is ResolutionKind.GROUP and \
+                        resolution.resolved_from is None and \
+                        request.initiator not in resolution.members:
+                    return self._refuse(cid, request, NOT_GROUP_MEMBER,
+                                        "the caller is not a member of the group",
+                                        step="membership")
 
             # 2 — IF-IWF, only when resolution says the target is foreign.
             #

@@ -493,19 +493,22 @@ def test_a_caller_not_in_the_directory_is_admitted(core, rt, world):
             if r["type"] in ("session-admitted", "session-refused")] == ["session-admitted"]
 
 
-def test_a_non_member_may_start_a_group_call_svc_op_07(core, rt, world):
-    """SVC-OP-07 (open): no member check is made, so a caller who is not in
-    the group (here not listed at all) starts emergency and imminent peril
-    calls on it and every member is invited. TS 24.379 6.3.5.2 step 5b says
-    403 "116 user is not part of the MCPTT group". This pins today's
-    behaviour; it changes when SVC-OP-07 is decided."""
+@pytest.mark.parametrize("call_type", ["prearranged-group", "emergency-group",
+                                       "imminent-peril-group"])
+def test_a_non_member_cannot_start_a_group_call(core, rt, world, call_type):
+    """SVC-OP-07 (decided 2026-10-26, no call type exempt): TS 24.379
+    6.3.5.2 step 5b, 403 "116 user is not part of the MCPTT group", before
+    anyone is invited. Here the caller is not listed at all."""
     f = Flow(UNLISTED)
-    for n, call_type in enumerate(("emergency-group", "imminent-peril-group")):
-        core.on_bytes(invite(f"op07-{n}", UNLISTED, "grp:alpha", call_type), f)
-        assert [r["type"] for r in rt.store.audit_records(f"op07-{n}")
-                if r["type"] in ("session-admitted", "session-refused")] == \
-            ["session-admitted"]
-    assert [len(world[u].requests("INVITE")) for u in U] == [2, 2, 2, 2]
+    core.on_bytes(invite("op07", UNLISTED, "grp:alpha", call_type), f)
+    refusal = f.messages()[-1]
+    assert (refusal.code, refusal.headers.get("Warning")) == (
+        403, '399 mcptt.example "116 user is not part of the MCPTT group"')
+    assert [len(world[u].requests("INVITE")) for u in U] == [0, 0, 0, 0]
+    assert [(r["type"], r["detail"].get("reason_code"))
+            for r in rt.store.audit_records("op07")
+            if r["type"] in ("session-admitted", "session-refused")] == [
+        ("session-refused", "not-group-member")]
 
 
 # ============================================================ VP1-CC-004 / PLT-CC-003

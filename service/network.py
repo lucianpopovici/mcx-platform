@@ -28,8 +28,8 @@ learn, and it changes with the organisation, not with the service. Every group
 member is also a known user. Registering over SIP does not make a user known
 (SIP-OP-05, closed 2026-10-26): being registered says where a user can be
 reached, this file says who exists. A caller is checked against the declared
-domains only, not against `users` (accepted), nor against a group's members
-(SVC-OP-07, open).
+domains only, not against `users` (accepted); a group call's caller must be
+one of the group's members (SVC-OP-07, decided 2026-10-26: 403, warning 116).
 
 The environment is the production indicator (VP-OP-05, decided 2026-10-21):
 it is stated here, beside the PLMNs, MCX_ENV must agree with it, and anything

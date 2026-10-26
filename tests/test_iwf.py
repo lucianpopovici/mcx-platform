@@ -220,6 +220,22 @@ def test_inbound_gets_no_privilege_from_the_gateway(wired):
     assert refusal.reason_code == "unknown-target"
 
 
+def test_a_relayed_group_call_is_checked_for_membership(wired):
+    """SVC-OP-07: a gateway's mapped caller calling a group must be a member
+    of it, like any caller (§7.2 INV-1); a member's relayed call is made."""
+    manager, _, _ = wired
+    _, signals, refusal = manager.receive_inbound({
+        "request_id": "in-g1", "call_type": "emergency-group",
+        "initiator": "sip:iwf@mcptt.example", "target": "grp:alpha", "system": "tetra"})
+    assert refusal.reason_code == "not-group-member"
+    assert SignalType.INVITE not in types(signals)
+    session, signals, refusal = manager.receive_inbound({
+        "request_id": "in-g2", "call_type": "prearranged-group",
+        "initiator": "sip:u1@mcptt.example", "target": "grp:alpha", "system": "tetra"})
+    assert refusal is None and [s.target for s in signals if s.type is SignalType.INVITE] == [
+        "sip:u0@mcptt.example", "sip:u2@mcptt.example"]
+
+
 def test_inbound_is_authorised_before_its_target_is_looked_up(wired):
     """ICD-OP-09 for a gateway's request: map_inbound, then §8.1 from step 0.
     An undeclared call type is refused by authorise, before resolve."""

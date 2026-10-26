@@ -106,6 +106,29 @@ def test_the_role_lets_its_holder_start_the_call_type_that_needs_it():
     assert refusal is None and session is not None
 
 
+def test_a_switching_order_needs_the_role_and_membership_of_the_group():
+    """SVC-OP-07: the role lets an engineer start a switching order, on a
+    group the engineer is a member of; on one it is not, 403/116."""
+    mgr, loaded, _ = _utility()
+    others = [f"sip:x{i}@utility.example" for i in range(5)]
+    for u in others:
+        loaded.hooks.identity_resolver.register_user(u)
+    loaded.hooks.identity_resolver.register_group("grp:sw", [ENG[0]] + others)
+    assert mgr.change_functional_aliases("p1", ENG[1], ["control-engineer"], False,
+                                         None).accepted
+    _, _, refusal = mgr.establish(SessionRequest(
+        request_id="s1", initiator=ENG[1], target="grp:sw",
+        call_type="switching-order", media=(MediaKind.VOICE,)))
+    assert refusal.reason_code == "not-group-member"
+    assert mgr.change_functional_aliases("p2", ENG[1], [], False, None).accepted
+    assert mgr.change_functional_aliases("p3", ENG[0], ["control-engineer"], False,
+                                         None).accepted
+    session, _, refusal = mgr.establish(SessionRequest(
+        request_id="s2", initiator=ENG[0], target="grp:sw",
+        call_type="switching-order", media=(MediaKind.VOICE,)))
+    assert refusal is None and session is not None
+
+
 @pytest.mark.parametrize("user,wanted,code", [
     (ENG[2], ["control-engineer"], "functional-alias-not-authorised"),     # not listed
     (ENG[0], ["no-such-role"], "functional-alias-not-authorised"),

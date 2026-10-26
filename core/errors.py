@@ -51,6 +51,10 @@ FUNCTIONAL_ALIAS_NOT_AUTHORISED = "functional-alias-not-authorised"
 FUNCTIONAL_ALIAS_HELD = "functional-alias-held"
 FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED = "functional-alias-take-over-not-allowed"
 FUNCTIONAL_ALIAS_LOCATION_UNKNOWN = "functional-alias-location-unknown"
+# A group call whose caller is not a member of the group (TS 24.379 6.3.5.2
+# step 5b, Rel-13 on: 403, warning 116; PLT-VP-R1 SVC-OP-07, decided
+# 2026-10-26, no call type exempt).
+NOT_GROUP_MEMBER = "not-group-member"
 
 RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
     {
@@ -78,6 +82,7 @@ RESERVED_REASON_CODES: FrozenSet[str] = frozenset(
         FUNCTIONAL_ALIAS_HELD,
         FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
         FUNCTIONAL_ALIAS_LOCATION_UNKNOWN,
+        NOT_GROUP_MEMBER,
     }
 )
 
@@ -103,6 +108,7 @@ CORE_ORIGINATED: FrozenSet[str] = frozenset(
         FUNCTIONAL_ALIAS_HELD,
         FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
         FUNCTIONAL_ALIAS_LOCATION_UNKNOWN,
+        NOT_GROUP_MEMBER,
     }
 )
 

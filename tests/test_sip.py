@@ -664,6 +664,9 @@ def test_every_specification_warning_code_is_in_the_specification_table():
         # (SVC-OP-06); earlier releases answer the same step with a bare 403.
         "functional-alias-not-authorised":
             (201, "user not authorized to change the functional alias status"),
+        # Rel-13 onwards (V13.19.0 and V17.15.0 tables): 6.3.5.2 step 5b
+        # (SVC-OP-07).
+        "not-group-member": (116, "user is not part of the MCPTT group"),
     }
 
 
