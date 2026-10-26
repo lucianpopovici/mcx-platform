@@ -461,6 +461,53 @@ def test_retransmitted_invite_reaches_the_session_manager_once(core, rt, world):
     assert world[U[0]].sent[:len(first)] == first
 
 
+# ============================================================ SIP-OP-05
+
+
+UNLISTED = "sip:u9@mcptt.example"      # in a served domain, in no group, not in users
+
+
+def test_registering_does_not_make_a_user_callable(core, rt, world):
+    """SIP-OP-05 (closed 2026-10-26, option 1): the network profile is the
+    directory; a REGISTER says where a user can be reached, not that it
+    exists (TS 24.379 7.3.2: registration binds an existing user's identity;
+    the user comes from the user database, 7.3.3 step 11)."""
+    f = Flow(UNLISTED)
+    register(core, UNLISTED, f)
+    assert f.codes() == [200]
+    core.on_bytes(invite("op05a", U[0], UNLISTED, "private"), world[U[0]])
+    refusal = world[U[0]].messages()[-1]
+    assert (refusal.code, refusal.headers.get("Warning")) == (
+        404, '399 mcptt.example "145 unable to determine called party"')
+    assert f.requests("INVITE") == []
+
+
+def test_a_caller_not_in_the_directory_is_admitted(core, rt, world):
+    """SIP-OP-05, accepted (owner 2026-10-26): only the caller's domain is
+    checked, so an authenticated caller the network profile does not list
+    may call a user it does list; the reverse is refused (above)."""
+    f = Flow(UNLISTED)
+    core.on_bytes(invite("op05b", UNLISTED, U[1], "private"), f)
+    assert len(world[U[1]].requests("INVITE")) == 1
+    assert [r["type"] for r in rt.store.audit_records("op05b")
+            if r["type"] in ("session-admitted", "session-refused")] == ["session-admitted"]
+
+
+def test_a_non_member_may_start_a_group_call_svc_op_07(core, rt, world):
+    """SVC-OP-07 (open): no member check is made, so a caller who is not in
+    the group (here not listed at all) starts emergency and imminent peril
+    calls on it and every member is invited. TS 24.379 6.3.5.2 step 5b says
+    403 "116 user is not part of the MCPTT group". This pins today's
+    behaviour; it changes when SVC-OP-07 is decided."""
+    f = Flow(UNLISTED)
+    for n, call_type in enumerate(("emergency-group", "imminent-peril-group")):
+        core.on_bytes(invite(f"op07-{n}", UNLISTED, "grp:alpha", call_type), f)
+        assert [r["type"] for r in rt.store.audit_records(f"op07-{n}")
+                if r["type"] in ("session-admitted", "session-refused")] == \
+            ["session-admitted"]
+    assert [len(world[u].requests("INVITE")) for u in U] == [2, 2, 2, 2]
+
+
 # ============================================================ VP1-CC-004 / PLT-CC-003
 
 

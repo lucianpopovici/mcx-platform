@@ -252,6 +252,21 @@ MC_INDICATOR_INTRODUCED: Mapping[str, Release] = {
 }
 
 
+# Procedures of TS 24.379 that a release has or lacks, read from the same
+# seven versions. Functional alias management (clause 9A: the PUBLISH that
+# activates a functional alias, 9A.2.1.2, and the server's handling of it,
+# 9A.2.2.2.3 and 9A.2.2.3.3) is absent from V14.16.0 and present from
+# V15.16.0 on; Rel-15 change requests already correct it (CR 0435, CT1#112-bis).
+PROCEDURE_INTRODUCED: Mapping[str, Release] = {
+    "functional-alias": Release.REL_15,
+}
+
+
+def supports_procedure(release: Release, name: str) -> bool:
+    introduced = PROCEDURE_INTRODUCED.get(name)
+    return introduced is not None and release >= introduced
+
+
 def supports_session_type(release: Release, session_type: str) -> bool:
     introduced = SESSION_TYPE_INTRODUCED.get(session_type)
     return introduced is not None and release >= introduced

@@ -10,7 +10,7 @@ profile:
   version: 0.1.0
   description: Energy utility field and control-room operations
   hooks:
-    identity_resolver: profiles.utility.hooks:DirectoryResolver
+    identity_resolver: profiles.utility.hooks:FunctionalResolver   # SVC-OP-06: binds control-engineer
     priority_policy: profiles.utility.hooks:TablePriorityPolicy
     session_policy: profiles.utility.hooks:TableSessionPolicy
     bearer_selector: profiles.utility.hooks:TableBearerSelector

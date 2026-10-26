@@ -76,7 +76,8 @@ def core_net(tmp_path, core_ca):
 
 
 GOOD = {"name": "rail-ops", "version": "3", "environment": "test", "plmns": [PLMN], "cells": [],
-        "sip": {"trusted_cores": [], "core_ca": "none"}, "groups": [], "users": []}
+        "sip": {"trusted_cores": [], "core_ca": "none"}, "groups": [], "users": [],
+        "functional_aliases": []}
 
 
 # ============================================================ a well-formed file
@@ -134,8 +135,8 @@ def test_a_missing_file_is_refused(tmp_path):
     {**GOOD, "trusted_peers": []}])
 def test_the_keys_are_exactly_these(tmp_path, doc):
     text = refused(raw_yaml(tmp_path, doc))
-    assert ("expected exactly the keys cells, environment, groups, name, plmns, sip, users, "
-            "version") in text
+    assert ("expected exactly the keys cells, environment, functional_aliases, groups, name, "
+            "plmns, sip, users, version") in text
 
 
 def test_bad_yaml_is_refused(tmp_path):
@@ -680,3 +681,63 @@ def test_a_group_key_other_than_these_is_refused(tmp_path):
     groups = [{"id": "grp:x", "members": ["sip:a@x"], "calltype": "coordination-group"}]
     assert "groups[0]: expected 'id', 'members' and optionally 'display_name' and " \
            "'call_type'" in _refused_with(tmp_path, groups)
+
+
+# ============================================================ functional aliases (SVC-OP-06)
+
+
+def _frmcs_functional():
+    from core import loader
+    return loader.load(ROOT / "profiles" / "frmcs").profile.identity.functional
+
+
+_D = ["sip:d0@frmcs.example", "sip:d1@frmcs.example"]
+
+
+def test_who_may_hold_a_functional_identity_is_read(tmp_path):
+    n = load_network(network_yaml(tmp_path, users=_D, functional_aliases=[
+        {"id": "train-driver", "users": _D, "take_over": [_D[1]]}]), set(), None, None,
+        _frmcs_functional())
+    from core.functional import AliasPolicy
+    assert n.functional_aliases == {"train-driver": AliasPolicy(
+        users=frozenset(_D), take_over=frozenset([_D[1]]))}
+
+
+@pytest.mark.parametrize("entry,says", [
+    ({"id": "rec-area", "users": _D, "take_over": []},
+     "functional_aliases[0].id: 'rec-area' is not a functional identity the service profile "
+     "declares for users; known: shunting-team-leader, track-controller, train-driver"),
+    ({"id": "pilot", "users": _D, "take_over": []}, "'pilot' is not a functional identity"),
+    ({"id": "train-driver", "users": [], "take_over": []},
+     "functional_aliases[0].users: list at least one user, or leave the identity out"),
+    ({"id": "train-driver", "users": ["sip:stranger@frmcs.example"], "take_over": []},
+     "functional_aliases[0].users: not known users (users or group members): "
+     "'sip:stranger@frmcs.example'"),
+    ({"id": "train-driver", "users": [_D[0]], "take_over": [_D[1]]},
+     "functional_aliases[0].take_over: may take over but may not hold: "
+     "'sip:d1@frmcs.example'"),
+    ({"id": "train-driver", "users": _D}, "functional_aliases[0]: expected exactly 'id', "
+                                          "'users' and 'take_over'"),
+    ({"id": "", "users": _D, "take_over": []},
+     "functional_aliases[0].id: expected a functional identity id"),
+], ids=["a-group-identity", "undeclared", "no-users", "an-unknown-user",
+        "take-over-without-holding", "a-missing-key", "empty-id"])
+def test_who_may_hold_is_checked_against_both_profiles(tmp_path, entry, says):
+    with pytest.raises(StartupRefused) as exc:
+        load_network(network_yaml(tmp_path, users=_D, functional_aliases=[entry]), set(),
+                     None, None, _frmcs_functional())
+    assert says in str(exc.value)
+
+
+def test_an_identity_is_listed_once(tmp_path):
+    entry = {"id": "train-driver", "users": _D, "take_over": []}
+    with pytest.raises(StartupRefused) as exc:
+        load_network(network_yaml(tmp_path, users=_D, functional_aliases=[entry, entry]),
+                     set(), None, None, _frmcs_functional())
+    assert "functional_aliases[1].id: 'train-driver' already listed" in str(exc.value)
+
+
+def test_functional_aliases_is_a_list(tmp_path):
+    p = raw_yaml(tmp_path, {**GOOD, "functional_aliases": {"train-driver": _D}})
+    assert "functional_aliases: expected a list ([] when no user may hold a functional " \
+           "identity)" in refused(p)

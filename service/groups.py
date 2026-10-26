@@ -7,7 +7,8 @@ counts toward its hash, so every audit record names the group data in force.
 
 Every group member is also a known user, so a private call to one resolves.
 Registering over SIP does not make a user known: being registered says where a
-user can be reached, the directory says who exists (SIP-OP-05).
+user can be reached, the directory says who exists (SIP-OP-05, closed
+2026-10-26: as TS 24.379 7.3.2, registration binds a user who already exists).
 
 CONFORMANCE (PLT-CONF-AUDIT CA-04): the document this renders was checked
 against 3GPP TS 24.481 V17.8.0 clause 7.2.2 and the worked example in clause

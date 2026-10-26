@@ -129,7 +129,7 @@ def start_platform(work: Path, port: int, recorder: str = "stub",
         "sip": {"trusted_cores": cores,
                 "core_ca": str(work / "pki/core-ca.crt") if cores else "none"},
         "groups": [{"id": "grp:alpha", "display_name": "Alpha", "members": [U1, U2]}],
-        "users": [U1, U2]}))
+        "users": [U1, U2], "functional_aliases": []}))
     env = {k: v for k, v in os.environ.items() if not k.startswith("MCX_")}
     env.update({
         "MCX_PROFILE": "mcx", "MCX_RELEASE": "19", "MCX_IDMS": "stub",

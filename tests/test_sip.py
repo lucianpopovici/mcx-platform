@@ -660,6 +660,10 @@ def test_every_specification_warning_code_is_in_the_specification_table():
         # RES-OP-11: the participating function has no MCPTT ID for the
         # caller (10.1.1.3.1.1 step 2a and the other participating procedures).
         "initiator-not-served": (141, "user unknown to the participating function"),
+        # Rel-20 onwards: table 4.4.2-2 of V20.0.0, and 9A.2.2.2.3 step 4B
+        # (SVC-OP-06); earlier releases answer the same step with a bare 403.
+        "functional-alias-not-authorised":
+            (201, "user not authorized to change the functional alias status"),
     }
 
 
@@ -1075,8 +1079,8 @@ def _utility_switching(roles_of_u0=()):
         resolver.register_user(m)
     resolver.register_group("grp:sw", members)
     if roles_of_u0:
-        # Nothing in the service binds a functional identity yet (SVC-OP-06):
-        # the engineer's binding is stood in for here.
+        # The engineer's activation (SVC-OP-06, tests/test_functional_alias.py)
+        # is stood in for here.
         real = resolver.identities_of
         resolver.identities_of = lambda sid: tuple(roles_of_u0) \
             if sid == "sip:u0@utility.example" else real(sid)

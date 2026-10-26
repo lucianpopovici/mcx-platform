@@ -12,7 +12,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Protocol
+from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from core.audit import Record
 
@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     released_at_ms INTEGER,
     body           TEXT NOT NULL
 );
+-- Who holds which functional identity (SVC-OP-06; TS 24.379 clause 9A),
+-- written whole after each change, so a restart binds them again.
+CREATE TABLE IF NOT EXISTS holdings (
+    identity       TEXT NOT NULL,
+    slot           TEXT NOT NULL,
+    holder         TEXT NOT NULL,
+    PRIMARY KEY (identity, slot, holder)
+);
 """
 
 
@@ -48,6 +56,8 @@ class SessionStore(Protocol):
     def audit_records(self, correlation_id: Optional[str] = None
                       ) -> List[Dict[str, Any]]: ...
     def counts(self) -> Dict[str, int]: ...
+    def save_holdings(self, holdings: Sequence[Tuple[str, str, str]]) -> None: ...
+    def holdings(self) -> List[Tuple[str, str, str]]: ...
     def close(self) -> None: ...
 
 
@@ -136,6 +146,27 @@ class SqliteStore:
             a = self._db.execute("SELECT COUNT(*) FROM audit").fetchone()[0]
             s = self._db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         return {"audit": a, "sessions": s}
+
+    def save_holdings(self, holdings: Sequence[Tuple[str, str, str]]) -> None:
+        """Replace the functional identity holders, in one transaction:
+        (identity, location value or "", holder) each."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute("DELETE FROM holdings")
+                self._db.executemany(
+                    "INSERT INTO holdings (identity, slot, holder) VALUES (?,?,?)",
+                    [tuple(h) for h in holdings])
+                self._db.execute("COMMIT")
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+
+    def holdings(self) -> List[Tuple[str, str, str]]:
+        with self._lock:
+            rows = self._db.execute("SELECT identity, slot, holder FROM holdings "
+                                    "ORDER BY identity, slot, holder").fetchall()
+        return [tuple(r) for r in rows]
 
     def close(self) -> None:
         with self._lock:
