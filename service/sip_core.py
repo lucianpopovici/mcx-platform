@@ -63,7 +63,9 @@ log = logging.getLogger("mcx.sip")
 ALLOWED = ALLOW          # core/sip.py: UPDATE added for RFC 4028 refresh
 _ECHOED = ("via", "from", "to", "call-id", "cseq")
 _STATUS_BY_CODE = {s.code: s for s in Status}
-_EXPIRES_PARAM = re.compile(r";\s*expires=(\d+)", re.I)
+# [0-9], not \d: \d takes any script's digits, which int() reads; and the
+# whole value, so "3²" is not read as 3 (SIP-OP-19).
+_EXPIRES_PARAM = re.compile(r";\s*expires=([0-9]+)(?=\s*(?:[;,>]|$))", re.I)
 _DEFAULT_REGISTER_S = 3600     # RFC 3261 §10.2: protocol default, not policy
 
 
@@ -570,7 +572,9 @@ class SipCore:
         expires_s = req.headers.get("Expires")
         m = _EXPIRES_PARAM.search(contact)
         seconds = int(m.group(1)) if m else (
-            int(expires_s) if expires_s and expires_s.isdigit()
+            # ASCII digits only (SIP-OP-19); anything else is the default,
+            # as an unreadable value always was.
+            int(expires_s) if expires_s and expires_s.isascii() and expires_s.isdigit()
             else _DEFAULT_REGISTER_S)
         if seconds == 0:
             self.registrations.deregister(aor)

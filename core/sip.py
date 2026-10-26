@@ -137,7 +137,9 @@ def parse_session_expires(value: Optional[str]) -> Optional[SessionExpires]:
     if value is None or not value.strip():
         return None
     head, *params = [p.strip() for p in value.split(";")]
-    if not head.isdigit() or len(head) > 10:
+    # ASCII digits only (SIP-OP-19): str.isdigit takes "²", which int()
+    # refuses, and other scripts' digits, which int() reads.
+    if not (head.isascii() and head.isdigit()) or len(head) > 10:
         raise SipError(f"Session-Expires {clip(value)}")
     refresher = None
     for p in params:
@@ -153,7 +155,7 @@ def parse_min_se(value: Optional[str]) -> Optional[int]:
     if value is None or not value.strip():
         return None
     head = value.split(";", 1)[0].strip()
-    if not head.isdigit() or len(head) > 10:
+    if not (head.isascii() and head.isdigit()) or len(head) > 10:   # SIP-OP-19
         raise SipError(f"Min-SE {clip(value)}")
     return int(head)
 
@@ -622,7 +624,8 @@ _COMPACT = {"v": "Via", "f": "From", "t": "To", "i": "Call-ID", "m": "Contact",
             "c": "Content-Type", "l": "Content-Length", "k": "Supported",
             "x": "Session-Expires"}                    # RFC 4028 section 4
 _REQUEST_LINE = re.compile(r"^([A-Za-z]+) (\S+) SIP/2\.0$")
-_STATUS_LINE = re.compile(r"^SIP/2\.0 (\d{3})(?: (.*))?$")
+# [0-9], not \d: \d takes any script's digits, which int() reads (SIP-OP-19).
+_STATUS_LINE = re.compile(r"^SIP/2\.0 ([0-9]{3})(?: (.*))?$")
 
 
 def split_frame(data: bytes) -> Optional[Tuple[bytes, int]]:
@@ -748,7 +751,7 @@ class RegistrationStore:
 # --------------------------------------------------------------------------
 
 _REQUIRED_HEADERS = ("Via", "From", "To", "Call-ID", "CSeq")
-_CSEQ = re.compile(r"^\d+\s+[A-Z]+$")
+_CSEQ = re.compile(r"^[0-9]+\s+[A-Z]+$")          # [0-9], not \d (SIP-OP-19)
 
 
 # RES-OP-15: a new INVITE's Call-ID becomes its session's correlation id in

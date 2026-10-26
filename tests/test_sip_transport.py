@@ -461,6 +461,35 @@ def test_retransmitted_invite_reaches_the_session_manager_once(core, rt, world):
     assert world[U[0]].sent[:len(first)] == first
 
 
+# ============================================================ SIP-OP-19
+
+
+@pytest.mark.parametrize("expires", ["\u0663\u0660\u0660", "\uff13\uff10\uff10", "3\u00b2",
+                                     "\u00b3"])
+def test_a_register_expires_in_other_digits_is_the_default(core, expires):
+    """SIP-OP-19: an Expires header or Contact parameter that is not ASCII
+    digits is unreadable, so the RFC 3261 default (3600), as any unreadable
+    value; it is never read as a number nor fails the request in int()."""
+    for n, extra in enumerate(([f"Contact: <{U[1]}>", f"Expires: {expires}"],
+                               [f"Contact: <{U[1]}>;expires={expires}"]), 1):
+        f = Flow(U[1])
+        core.on_bytes(msg("REGISTER", "sip:mcptt.example", f"r19-{n}", 1, U[1], U[1],
+                          extra=extra), f)
+        assert [(m.code, m.headers.get("Expires")) for m in f.messages()] == [(200, "3600")]
+
+
+@pytest.mark.parametrize("contact", [
+    "<{u}>;expires=60;q=0.5", "<{u}>;EXPIRES=60", "<{u}>;expires=60 , <sip:x@mcptt.example>",
+    '"Bob" <{u}>;expires=60', "<{u}>;expires=60\t"])
+def test_a_register_contact_expires_in_ascii_digits_is_read(core, contact):
+    """SIP-OP-19 review: the anchored Contact parameter still reads every
+    legitimate form."""
+    f = Flow(U[1])
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r19-ok", 1, U[1], U[1],
+                      extra=[f"Contact: {contact.format(u=U[1])}"]), f)
+    assert [(m.code, m.headers.get("Expires")) for m in f.messages()] == [(200, "60")]
+
+
 # ============================================================ SIP-OP-05
 
 
