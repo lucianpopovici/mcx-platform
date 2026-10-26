@@ -525,6 +525,8 @@ for i in range(3):
         media=(MediaKind.VOICE,)))
     assert s is not None, r
 rt.release("c2")
+# What was committed, per session, as the killed process last saw it.
+print({c: len(rt.store.audit_records(c)) for c in ("c0", "c1", "c2")}, flush=True)
 os.kill(os.getpid(), signal.SIGKILL)      # no close(), no flush, no atexit
 """
 
@@ -533,17 +535,50 @@ def test_vp1_oam_005_committed_records_survive_kill_and_service_returns(env):
     child = subprocess.run([sys.executable, "-c", CRASH % (str(ROOT), U[0])],
                            env={**os.environ, **env}, capture_output=True)
     assert child.returncode == -signal.SIGKILL, child.stderr.decode()
+    import ast
+    before = ast.literal_eval(child.stdout.decode().strip().splitlines()[-1])
 
     rt = build_runtime(env, Clock())
     try:
         by_id = {s["correlation_id"]: s for s in rt.store.sessions()}
+        # No committed record lost: each trail is what the killed process
+        # committed, plus one release record for each session it cut off.
+        assert {c: len(rt.store.audit_records(c)) for c in before} == {
+            "c0": before["c0"] + 1, "c1": before["c1"] + 1, "c2": before["c2"]}
         assert set(by_id) == {"c0", "c1", "c2"}
-        assert by_id["c0"]["state"] == "established"
-        assert by_id["c2"]["state"] == "released"
-        assert by_id["c0"]["members"] == U
+        assert by_id["c0"]["members"] == U and by_id["c1"]["members"] == U
         types = [r["type"] for r in rt.store.audit_records("c2")]
         assert types[-1] == "session-released"
+        # SVC-OP-02 (decided 2026-10-26, option 1): the two the killed process
+        # left established are released at this start, before anything is
+        # served, each audit trail ending in its own release record; the one
+        # released before the kill is untouched.
         assert rt.recovered == 2
+        assert {c: by_id[c]["state"] for c in by_id} == {
+            "c0": "released", "c1": "released", "c2": "released"}
+        assert by_id["c0"]["released_at_ms"] is not None
+        for c in ("c0", "c1"):
+            records = rt.store.audit_records(c)
+            # Nothing the killed process committed is lost.
+            assert {"session-admitted", "session-established"} <= {r["type"] for r in records}
+            assert (records[-1]["type"], records[-1]["detail"]) == (
+                "session-released", {"cause": "process-restart"})
+        assert [r["detail"].get("cause") for r in rt.store.audit_records("c2")
+                if r["type"] == "session-released"] == ["normal"]
+        assert rt.health.snapshot()["sessions_released_at_start"] == 2
+    finally:
+        rt.close()
+    rt = build_runtime(env, Clock(), platform=Platform())
+    try:
+        # A second start finds nothing left established, and calls are made.
+        assert rt.recovered == 0
+        assert rt.health.snapshot()["sessions_released_at_start"] == 0
+        assert [r["type"] for r in rt.store.audit_records("c0")].count(
+            "session-released") == 1
+        session, _, refusal = rt.establish(SessionRequest(
+            request_id="after", initiator=U[0], target="grp:alpha",
+            call_type="prearranged-group", media=(MediaKind.VOICE,)))
+        assert refusal is None and session is not None
     finally:
         rt.close()
 
@@ -555,6 +590,65 @@ def test_vp1_oam_005_committed_records_survive_kill_and_service_returns(env):
         assert get(port, "/readyz")[0] == 200
     finally:
         stop(proc)
+
+
+def test_a_release_recorded_but_not_marked_is_not_released_again(env, monkeypatch):
+    """Review of SVC-OP-02: a call ended normally whose row the store could
+    not mark is only marked at the next start: its trail keeps the one
+    release (normal), and it is not counted as cut off."""
+    from service.store import SqliteStore
+    rt = build_runtime(env, Clock(), platform=Platform())
+    try:
+        assert rt.establish(SessionRequest(
+            request_id="n1", initiator=U[0], target="grp:alpha",
+            call_type="prearranged-group", media=(MediaKind.VOICE,)))[0] is not None
+        with monkeypatch.context() as m:
+            m.setattr(SqliteStore, "mark_released",
+                      lambda self, cid, at: (_ for _ in ()).throw(OSError("disk")))
+            assert rt.release("n1")
+        # A record of another kind after the release (a late floor or hook
+        # record) does not make the release look missing.
+        rt.auditor.emit(RecordType.HOOK_INVOCATION, "n1", interface="IF-PRI",
+                        method="evaluate", elapsed_ms=0.0, outcome="ok",
+                        budget_overrun=False)
+    finally:
+        rt.close()
+    rt = build_runtime(env, Clock())
+    try:
+        assert rt.recovered == 1
+        assert rt.health.snapshot()["sessions_released_at_start"] == 0
+        assert [s["state"] for s in rt.store.sessions()] == ["released"]
+        assert [r["detail"].get("cause") for r in rt.store.audit_records("n1")
+                if r["type"] == "session-released"] == ["normal"]
+    finally:
+        rt.close()
+
+
+def test_a_start_stopped_between_record_and_row_is_finished_once(env, monkeypatch):
+    """Review of SVC-OP-02: a start that wrote the release record but could
+    not mark the row refuses; the next start marks it, without a second
+    record."""
+    from service.store import SqliteStore
+    rt = build_runtime(env, Clock(), platform=Platform())
+    try:
+        assert rt.establish(SessionRequest(
+            request_id="k1", initiator=U[0], target="grp:alpha",
+            call_type="prearranged-group", media=(MediaKind.VOICE,)))[0] is not None
+    finally:
+        rt.close()
+    with monkeypatch.context() as m:
+        m.setattr(SqliteStore, "mark_released",
+                  lambda self, cid, at: (_ for _ in ()).throw(OSError("disk")))
+        with pytest.raises(OSError):
+            build_runtime(env, Clock())
+    rt = build_runtime(env, Clock())
+    try:
+        assert (rt.recovered, rt.health.snapshot()["sessions_released_at_start"]) == (1, 0)
+        assert [r["detail"].get("cause") for r in rt.store.audit_records("k1")
+                if r["type"] == "session-released"] == ["process-restart"]
+        assert [s["state"] for s in rt.store.sessions()] == ["released"]
+    finally:
+        rt.close()
 
 
 # -- VP1-DOC-001 / PLT-GRP-001 --------------------------------------------------

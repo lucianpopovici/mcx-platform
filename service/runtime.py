@@ -74,6 +74,7 @@ class Health:
         self._lock = threading.Lock()
         self._extra: Callable[[], dict] = lambda: {}
         self._holdings: Callable[[], list] = lambda: []
+        self._released_at_start = 0
         self._call_types: dict = {}
         self._settings: dict = {}
         self._deviations: list = []
@@ -97,6 +98,12 @@ class Health:
 
     def set_extra(self, fn: Callable[[], dict]) -> None:
         self._extra = fn
+
+    def set_released_at_start(self, n: int) -> None:
+        """SVC-OP-02: sessions the previous process left established,
+        released at this start."""
+        with self._lock:
+            self._released_at_start = n
 
     def set_holdings(self, fn: Callable[[], list]) -> None:
         """SVC-OP-06: who holds which functional identity, read live."""
@@ -143,6 +150,7 @@ class Health:
                     "network": self._network,
                     "call_types": self._call_types,
                     "functional_aliases": self._holdings(),
+                    "sessions_released_at_start": self._released_at_start,
                     "settings": self._settings,
                     "deviations": self._deviations,
                     "warnings": self._warnings,
@@ -183,7 +191,8 @@ class Runtime:
         if session is not None and signals:
             # The BYEs go first: a store that cannot record the release must
             # not keep the other parties' legs up (RES-OP-03 review). A row
-            # left 'established' is logged, and is RES-OP-14's to settle.
+            # left 'established' is logged, and marked released at the next
+            # start, without a second release record (SVC-OP-02).
             self.on_signals(session, signals)
             try:
                 self.store.mark_released(correlation_id, self.clock())
@@ -243,6 +252,9 @@ def _network(config: Config, loaded: LoadedProfile) -> Network:
 
 
 STARTUP_CORRELATION_ID = "process-start"
+# The release cause of a session the previous process left established
+# (SVC-OP-02).
+RESTART_CAUSE = "process-restart"
 
 
 def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, list]:
@@ -444,7 +456,12 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     own_store = store is None
     store = store or SqliteStore(config.data_dir)
     try:
-        recovered = sum(1 for s in store.sessions() if s.get("state") == "established")
+        # SVC-OP-02 (decided 2026-10-26, option 1): a session the store
+        # still has as established was cut off by the previous process's
+        # end; its dialogs, media and floor went with it. Released below.
+        stale = [s["correlation_id"] for s in store.sessions()
+                 if s.get("state") == "established"]
+        recovered = len(stale)
         auditor = Auditor(store, identifier, clock=clock)
         manager = SessionManager(loaded, auditor,
                                  platform=platform or fail_closed_platform(
@@ -554,10 +571,37 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                         "group's members) are served to unauthenticated clients",
                         config.http_tls.client_auth)
 
-        if recovered:
-            log.warning("%d session record(s) were established when the previous "
-                        "process stopped; their signalling state is not recovered "
-                        "(SVC-OP-02)", recovered)
+        # SVC-OP-02: released before anything is served, each with a record
+        # of its own ending its audit trail, so no record says a call is up
+        # that is not. Nobody is told by this process: it has no dialog to
+        # send a BYE in, and a client learns of it from its next request in
+        # the dialog (481) or its session timer (RFC 4028).
+        #
+        # A row whose trail already ends in a release (its release was
+        # recorded but the row not marked: Runtime.release when the store
+        # failed, or a start that stopped between the two writes below) was
+        # not cut off: it is only marked, not released again nor counted
+        # (review of SVC-OP-02). The record is written before the row, so a
+        # stop between them leaves the row to the next start, which then
+        # finds the record. The record is this process's: it carries the
+        # profile, release and network now in force.
+        at = clock()
+        cut_off = 0
+        for cid in stale:
+            sessions = [r["type"] for r in store.audit_records(cid)
+                        if r["type"].startswith("session-")]
+            if sessions[-1:] != [RecordType.SESSION_RELEASED.value]:
+                auditor.emit(RecordType.SESSION_RELEASED, cid, cause=RESTART_CAUSE)
+                cut_off += 1
+            store.mark_released(cid, at)
+        health.set_released_at_start(cut_off)
+        if cut_off:
+            log.warning("%d session(s) were established when the previous process "
+                        "stopped; released with cause %s (SVC-OP-02)", cut_off,
+                        RESTART_CAUSE)
+        if recovered - cut_off:
+            log.warning("%d session row(s) whose release was recorded but not marked "
+                        "were marked released (SVC-OP-02)", recovered - cut_off)
     except BaseException:
         # A refusal after the store opened must not leave it open (review of
         # the 2026-10-16 settings); a store the caller passed is the caller's.

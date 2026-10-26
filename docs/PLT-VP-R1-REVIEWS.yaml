@@ -1443,14 +1443,20 @@ VP1-OAM-004:
 VP1-OAM-005:
   verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-26'
   evidence:
-  - tests/test_service.py::test_vp1_oam_005_committed_records_survive_kill_and_service_returns
-  note: 'Process killed (SIGKILL) after 3 establishes and 1 release. On restart all three session rows
-    are present with the correct states and members, c2''s audit ends in session-released, and the real
-    process returns to /readyz 200. Weak spots: audit record counts for c0/c1 are not compared with pre-kill,
-    ''returns to service'' is readiness only (no new call is placed), and SVC-OP-02 leaves recovered established
-    sessions unresolved.'
+    - tests/test_service.py::test_vp1_oam_005_committed_records_survive_kill_and_service_returns
+  note: >-
+    Re-reviewed after SVC-OP-02 was decided (2026-10-26, option 1: sessions the previous process
+    left established are released at start, cause process-restart). Process killed (SIGKILL)
+    after three establishes and one release; the child prints each session's committed record
+    count before the kill. On restart all three rows are present with their members, and each
+    audit trail is exactly what the killed process committed plus one session-released
+    (process-restart) for each of the two it cut off; the one released before the kill keeps its
+    single normal release. The count is in the health document; a second start finds nothing
+    established and places a new call, and the real process returns to /readyz 200. A release
+    recorded but not marked, and a start stopped between record and row, are finished once
+    without a second record.
 VP1-SIG-002:
   verdict: partial
   by: independent review (agent)
