@@ -409,11 +409,12 @@ class SessionManager:
         dropped and recorded. Returns what was restored."""
         invoker = Invoker(self._auditor, correlation_id)
         kept: List[Holding] = []
+        users_of: set = set()               # (identity, holder) kept so far
         for h in dict.fromkeys(holdings):
             reason = None
             if not self.functional.restorable(h):
                 reason = "not-allowed"
-            elif any(k.identity == h.identity and k.holder == h.holder for k in kept):
+            elif (h.identity, h.holder) in users_of:
                 # One value per user (review of FA-OP-01 item 4).
                 reason = "one-per-user"
             elif h.slot and self.functional.location_key(h.identity) and \
@@ -434,6 +435,7 @@ class SessionManager:
                 continue
             self.functional.add(h)
             kept.append(h)
+            users_of.add((h.identity, h.holder))
         if kept:
             self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id, action="restored",
                                holdings=[dataclasses.asdict(h) for h in kept])
@@ -1354,7 +1356,9 @@ class SessionManager:
                           "no participant list and no criteria")
         group_id = self.adhoc_group_id(request.request_id)
         if listed:
-            members: List[str] = []
+            # An ordered set: a list searched per entry was quadratic in the
+            # listed participants (review of ICD-OP-01).
+            members: Dict[str, None] = {}
             for entry in listed:
                 try:
                     one = invoker.call("IF-IDR", "resolve",
@@ -1366,8 +1370,8 @@ class SessionManager:
                                                NO_BINDING, NO_LOCATION_BINDING):
                         continue          # yields no user this profile can invite
                     raise
-                if one.kind is ResolutionKind.USER and one.members[0] not in members:
-                    members.append(one.members[0])
+                if one.kind is ResolutionKind.USER:
+                    members.setdefault(one.members[0])
             if not members:
                 return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
                               "no listed participant is a user of this profile")

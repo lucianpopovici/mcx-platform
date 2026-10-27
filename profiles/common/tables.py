@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from typing import Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Protocol, Sequence, Tuple
 
 from core.model import BearerDecisionSpec, CallType, FunctionalIdentity, Profile
 from core.errors import (
@@ -549,7 +549,10 @@ class FunctionalResolver(DirectoryResolver):
         if not wanted:
             raise ResolutionFailure(ADHOC_PARTICIPANTS_UNDETERMINED,
                                     "empty participant criteria")
-        members: List[MCServiceId] = []
+        # Insertion-ordered and de-duplicated in one step: a list searched for
+        # each holder was quadratic, 94 ms for 5000 trains' drivers against
+        # IF-IDR's 50 ms budget (PLT-ICD-001 ICD-OP-01).
+        members: Dict[MCServiceId, None] = {}
         for criterion in wanted:
             keyed = keyed_identity(criterion, self._keyed(), self._profile.identity.domains)
             identity = keyed[0] if keyed else criterion
@@ -571,8 +574,7 @@ class FunctionalResolver(DirectoryResolver):
                     continue
             for slot in slots:
                 for holder in self._bindings.get(identity, {}).get(slot, ()):
-                    if holder not in members:
-                        members.append(holder)
+                    members.setdefault(holder)
         if not members:
             raise ResolutionFailure(
                 ADHOC_PARTICIPANTS_UNDETERMINED,
