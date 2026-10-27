@@ -41,6 +41,7 @@ calls, in place, as it makes every hook call (VP1-BND-003, VP1-BND-014).
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 from dataclasses import dataclass
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
@@ -51,7 +52,7 @@ from .errors import (
     FUNCTIONAL_ALIAS_NOT_AUTHORISED,
     FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
 )
-from .hooks import LocationContext
+from .hooks import LocationContext, keyed_identity
 
 SINGLE = "single"
 # The slot of an identity that is not location-dependent.
@@ -67,6 +68,13 @@ class AliasPolicy:
     users: FrozenSet[str]
     take_over: FrozenSet[str] = frozenset()
     max_holders: Optional[int] = None
+    # For an identity keyed by an identification value (FA-OP-01 item 4): the
+    # values its users may hold it for, as patterns ('*' any run, '?' one
+    # character); empty, any value.
+    values: Tuple[str, ...] = ()
+
+    def allows(self, value: str) -> bool:
+        return not self.values or any(fnmatch.fnmatchcase(value, p) for p in self.values)
 
 
 @dataclass(frozen=True)
@@ -128,16 +136,43 @@ class FunctionalAliases:
         current = {h.identity: h for h in self.held_by(user)}
         plan: List[Holding] = []
         displaced: List[Holding] = []
-        for identity in wanted:
+        for alias in wanted:
+            # An identity keyed by an identification value is written
+            # sip:<value>.<id>@<domain> (FA-OP-01 item 4); any other alias is
+            # the identity's id.
+            keyed = keyed_identity(alias, self._keyed(), self._profile.identity.domains)
+            identity, value = keyed if keyed else (alias, "")
+            planned = next((h for h in plan if h.identity == identity), None)
+            if planned is not None:
+                if planned.slot == value:
+                    continue            # the same alias written twice
+                # One value per user (review of FA-OP-01 item 4): IF-IDR
+                # unbind names no value, so a second would leave the ledger
+                # and the resolver apart.
+                return self.refuse(correlation_id, user, wanted,
+                                   FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+                                   f"{user} may hold {identity!r} for one value only")
             declared = self._profile.functional_identity(identity)
             policy = self._policy.get(identity)
             if declared is None or declared.resolves_to != "user" or policy is None \
                     or user not in policy.users:
                 return self.refuse(correlation_id, user, wanted,
                                    FUNCTIONAL_ALIAS_NOT_AUTHORISED,
-                                   f"{user} may not hold {identity!r}")
+                                   f"{user} may not hold {alias!r}")
             slot = EVERYWHERE
-            if declared.location_dependent:
+            if declared.identification_key:
+                if not keyed:
+                    return self.refuse(
+                        correlation_id, user, wanted, FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+                        f"{identity!r} is held per {declared.identification_key}: "
+                        f"activate sip:<{declared.identification_key}>.{identity}@<domain>")
+                if not policy.allows(value):
+                    return self.refuse(correlation_id, user, wanted,
+                                       FUNCTIONAL_ALIAS_NOT_AUTHORISED,
+                                       f"{user} may not hold {identity!r} for "
+                                       f"{declared.identification_key} {value}")
+                slot = value
+            elif declared.location_dependent:
                 slot = self._locate(location).get(declared.location_key or "", "")
                 if not slot:
                     return self.refuse(
@@ -166,8 +201,7 @@ class FunctionalAliases:
                               for o in others[:len(others) - limit + 1]]
             plan.append(Holding(identity, slot, user))
         activated = tuple(h for h in plan if current.get(h.identity) != h)
-        deactivated = tuple(h for i, h in sorted(current.items())
-                            if i not in wanted or h not in plan)
+        deactivated = tuple(h for _, h in sorted(current.items()) if h not in plan)
         return AliasOutcome(activated=activated, deactivated=deactivated,
                             displaced=tuple(displaced))
 
@@ -192,7 +226,20 @@ class FunctionalAliases:
         policy = self._policy.get(h.identity)
         return declared is not None and declared.resolves_to == "user" and \
             policy is not None and h.holder in policy.users and \
-            declared.location_dependent == bool(h.slot)
+            (declared.location_dependent or bool(declared.identification_key)) == \
+            bool(h.slot) and (not declared.identification_key or policy.allows(h.slot))
+
+    def addressed(self, target: Optional[str]) -> Optional[str]:
+        """The identity a resolution's resolved_from names: the identity of
+        a keyed form, else the reference itself (compared with an identity's
+        id, so a reference that is none matches none)."""
+        keyed = keyed_identity(target or "", self._keyed(), self._profile.identity.domains)
+        return keyed[0] if keyed else target
+
+    def _keyed(self) -> Tuple[str, ...]:
+        """The identities keyed by an identification value."""
+        return tuple(f.id for f in self._profile.identity.functional
+                     if f.identification_key)
 
     def location_key(self, identity: str) -> str:
         declared = self._profile.functional_identity(identity)
@@ -212,11 +259,14 @@ class FunctionalAliases:
 
     def location_for(self, h: Holding, location: Optional[LocationContext]
                      ) -> Optional[LocationContext]:
-        """The location to bind `h` with: its slot under its location key."""
+        """The location to bind `h` with: its slot under its location key, or
+        under its identification key (the hook's signature carries no other
+        place for it; PLT-ICD-001 §3.3, FA-OP-01 item 4)."""
         if not h.slot:
             return location
         declared = self._profile.functional_identity(h.identity)
-        attrs = {**(location.attributes if location else {}), declared.location_key: h.slot}
+        key = declared.location_key or declared.identification_key
+        attrs = {**(location.attributes if location else {}), key: h.slot}
         return LocationContext(cell_id=location.cell_id if location else None,
                                attributes=attrs)
 

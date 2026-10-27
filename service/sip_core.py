@@ -30,7 +30,7 @@ import uuid
 import weakref
 
 from core.errors import IDENTITY_NOT_AUTHENTICATED, INITIATOR_NOT_SERVED, NOT_AUTHORISED
-from core.hooks import MediaKind
+from core.hooks import MediaKind, keyed_identity
 from core.invoke import Invoker
 from core.session import Session, Signal, SignalType
 from core.sip import (
@@ -587,6 +587,12 @@ class SipCore:
         # (core/identity.py): a second "@", parameters or a port put an
         # address in no domain, so it cannot be registered (RES-OP-01).
         if identity.outside((aor,), self.rt.loaded.profile.identity.domains):
+            return self._reject(txn, NOT_AUTHORISED)
+        # An address written as a keyed functional identity is that identity's
+        # (FA-OP-01 item 4): nobody registers as it.
+        profile = self.rt.loaded.profile
+        if keyed_identity(aor, [f.id for f in profile.identity.functional
+                                if f.identification_key], profile.identity.domains):
             return self._reject(txn, NOT_AUTHORISED)
         if not self._authenticated_as(flow, aor):
             # Registering someone else's address would route their calls here.

@@ -158,6 +158,11 @@ identity:
       label: Driver of a train
       binding: dynamic
       location_dependent: false
+      # FRS 6.2.1.1: a train function identity is the train ID with the
+      # function label, not location-dependent (6.2.1.1.5): one leading
+      # driver per train, activated and called as
+      # sip:<train-id>.train-driver@<domain> (PLT-VP-R1 FA-OP-01 item 4).
+      identification_key: train_id
       multiplicity: single
       resolves_to: user
     - id: track-controller

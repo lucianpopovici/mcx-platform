@@ -28,6 +28,8 @@ from tests import mcpttinfo_fixture as mcf  # noqa: E402
 PROFILES = ROOT / "profiles"
 ENG = [f"sip:e{i}@utility.example" for i in range(3)]
 DRV = [f"sip:d{i}@frmcs.example" for i in range(3)]
+# train-driver is keyed by train_id (FA-OP-01 item 4): train T1's driver.
+TD = "sip:T1.train-driver@frmcs.example"
 CELL_S1 = mcf.ECGI
 CELL_S2 = "001010" + "0000000000000000000100100100"
 
@@ -173,11 +175,11 @@ def test_a_request_lists_the_whole_set_wanted():
     """9A.2.2.2.3 steps 10-14: held and not listed is deactivated."""
     mgr, loaded, _ = _frmcs()
     s1 = LocationContext(cell_id=CELL_S1)
-    assert mgr.change_functional_aliases("p1", DRV[0], ["train-driver", "track-controller"],
+    assert mgr.change_functional_aliases("p1", DRV[0], [TD, "track-controller"],
                                          False, s1).accepted
     assert _roles(loaded, DRV[0]) == ("track-controller", "train-driver")
     out = mgr.change_functional_aliases("p2", DRV[0], ["track-controller"], False, s1)
-    assert out.deactivated == (Holding("train-driver", "", DRV[0]),) and not out.activated
+    assert out.deactivated == (Holding("train-driver", "T1", DRV[0]),) and not out.activated
     out = mgr.change_functional_aliases("p3", DRV[0], [], False, None)
     assert out.deactivated == (Holding("track-controller", "S1", DRV[0]),)
     assert _roles(loaded, DRV[0]) == () and mgr.functional.holdings() == ()
@@ -232,14 +234,14 @@ def test_a_resolver_failing_part_way_leaves_every_holder_as_it_was(monkeypatch):
 def test_holders_kept_across_a_restart_are_bound_again_if_still_allowed():
     mgr, loaded, sink = _frmcs()
     kept = mgr.restore_functional_aliases([
-        Holding("train-driver", "", DRV[0]),
+        Holding("train-driver", "T1", DRV[0]),
         Holding("track-controller", "S2", DRV[1]),
-        Holding("train-driver", "", "sip:gone@frmcs.example"),     # not allowed now
+        Holding("train-driver", "T1", "sip:gone@frmcs.example"),   # not allowed now
         Holding("track-controller", "", DRV[2]),                    # no location
-        Holding("train-driver", "S1", DRV[2]),                      # not per location
+        Holding("train-driver", "", DRV[2]),                        # no train id
         Holding("rec-area", "S1", DRV[2]),                          # not a user's
     ], "process-start")
-    assert kept == (Holding("train-driver", "", DRV[0]),
+    assert kept == (Holding("train-driver", "T1", DRV[0]),
                     Holding("track-controller", "S2", DRV[1]))
     assert _roles(loaded, DRV[1]) == ("track-controller",)
     dropped = [r for r in _records(sink, RecordType.BINDING_CHANGED)
@@ -315,17 +317,17 @@ def test_a_role_the_resolver_will_not_unbind_stays_in_the_ledger(monkeypatch):
     monkeypatch.setattr(resolver, "bind", bind)
     monkeypatch.setattr(resolver, "unbind", _down)
     saved = []
-    out = mgr.change_functional_aliases("p1", DRV[0], ["train-driver", "track-controller"],
+    out = mgr.change_functional_aliases("p1", DRV[0], [TD, "track-controller"],
                                         False, LocationContext(cell_id=CELL_S1),
                                         persist=saved.append)
     assert out.reason_code == "resolver-unavailable"
-    left = (Holding("train-driver", "", DRV[0]),)
+    left = (Holding("train-driver", "T1", DRV[0]),)
     assert mgr.functional.holdings() == left and _roles(loaded, DRV[0]) == ("train-driver",)
     assert saved == [(), left]
     # The failed bind is unbound too, in case the resolver took it; it will
     # not unbind, so that is recorded, without a holding in the ledger.
     assert _records(sink, RecordType.BINDING_CHANGED) == [{
-        "action": "rollback-incomplete", "identity": "train-driver", "slot": "",
+        "action": "rollback-incomplete", "identity": "train-driver", "slot": "T1",
         "holder": DRV[0], "reason": "resolver-unavailable"}, {
         "action": "rollback-uncertain", "identity": "track-controller", "slot": "S1",
         "holder": DRV[0], "reason": "resolver-unavailable"}]
@@ -377,7 +379,7 @@ def test_a_take_over_the_resolver_will_not_undo_keeps_the_taker(monkeypatch):
         "track-controller": AliasPolicy(users=frozenset(DRV))},
         {CELL_S1: {"track_section": "S1"}})
     s1 = LocationContext(cell_id=CELL_S1)
-    assert mgr.change_functional_aliases("p1", DRV[0], ["train-driver"], False, None).accepted
+    assert mgr.change_functional_aliases("p1", DRV[0], [TD], False, None).accepted
     resolver = loaded.hooks.identity_resolver
     real_bind = resolver.bind
 
@@ -389,10 +391,10 @@ def test_a_take_over_the_resolver_will_not_undo_keeps_the_taker(monkeypatch):
     real_unbind = resolver.unbind
     monkeypatch.setattr(resolver, "unbind", lambda i, u: _down() if u == DRV[1]
                         else real_unbind(i, u))
-    out = mgr.change_functional_aliases("p2", DRV[1], ["train-driver", "track-controller"],
+    out = mgr.change_functional_aliases("p2", DRV[1], [TD, "track-controller"],
                                         True, s1)
     assert out.reason_code == "resolver-unavailable"
-    assert mgr.functional.holdings() == (Holding("train-driver", "", DRV[1]),)
+    assert mgr.functional.holdings() == (Holding("train-driver", "T1", DRV[1]),)
     assert (_roles(loaded, DRV[0]), _roles(loaded, DRV[1])) == ((), ("train-driver",))
     assert [(r["action"], r["holder"], r["reason"])
             for r in _records(sink, RecordType.BINDING_CHANGED)[1:]] == [
@@ -437,7 +439,7 @@ def test_the_sessions_of_a_role_are_those_it_started_or_was_reached_by():
     mgr, loaded, _ = _frmcs()
     s1 = LocationContext(cell_id=CELL_S1)
     assert mgr.change_functional_aliases("p0", DRV[0], ["track-controller"], False, s1).accepted
-    assert mgr.change_functional_aliases("p2", DRV[2], ["train-driver"], False, None).accepted
+    assert mgr.change_functional_aliases("p2", DRV[2], [TD], False, None).accepted
 
     def call(rid, initiator, target):
         session, _, refusal = mgr.establish(SessionRequest(
@@ -469,7 +471,7 @@ def test_the_sessions_of_a_role_are_those_it_started_or_was_reached_by():
     # Holding another role the call type accepts, d0's own call needs neither
     # (train-driver is one holder network-wide, so d2 lets it go first).
     assert mgr.change_functional_aliases("p4", DRV[2], [], False, None).accepted
-    assert mgr.change_functional_aliases("p3", DRV[0], ["track-controller", "train-driver"],
+    assert mgr.change_functional_aliases("p3", DRV[0], ["track-controller", TD],
                                          False, s1).accepted
     assert mgr.sessions_of_role("track-controller", DRV[0]) == ("reached",)
     # Compared as SIP compares URIs.
@@ -484,7 +486,7 @@ def test_an_emergency_call_is_never_a_role_s_to_release():
     mgr, loaded, _ = _frmcs()
     s1 = LocationContext(cell_id=CELL_S1)
     assert mgr.change_functional_aliases("p0", DRV[0], ["track-controller"], False, s1).accepted
-    assert mgr.change_functional_aliases("p2", DRV[2], ["train-driver"], False, None).accepted
+    assert mgr.change_functional_aliases("p2", DRV[2], [TD], False, None).accepted
     session, _, refusal = mgr.establish(SessionRequest(
         request_id="rec", initiator=DRV[0], target="", call_type="rec-broadcast",
         media=(MediaKind.VOICE,), location=s1, adhoc=True,

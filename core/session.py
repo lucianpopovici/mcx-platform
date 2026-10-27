@@ -394,7 +394,7 @@ class SessionManager:
             needed = set(declared.initiator_roles) if declared is not None else set()
             started = identity.canonical(s.request.initiator) == who and \
                 identity_id in needed and not needed & others
-            reached = s.resolution.resolved_from == identity_id and \
+            reached = self.functional.addressed(s.resolution.resolved_from) == identity_id and \
                 who in {identity.canonical(m) for m in s.members}
             if started or reached:
                 out.append(s.correlation_id)
@@ -413,7 +413,11 @@ class SessionManager:
             reason = None
             if not self.functional.restorable(h):
                 reason = "not-allowed"
-            elif h.slot and not self._slot_mapped(h):
+            elif any(k.identity == h.identity and k.holder == h.holder for k in kept):
+                # One value per user (review of FA-OP-01 item 4).
+                reason = "one-per-user"
+            elif h.slot and self.functional.location_key(h.identity) and \
+                    not self._slot_mapped(h):
                 reason = "unknown-location"
             elif self.functional.single_held(h):
                 reason = "already-held"
