@@ -2258,7 +2258,7 @@ def test_bnd_013_the_reviewed_uses_are_these():
                                                                "floor_priority"],
         ("core/session.py", "SessionManager.preemption_victims"): ["scope"],
         ("core/session.py", "SessionManager._check_bearer"): [
-            "arp_level", "preemption_capability", "priority"],
+            "arp_level", "preemption_capability", "preemption_vulnerability", "priority"],
         ("core/validation.py", "_priority_totality"): ["urgency"],
         ("core/validation.py", "_bearer_totality"): [],
         ("core/validation.py", "_partner_inbound"): ["from_label", "max_level", "seen_labels",

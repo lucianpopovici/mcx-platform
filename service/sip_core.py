@@ -30,7 +30,7 @@ import uuid
 import weakref
 
 from core.errors import IDENTITY_NOT_AUTHENTICATED, INITIATOR_NOT_SERVED, NOT_AUTHORISED
-from core.hooks import MediaKind
+from core.hooks import MediaKind, keyed_identity
 from core.invoke import Invoker
 from core.session import Session, Signal, SignalType
 from core.sip import (
@@ -63,8 +63,13 @@ log = logging.getLogger("mcx.sip")
 ALLOWED = ALLOW          # core/sip.py: UPDATE added for RFC 4028 refresh
 _ECHOED = ("via", "from", "to", "call-id", "cseq")
 _STATUS_BY_CODE = {s.code: s for s in Status}
-_EXPIRES_PARAM = re.compile(r";\s*expires=(\d+)", re.I)
+# [0-9], not \d: \d takes any script's digits, which int() reads; and the
+# whole value, so "3²" is not read as 3 (SIP-OP-19).
+_EXPIRES_PARAM = re.compile(r";\s*expires=([0-9]+)(?=\s*(?:[;,>]|$))", re.I)
 _DEFAULT_REGISTER_S = 3600     # RFC 3261 §10.2: protocol default, not policy
+# The release cause of a call ended because its holder's functional alias
+# was taken over (FA-OP-01 item 4, MCX_DISPLACED_HOLDER_CALLS=release).
+TAKEN_OVER_CAUSE = "functional-alias-taken-over"
 
 
 @dataclass
@@ -548,6 +553,25 @@ class SipCore:
             return self._reject(txn, outcome.reason_code)
         if pub.location is not None:
             self.last_location[pub.served] = pub.location
+        if self.rt.config.sip.displaced_holder_calls == "release":
+            # FA-OP-01 item 4 (MCX_DISPLACED_HOLDER_CALLS=release): the calls a
+            # holder is in because of an alias taken over from it end with it.
+            # The take-over is already in force and stored, so a call that
+            # cannot be released is logged and the others still are: the
+            # PUBLISH is answered 200, never 500 for a change that was made
+            # (review of FA-OP-01 item 4).
+            for h in outcome.displaced:
+                for cid in self.rt.manager.sessions_of_role(h.identity, h.holder):
+                    try:
+                        call = self.calls.get(cid)
+                        if call is not None:
+                            self._end(call, cause=TAKEN_OVER_CAUSE)
+                        else:
+                            self.rt.release(cid, TAKEN_OVER_CAUSE)
+                    except Exception:                       # noqa: BLE001
+                        log.exception("session %s: its holder's functional alias %s "
+                                      "was taken over, but the call could not be "
+                                      "released", cid, h.identity)
         # RFC 3903 6: a 2xx to PUBLISH carries the entity-tag of the state.
         self._final(txn, Response(Status.OK, Headers([
             ("SIP-ETag", secrets.token_hex(8)), ("Expires", str(pub.expires))])))
@@ -564,13 +588,21 @@ class SipCore:
         # address in no domain, so it cannot be registered (RES-OP-01).
         if identity.outside((aor,), self.rt.loaded.profile.identity.domains):
             return self._reject(txn, NOT_AUTHORISED)
+        # An address written as a keyed functional identity is that identity's
+        # (FA-OP-01 item 4): nobody registers as it.
+        profile = self.rt.loaded.profile
+        if keyed_identity(aor, [f.id for f in profile.identity.functional
+                                if f.identification_key], profile.identity.domains):
+            return self._reject(txn, NOT_AUTHORISED)
         if not self._authenticated_as(flow, aor):
             # Registering someone else's address would route their calls here.
             return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
         expires_s = req.headers.get("Expires")
         m = _EXPIRES_PARAM.search(contact)
         seconds = int(m.group(1)) if m else (
-            int(expires_s) if expires_s and expires_s.isdigit()
+            # ASCII digits only (SIP-OP-19); anything else is the default,
+            # as an unreadable value always was.
+            int(expires_s) if expires_s and expires_s.isascii() and expires_s.isdigit()
             else _DEFAULT_REGISTER_S)
         if seconds == 0:
             self.registrations.deregister(aor)

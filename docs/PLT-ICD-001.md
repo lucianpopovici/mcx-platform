@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.28 (draft)
-**Date:** 2026-10-26
+**Version:** 0.33 (draft)
+**Date:** 2026-10-27
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -208,9 +208,9 @@ functional_aliases:                   # [] when no user may hold a functional id
 | ICD-NET-002 | The file and the core CA certificate are hashed together (SHA-256 over the canonical form, as PLT-PRF-011 does for the service profile). `name/version/hash[:16]` is the network identifier. It joins the service profile identifier and the release in every audit record (`<profile>+<release>+<network>+<environment>`, extending PLT-REL-005; the environment since 0.25) and appears in the health document. |
 | ICD-NET-003 | `trusted_cores` lists fully qualified DNS names. A non-empty list needs `core_ca`: a file, relative to the network profile, holding exactly one certificate, and only CERTIFICATE PEM blocks. The core CA must be self-signed, have `pathLenConstraint` 0, have keyCertSign if it has keyUsage, and be valid at startup. When SIP is enabled it must not share a key or a subject name with any CA in `MCX_SIP_TLS_CA` (which also may hold only CERTIFICATE blocks), and must not have issued any of them. |
 | ICD-NET-004 | The TLS listener trusts the core CA certificate as parsed and hashed at startup, not the file re-read. A peer is a trusted core when the core CA issued its certificate directly and the certificate carries a DNS name in `trusted_cores`. It may then assert any identity (RFC 3325 trust domain). A peer whose certificate the core CA issued asserts nothing else: no URI in it is a user's identity, so a core removed from the list asserts nothing at all. |
-| ICD-NET-005 | `groups` is a list of groups, each with `id` and `members` and optionally `display_name` and `call_type` (since 0.26, ICD-SIG-008: a call type the service profile declares `group_selected: true`, or startup is refused), nothing else. Ids are distinct non-empty strings; a display name is a non-empty string; members are a non-empty list of non-empty strings, deduplicated in declaration order. `users` is a list of non-empty strings, deduplicated. No id may be both a group and a user, and no group may be a member of a group. Every group member is a known user. The groups and users provision the identity resolver (whose declared-domain check, PLT-IDM-008, applies to every member and user) and are the content of the group documents served (VP1-DOC-001). Being registered does not make a user known (PLT-VP-R1 SIP-OP-05, closed 2026-10-26): a REGISTER says where a user can be reached, the network profile says who exists, so a call to a user it does not list is `unknown-target` however the user registered. A caller is checked against the declared domains only, not against this list, nor against a group's members when it starts a group call (PLT-VP-R1 SVC-OP-07, open). |
+| ICD-NET-005 | `groups` is a list of groups, each with `id` and `members` and optionally `display_name` and `call_type` (since 0.26, ICD-SIG-008: a call type the service profile declares `group_selected: true`, or startup is refused), nothing else. Ids are distinct non-empty strings; a display name is a non-empty string; members are a non-empty list of non-empty strings, deduplicated in declaration order. `users` is a list of non-empty strings, deduplicated. No id may be both a group and a user, and no group may be a member of a group. Every group member is a known user. The groups and users provision the identity resolver (whose declared-domain check, PLT-IDM-008, applies to every member and user) and are the content of the group documents served (VP1-DOC-001). Being registered does not make a user known (PLT-VP-R1 SIP-OP-05, closed 2026-10-26): a REGISTER says where a user can be reached, the network profile says who exists, so a call to a user it does not list is `unknown-target` however the user registered. A caller is checked against the declared domains only, not against this list. A caller whose call is aimed at a group must be one of the group's `members` (since 0.29, PLT-VP-R1 SVC-OP-07; TS 24.379 6.3.5.2 step 5b): otherwise `not-group-member` (§9), whatever the call type, emergency and private included. A gateway that relays group calls (§7.2) needs its mapped callers listed as members. |
 | ICD-NET-006 | `environment` is the production indicator of PLT-GEN-005, PLT-IDM-007 and PLT-SEC-008 (PLT-VP-R1 VP-OP-05, decided 2026-10-21): exactly one of `production`, `staging`, `test`, `dev`. Anything but `production` is refused unless every PLMN is a test PLMN: MCC 001 (the test network of the 3GPP test specifications), or 999-999 or 999-99 (ITU-T E.212 (06/2024) Appendix III.2.4, which suggests them for testing under MCC 999; 999-99 is written `999990`, pending ICD-OP-12). MCC 999 otherwise is for internal use within a private network, which may be operational, and codes assigned for testing by a regulator or for trials (E.212 Annex B, A.5.6, Annex G) cannot be told from operational ones, so a network on them runs as production. `production` is accepted on any PLMN. `MCX_ENV` (required, no default, the same four values) must equal it, and `MCX_PRODUCTION`, if set, must be `1`/`true`/`yes` exactly when it is `production` and `0`/`false`/`no` otherwise; any disagreement refuses startup. The environment is in every audit record (ICD-NET-002) and in the health document (`environment`, and `network.environment`). |
-| ICD-NET-007 | `functional_aliases` lists, for each functional identity the service profile declares with `resolves_to: user`, the users who may activate it (`users`, known users, at least one) and those of them who may take it over from another holder (`take_over`, a subset, `[]` for none): the platform's form of TS 24.484's `<FunctionalAliasList>` and `<allow-takeover-functional-alias-other-user>` (PLT-VP-R1 SVC-OP-06, decided 2026-10-23). Each identity is listed once; any defect refuses startup. A user activates over SIP, from Rel-15 (TS 24.379 clause 9A): a PUBLISH to the server with `Event: presence`, `Expires: 4294967295` to activate and `0` to deactivate (anything else 423 with `Min-Expires: 4294967295`; another event 489), `<mcptt-request-uri>` naming the user, who must be the one the connection authenticates (else 403 `identity-not-authenticated`), and the TS 24.379 9A.3.1 PIDF body listing the functional aliases wanted, all of them (what is held and not listed is deactivated), with `<take-over>true</take-over>` to take one over. All or nothing: a listed alias the user may not hold is 403 `functional-alias-not-authorised` (with warning 201 from Rel-20); a single-holder alias held by another is 403 `functional-alias-held`, or, with take-over by one not allowed to, `functional-alias-take-over-not-allowed`; a location-dependent alias is held per value of its location key, taken from the location report the PUBLISH carries (annex F.3, the cell map applied), else from the cell the user last reported on a request, and with neither is 403 `functional-alias-location-unknown`. A PIDF whose `entity` is not the served user is 400. A 200 carries `SIP-ETag` (RFC 3903) and the `Expires` asked. Holders are stored durably, written ahead of the resolver (a store that fails is a 500 with nothing changed), and bound again at start where the network profile in force still allows them (a single-holder identity keeps its first stored holder; below Rel-15 the store is left as it is); the health document lists them (`functional_aliases`). Before Rel-15 a PUBLISH is 501 and `Allow` does not name it. Not implemented (PLT-VP-R1 FA-OP-01): status determination (SUBSCRIBE/NOTIFY, 9A.2.1.3), notifying a displaced holder, location-triggered activation (9A.2.1.4). |
+| ICD-NET-007 | `functional_aliases` lists, for each functional identity the service profile declares with `resolves_to: user`, the users who may activate it (`users`, known users, at least one) and those of them who may take it over from another holder (`take_over`, a subset, `[]` for none), optionally, for an identity the service profile keys by an identification value (§3.2 PRE-5), the values its users may hold it for (`values`, a non-empty list of patterns of letters, digits, `*` and `?`; absent, any value; since 0.33, FRMCS FRS 8.2.4.3.6), and, optionally for an identity the service profile declares `multiplicity: multi`, how many may hold it at once (`max_holders`, an integer of at least 1; absent, no limit; applied per location value of a location-dependent identity, and per identification value of a keyed one; since 0.32, PLT-VP-R1 FA-OP-01 item 3: TS 24.484 `<max-simultaneous-activations>`; a take-over at the limit displaces the earliest holder to activate, a platform choice: TS 24.379 does not say which): the platform's form of TS 24.484's `<FunctionalAliasList>` and `<allow-takeover-functional-alias-other-user>` (PLT-VP-R1 SVC-OP-06, decided 2026-10-23). Each identity is listed once; any defect refuses startup. A user activates over SIP, from Rel-15 (TS 24.379 clause 9A), an identity keyed by an identification value in its keyed form (§3.2 PRE-5; the identity alone is 403 `functional-alias-not-authorised`): a PUBLISH to the server with `Event: presence`, `Expires: 4294967295` to activate and `0` to deactivate (anything else 423 with `Min-Expires: 4294967295`; another event 489), `<mcptt-request-uri>` naming the user, who must be the one the connection authenticates (else 403 `identity-not-authenticated`), and the TS 24.379 9A.3.1 PIDF body listing the functional aliases wanted, all of them (what is held and not listed is deactivated), with `<take-over>true</take-over>` to take one over. All or nothing: a listed alias the user may not hold is 403 `functional-alias-not-authorised` (with warning 201 from Rel-20); a single-holder alias held by another, or a multi-holder one held by `max_holders` others at the requested location value, is 403 `functional-alias-held`, or, with take-over by one not allowed to, `functional-alias-take-over-not-allowed`; a location-dependent alias is held per value of its location key, taken from the location report the PUBLISH carries (annex F.3, the cell map applied), else from the cell the user last reported on a request, and with neither is 403 `functional-alias-location-unknown`. A PIDF whose `entity` is not the served user is 400. A 200 carries `SIP-ETag` (RFC 3903) and the `Expires` asked. Holders are stored durably, written ahead of the resolver (a store that fails is a 500 with nothing changed), and bound again at start where the network profile in force still allows them (a single-holder identity keeps its earliest stored holder, a multi-holder one its earliest `max_holders`, the store keeping the order holders activated; below Rel-15 the store is left as it is); the health document lists them (`functional_aliases`). Before Rel-15 a PUBLISH is 501 and `Allow` does not name it. A holder whose alias is taken over keeps the calls it is in because of it, or, with `MCX_DISPLACED_HOLDER_CALLS=release` (optional, SIP only, default `keep`; since 0.31), they are released with cause `functional-alias-taken-over`, the whole call: the calls it started as a call type that needs the alias (unless it holds another role the call type accepts) and the calls addressed to the alias that reached it, not an ad hoc call whose participants came from the alias, and never an emergency or imminent peril call (its call type's TS 24.379 indication); only a take-over releases, not the holder's own deactivation. Not implemented (PLT-VP-R1 FA-OP-01): status determination (SUBSCRIBE/NOTIFY, 9A.2.1.3), notifying a displaced holder, location-triggered activation (9A.2.1.4). |
 | ICD-LOC-001 | Each `cell` is an ECGI (6 digits then 28 binary digits) or an NCGI (6 digits then 36 binary digits), as annex F.3 writes them. Its first six digits must be one of `plmns`. Each `location` key must be the `location_key` of some functional identity in the loaded service profile, and a cell may appear once. |
 | ICD-LOC-002 | The core reads the serving cell from the report. It prefers the NCGI, which Rel-18 carries in `<anyExt>`, to the ECGI. The cell becomes `LocationContext.cell_id`. Neighbour cells, coordinates and the rest are not read. |
 | ICD-LOC-003 | A location is advisory, never a reason to refuse. A missing, malformed or non-report body, a DOCTYPE, or a cell sent with `type="Encrypted"` (the platform holds no key, F.3.3) all leave the request without a location. |
@@ -247,6 +247,24 @@ consult mutable state, because functional-identity bindings change at runtime.
 3. `target` is non-empty and syntactically well-formed.
 4. `request.location` is present if the profile declares any location-dependent
    identity; it may still be `None` if the client reported none.
+5. Since v0.33 (PLT-VP-R1 FA-OP-01 item 4), a functional identity the profile
+   declares with an `identification_key` is keyed by an identification value
+   rather than a location, and is written `sip:<value>.<identity>@<domain>`:
+   the value alphanumeric, the identity as declared (letters, digits, `-` and
+   `_`), the domain one the profile declares (compared without case);
+   `core.hooks.keyed_identity` reads it, for the core and a profile alike. A
+   target so written names that value's holders; the identity alone is not a
+   target (`unknown-target`). An ad hoc criterion so written names that
+   value's holders, and the identity alone names every value's holders. A
+   user holds one value of an identity at a time (`unbind` names no value).
+   An address so written is the identity's: a network profile user, group
+   member or group id written so is refused at startup (in any domain), and
+   a REGISTER for one is 403 `not-authorised` (review of FA-OP-01 item 4; an
+   extension of PLT-IDM-008). The value is compared exactly (`T1` and `t1`
+   are two values); `sips:` reads as `sip:`. The `.` and `-` of the form are
+   the platform's encoding (FRMCS FRS 6.1.11 asks only that a functional
+   identity be alphanumeric), and the FRS Organisation Code is not
+   represented: one per deployment, the domain standing for it.
 
 **POST**
 1. Returns a `Resolution` whose `kind` is consistent with `members`:
@@ -299,7 +317,11 @@ Since 0.27 the core is the only caller, for functional alias management
 profile, settles take-over itself (it unbinds the holder it displaces before
 it binds the new one, so POST-1's replace-or-raise is never reached), passes
 the location value the user's location gave under the identity's location
-key, and records every change (`binding-changed`, `binding-refused`). A
+key, and records every change (`binding-changed`, `binding-refused`). For an
+identity keyed by an identification value (§3.2 PRE-5) the value is passed in
+`location.attributes` under the identification key, as a location-dependent
+identity's value is under its location key: the signature carries no other
+place for it (since 0.33). A
 resolver that will not go back after a failure part way is followed by the
 core's ledger, recorded (`binding-changed` `rollback-incomplete`,
 `dropped-on-rollback`), so the two never disagree; a bind that failed is
@@ -314,7 +336,11 @@ unbound as well (POST-2), recorded `rollback-uncertain` if that fails too.
    observes either the old or the new binding, never a partial state.
 
 **INV**
-1. Bindings do not affect sessions already established.
+1. Bindings do not affect sessions already established, as far as the hook
+   goes. Since v0.31 the service may end them on a take-over:
+   `MCX_DISPLACED_HOLDER_CALLS=release` (default `keep`) releases the calls
+   the displaced holder is in because of the alias (PLT-VP-R1 FA-OP-01 item
+   4; ICD-NET-007).
 2. Binding changes are audited independently of session records — the binding
    history is evidence in its own right.
 
@@ -609,7 +635,11 @@ bearer is selected or QoS reserved.
 4. `qos_identifier` and `arp_level` are valid for the deployment's core network.
 5. ARP pre-emption flags are consistent with the priority decision: a decision
    with `preemption_capability=False` shall not request
-   `arp_preemption_capability=True`.
+   `arp_preemption_capability=True`; and, where the deployment states
+   `MCX_ARP_VULNERABILITY_CHECK=true` (since v0.30, ICD-OP-14), a decision with
+   `preemption_vulnerability=True` shall not set
+   `arp_preemption_vulnerability=False`. The bearer may be more open to
+   pre-emption than the priority decision, never less.
 
 **Checked by the core (since v0.19, PLT-VP-R1 RES-OP-07).** The core checks
 the returned value before it reserves QoS: it is a `BearerDecision` whose paths
@@ -620,7 +650,14 @@ profile validation allows, and each weight is an integer of at least 1; the
 booleans; and POST-5, where only `preemption_capability is True` grants. A
 failure is `hook-contract-violation` on IF-BER. Each check is one profile
 validation makes of a bearer rule, so a profile that validates is never
-refused here. Whether POST-5 also covers the vulnerability flag is ICD-OP-14.
+refused here. The vulnerability half of POST-5 is checked where the
+deployment states `MCX_ARP_VULNERABILITY_CHECK=true` (required, no default;
+`false` is a deviation the service reports). There the privilege is
+immunity, so only `preemption_vulnerability is False` grants it: any other
+value IF-PRI returns leaves the call open, as only `True` grants capability.
+Profile validation does not pair bearer rules with priority rules, so a
+profile that validates can still be refused here with the check on (every
+in-tree profile passes it).
 
 **INV**
 1. The core performs no priority-to-QoS mapping (PLT-HOK-043).
@@ -699,6 +736,9 @@ refused here. Whether POST-5 also covers the vulnerability flag is ICD-OP-14.
 1  IF-IDR.resolve(target, request)              → Resolution
       ── ad hoc (§3.5): IF-IDR.resolve per listed entry, OR
          IF-IDR.determine_participants(criteria, request) ──
+1a core: the initiator of a call to a group is a member of it (v0.29)
+      ── not ad hoc, not a functional identity's group; any call type ──
+      ── if not: refuse not-group-member (403 + 116), stop ──
 2  IF-IWF.route(request, resolution)            → InterworkingRoute
       ── ONLY when resolution.kind is EXTERNAL ──
       ── if it returns None: refuse `gateway-unavailable`, stop ──
@@ -794,6 +834,7 @@ they may not redefine these.
 | `functional-alias-not-authorised` | core | A functional alias the user may not hold (ICD-NET-007): not in the network profile's `functional_aliases` for the user, or not a functional identity the profile declares for users. SIP 403, with warning `201 user not authorized to change the functional alias status` from Rel-20 (TS 24.379 9A.2.2.2.3 step 4B), the phrase alone before. Since v0.27 |
 | `functional-alias-held` | core | A single-holder functional alias another user holds, and the request does not take it over (9A.2.2.3.3 step 5). SIP 403. Since v0.27 |
 | `functional-alias-take-over-not-allowed` | core | A take-over by a user the network profile does not allow to take over that alias (9A.2.2.3.3 step 6). SIP 403. Since v0.27 |
+| `not-group-member` | core | A call whose caller is not a member of the group its target resolved to (ICD-NET-005; TS 24.379 6.3.5.2 step 5b), whatever its call type, a private call aimed at a group included, checked after IF-IDR `resolve` and before IF-PRI; not for an ad hoc call or a group named by a functional identity. The caller is compared as SIP compares URIs. SIP 403 with warning `116 user is not part of the MCPTT group` (every release). Since v0.29 |
 | `functional-alias-location-unknown` | core | A location-dependent functional alias with no location to hold it at: the PUBLISH reports none and the user has reported no mapped cell (owner decision 2026-10-23). SIP 403. Since v0.27 |
 
 `hook-contract-violation` is distinguished from `hook-error` deliberately: the
@@ -831,7 +872,7 @@ environmental condition.
 | ICD-OP-11 | **From v0.9.** The inbound guard records a request's (Call-ID, CSeq) before the identity check runs. A refused, spoofed request therefore uses up that pair, and a genuine request that later carries the same pair is answered 482. This matters only if Call-IDs can be predicted. | R2 |
 | ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. Since 0.25 the answer also fixes how the test PLMN 999-99 is written (ICD-NET-006 takes `999990`, the trailing-zero form of the examples' `001010`): if a two-digit MNC is written otherwise, `TEST_PLMNS` in `service/network.py` changes with it. | before a two-digit-MNC deployment |
 | ICD-OP-13 | **From v0.13.** A request relayed by a gateway (§7.2) has two weaknesses. (1) Its audit trail records `session-admitted` before §8.1 runs, so a request refused at step 0 shows "admitted" and then "refused". (2) The gateway may name a local user as the initiator, and step 0 then authorises it with that user's roles. The gateway's word is taken for who is calling. Both predate v0.13. The remedy for the second is to authorise gateway-originated requests on the gateway's own rights. | R4 start |
-| ICD-OP-14 | **From v0.19.** §6.1 POST-5 says the ARP pre-emption *flags* are consistent with the priority decision, but states only capability. A bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` is accepted, and makes the session immune to network pre-emption that IF-PRI left it open to. Decide whether POST-5 covers vulnerability (a major change: it tightens a POST, and every in-tree bearer rule must then agree with its priority rule). Related: IF-PRI's own decision is not checked by the core, and the 5QI is checked only as an integer, in profile validation and at runtime alike (TS 23.501 values are 0 to 255). | R2 start |
+| ICD-OP-14 | **CLOSED 2026-10-26 (owner ruling: a deployment parameter, `MCX_ARP_VULNERABILITY_CHECK=true|false`, required, no default).** §6.1 POST-5 stated only capability: a bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` was accepted, and made the session immune to network pre-emption that IF-PRI left it open to. Now, with `true`, the core refuses it as `hook-contract-violation` on IF-BER; with `false` it is accepted as before and the service reports the deviation. Checking every in-tree call type with the check on found one such pair: the frmcs `etcs-ipcon` bearer rule kept `arp_preemption_vulnerability: false` after PLT-CONF-AUDIT CA-19 made its priority vulnerable (band C, so a railway emergency call can take its resources, FRS appendix J); corrected to `true` (owner ruling the same day). Only an explicit `False` from IF-PRI grants immunity (review: a truthy value had passed as immune while the platform's own pre-emption read it as open). Open notes, not this item's defects: the bearer may be more open than the priority decision (in-tree, the mcx imminent-peril bearer rule is pre-emptable at the network while its priority is not), as POST-5 also allows for capability; an inbound IF-ICX path, when wired, gets `preemption_vulnerability=True` from the partner mapping, so with the check on every bearer rule such a call can reach must be pre-emptable; IF-PRI's own decision is not checked by the core (so `preemption_victims` reads the incoming call's capability by truthiness: a substituted IF-PRI returning `"false"` would make it capable, the same fail-open shape fixed here for the bearer), and the 5QI is checked only as an integer (TS 23.501 values are 0 to 255). | closed |
 | ICD-OP-15 | **From v0.21.** §5.2 POST-1 is read as equality, and R1 runs on-demand sessions only (the in-tree call types that are pre-established or broadcast by nature are declared on-demand until their release, PLT-VP-R1 RES-OP-12). In TS 24.379, falling back to on-demand when no pre-established session exists is ordinary, and equality forbids a hook from choosing it. Revisit POST-1 with PLT-SIG-006 (pre-established sessions). | R2 start |
 
 ---
@@ -840,6 +881,11 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.33 | 2026-10-27 | §3.2 PRE-5 and §3.3: a functional identity keyed by an identification value (`identification_key` in the profile), written `sip:<value>.<identity>@<domain>` (`core.hooks.keyed_identity`), its value passed to `bind` under the key; ICD-NET-007: optional `values`, the patterns of values its users may hold it for (PLT-VP-R1 FA-OP-01 item 4, owner decision: option b and the format). The frmcs `train-driver` is keyed by `train_id`. A minor change for a profile that declares none; a major one for the frmcs profile's deployments, whose `train-driver` is now activated and called per train. |
+| 0.32 | 2026-10-27 | §2.8 ICD-NET-007: optional `max_holders` for a multi-holder identity, refused `functional-alias-held` at the limit unless taken over, the earliest holders making room (PLT-VP-R1 FA-OP-01 item 3). A minor change: an optional network key. |
+| 0.31 | 2026-10-27 | §2.8 ICD-NET-007 and §3.3 INV-1: `MCX_DISPLACED_HOLDER_CALLS=keep|release` (default `keep`), whether the calls a displaced holder is in because of the alias are released on a take-over (PLT-VP-R1 FA-OP-01 item 4, owner ruling). A minor change: an optional setting. |
+| 0.30 | 2026-10-26 | §6.1 POST-5 and its core check: the vulnerability flag too, where the deployment states `MCX_ARP_VULNERABILITY_CHECK=true` (ICD-OP-14 closed, owner ruling: a required parameter, `false` a reported deviation). The frmcs `etcs-ipcon` bearer rule corrected to `arp_preemption_vulnerability: true`, as its priority rule. A major change for a deployment that turns it on; no hook signature change. |
+| 0.29 | 2026-10-26 | §2.8 ICD-NET-005, §8.1 step 1a and §9: a group call's caller must be a member of the group, else `not-group-member`, SIP 403 with warning 116 (PLT-VP-R1 SVC-OP-07 decided: as TS 24.379 6.3.5.2 step 5b, no call type exempt). A new core-originated reason code; no hook change. |
 | 0.28 | 2026-10-26 | §2.8 ICD-NET-005: registration never provisions a user, and a caller is checked against the declared domains only (PLT-VP-R1 SIP-OP-05 closed, option 1), nor against a group's members (PLT-VP-R1 SVC-OP-07, open). No interface change. |
 | 0.27 | 2026-10-23 | §2.8: the network profile gains `functional_aliases` (ICD-NET-007; PLT-VP-R1 SVC-OP-06 decided, option B): who may activate each functional identity and take it over; users activate by SIP PUBLISH from Rel-15 (TS 24.379 clause 9A), the core binding through IF-IDR (§3.3 note), take-over as the standard has it (ICD-OP-02 closed), location from the PUBLISH's report or else the last reported cell, holders durable. §9: four core codes `functional-alias-*`. A minor change: no hook signature changes. Review: `SIP-ETag` on the 200, holders written ahead of the resolver, §3.3 rollback records. |
 | 0.26 | 2026-10-22 | §2.6: ICD-SIG-008, a call type chosen by the target group (PLT-VP-R1 PRF-OP-01 decided, option 2 with matching signature): `group_selected: true` on the call type, `call_type` on the network profile's group (§2.8, ICD-NET-005); ICD-SIG-003 does not count it, and it must share its prearranged or chat signature with exactly one call type that is not group-selected (review). §5.0 INV-1 notes that a group-selected call type shows through the authorise refusal. The mcx `coordination-group` and utility `switching-order` become group-selected prearranged calls. A minor change: an optional profile key and an optional network key, no hook change. |

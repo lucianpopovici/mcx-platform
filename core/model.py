@@ -106,6 +106,11 @@ class FunctionalIdentity:
     location_key: Optional[str]
     multiplicity: str
     resolves_to: str
+    # FA-OP-01 item 4: the identification attribute that keys the identity,
+    # as location_key keys a location-dependent one; written
+    # sip:<value>.<id>@<domain> (core.hooks keyed_identity). None for an
+    # identity that is not so keyed.
+    identification_key: Optional[str] = None
 
 
 @dataclass(frozen=True)

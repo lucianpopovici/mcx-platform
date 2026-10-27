@@ -1,8 +1,8 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.10
-**Date:** 2026-09-26
+**Version:** 2.11
+**Date:** 2026-10-26
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
 
@@ -1255,6 +1255,16 @@ appendix J's stated rule. Whether a shunting call should in practice drop an
 ATO session is an operator policy decision that CENELEC sign-off has to
 confirm; the FRS states the principle, not the deployment's appetite for it.
 
+**Addendum (2026-10-26): a fourth field.** The invariant was carried by four
+fields, not three. The `etcs-ipcon` bearer rule kept
+`arp_preemption_vulnerability: false` after this item made the ETCS priority
+rule vulnerable, so the platform would pre-empt an ETCS session while the
+network kept it immune: the same confidence without correctness, one hook
+further down. Found by checking every in-tree call type with the ARP
+vulnerability check PLT-ICD-001 ICD-OP-14 added; the rule now says `true`, and
+a deployment may make the core refuse such a pair
+(`MCX_ARP_VULNERABILITY_CHECK=true`).
+
 ---
 
 ### 4.35 CA-09 — the interworking codes exist, and none of them is the one we wanted
@@ -1702,7 +1712,7 @@ ordered by consequence:
 | CA-18 | Annex A ARP column | UIC FRMCS SRS Annex A table A.1-1 | **Closed** by a human read. See 4.33 — ARP 1 is reserved for FRMCS Signalling and the emergency call was taking it. |
 | SHUNT-OP-01 | The SRS does not cover shunting (FRS 10.8) | UIC FRMCS SRS Annex A note (1) | **Open, for UIC.** See 4.31. |
 | FRMCS-OP-02 | Application vocabulary too coarse for FRS table J-1 | FRS appendix J | **Closed** by 4.34: table J-1's bands were read, and FRS 10.3/10.4 are band D. |
-| CA-19 | Priority ordering across all three fields, and pre-emption flags | FRS table J-1 | **Closed.** See 4.34. Nothing could pre-empt an ATO session, including the REC the appendix names. |
+| CA-19 | Priority ordering across all three fields, and pre-emption flags | FRS table J-1 | **Closed.** See 4.34. Nothing could pre-empt an ATO session, including the REC the appendix names. Addendum 2026-10-26: the `etcs-ipcon` bearer rule's ARP vulnerability, a fourth field, was still false; corrected under PLT-ICD-001 ICD-OP-14. |
 | CA-08 | Group document, OMA-defined parts | OMA XSDs + RFC 4826 `resource-lists.xsd` (all present) | **Closed.** See 4.27. Element order is enforced and full XSD validation runs and passes. |
 | CA-09 | Interworking warning codes 301-350 | TS 29.379 table 4.2.2-1 (all four revisions present) | **Closed.** See 4.35. Three codes exist — 300, 301, 302, all LMR media security — and none means the gateway is unreachable, so `gateway-unavailable` correctly carries no code. New IWF-OP-01, IWF-OP-02. |
 | IWF-OP-01 | TS 24.379 reserves 301-350; TS 29.379 allocates 300 | Both tables | **Open, for 3GPP CT1.** See 4.35. No effect today — there is no receive-side warning parser — but it would be a defect in one. |
@@ -1825,6 +1835,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.11 | 2026-10-26 | CA-19 addendum (4.34): the `etcs-ipcon` bearer rule kept ARP pre-emption vulnerability false after CA-19 made its priority vulnerable; corrected under PLT-ICD-001 ICD-OP-14. |
 | 2.10 | 2026-09-26 | CA-27: TS 26.179 checked against docs/3GPP (V13.2.0, V19.0.0); citations stand; 4.2.1 recorded against G.711/G.722 calls to MCPTT clients. |
 | 2.9 | 2026-09-26 | CA-27: the EVS parameters read from TS 26.445 annex A; `cmr` had been missed and is now must-match. |
 | 2.8 | 2026-09-26 | CA-27 (4.40): voice codec constants and the direction of payload type numbers, read from RFC 3551, 4867, 3264, 3550 and TS 26.179. |

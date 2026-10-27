@@ -115,6 +115,14 @@ def test_allow_lets_a_foreign_caller_reach_the_hooks(mcx):
     assert sink.of_type(RecordType.HOOK_INVOCATION)
 
 
+def test_an_allowed_foreign_caller_is_not_a_member_of_a_group(mcx):
+    """SVC-OP-07: allow lets the caller reach the hooks, not join a group it
+    is not a member of."""
+    _, _, refusal = _altered(mcx, MemorySink(), foreign_initiator="allow").establish(
+        req(rid="f3", initiator=FOREIGN))
+    assert refusal.reason_code == "not-group-member"
+
+
 def test_a_relayed_request_is_not_subject_to_the_setting(mcx, monkeypatch):
     from core.hooks import MediaKind, SessionRequest
     mgr = _altered(mcx, MemorySink(), foreign_initiator="refuse")

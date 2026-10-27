@@ -716,17 +716,53 @@ def test_who_may_hold_a_functional_identity_is_read(tmp_path):
     ({"id": "train-driver", "users": [_D[0]], "take_over": [_D[1]]},
      "functional_aliases[0].take_over: may take over but may not hold: "
      "'sip:d1@frmcs.example'"),
-    ({"id": "train-driver", "users": _D}, "functional_aliases[0]: expected exactly 'id', "
-                                          "'users' and 'take_over'"),
+    ({"id": "train-driver", "users": _D}, "functional_aliases[0]: expected 'id', 'users' "
+                                          "and 'take_over', and optionally 'max_holders'"),
+    ({"id": "train-driver", "users": _D, "take_over": [], "holders": 2},
+     "functional_aliases[0]: expected 'id', 'users' and 'take_over', and optionally "
+     "'max_holders'"),
+    ({"id": "train-driver", "users": _D, "take_over": [], "max_holders": 2},
+     "functional_aliases[0].max_holders: 'train-driver' is single-holder, so one holds it "
+     "at a time; max_holders is for a multi-holder identity"),
     ({"id": "", "users": _D, "take_over": []},
      "functional_aliases[0].id: expected a functional identity id"),
 ], ids=["a-group-identity", "undeclared", "no-users", "an-unknown-user",
-        "take-over-without-holding", "a-missing-key", "empty-id"])
+        "take-over-without-holding", "a-missing-key", "an-unknown-key",
+        "max-holders-on-a-single-holder-identity", "empty-id"])
 def test_who_may_hold_is_checked_against_both_profiles(tmp_path, entry, says):
     with pytest.raises(StartupRefused) as exc:
         load_network(network_yaml(tmp_path, users=_D, functional_aliases=[entry]), set(),
                      None, None, _frmcs_functional())
     assert says in str(exc.value)
+
+
+def _multi():
+    """A multi-holder identity for users (none is shipped)."""
+    from types import SimpleNamespace
+    return [SimpleNamespace(id="team-member", resolves_to="user", multiplicity="multi")]
+
+
+def test_max_holders_is_read_for_a_multi_holder_identity(tmp_path):
+    """FA-OP-01 item 3 (owner 2026-10-27): optional; absent, no limit."""
+    from core.functional import AliasPolicy
+    n = load_network(network_yaml(tmp_path, users=_D, functional_aliases=[
+        {"id": "team-member", "users": _D, "take_over": [], "max_holders": 2}]),
+        set(), None, None, _multi())
+    assert n.functional_aliases == {"team-member": AliasPolicy(
+        users=frozenset(_D), max_holders=2)}
+    n = load_network(network_yaml(tmp_path, fname="n2.yaml", users=_D, functional_aliases=[
+        {"id": "team-member", "users": _D, "take_over": []}]), set(), None, None, _multi())
+    assert n.functional_aliases["team-member"].max_holders is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "2", 1.5])
+def test_max_holders_is_an_integer_of_at_least_one(tmp_path, bad):
+    with pytest.raises(StartupRefused) as exc:
+        load_network(network_yaml(tmp_path, users=_D, functional_aliases=[
+            {"id": "team-member", "users": _D, "take_over": [], "max_holders": bad}]),
+            set(), None, None, _multi())
+    assert f"functional_aliases[0].max_holders: expected an integer of at least 1, " \
+           f"not {bad!r}" in str(exc.value)
 
 
 def test_an_identity_is_listed_once(tmp_path):

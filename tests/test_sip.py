@@ -243,6 +243,31 @@ def test_vp1_sig_004_malformed_cseq_is_400():
     assert response.status is Status.BAD_REQUEST
 
 
+@pytest.mark.parametrize("digits", ["\u0661", "\uff11"])
+def test_a_cseq_in_other_digits_is_400_and_no_cseq(digits):
+    """SIP-OP-19: the guard and the transaction layer read ASCII digits only."""
+    from service.sip_txn import cseq_of
+    response = InboundGuard().check(well_formed(cseq=f"{digits} INVITE"))
+    assert response.status is Status.BAD_REQUEST
+    assert cseq_of(Headers([("CSeq", f"{digits} INVITE")])) == (0, "")
+
+
+@pytest.mark.parametrize("code", ["\u0662\u0660\u0660", "\uff12\uff10\uff10"])
+def test_a_status_line_in_other_digits_is_malformed(code):
+    """SIP-OP-19: "SIP/2.0 ٢٠٠ OK" used to be read as a 200."""
+    from core.sip import parse_message
+    raw = (f"SIP/2.0 {code} OK\r\nVia: SIP/2.0/TLS x;branch=z9hG4bK1\r\nCall-ID: c\r\n"
+           "CSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n").encode()
+    with pytest.raises(SipError, match="malformed start line"):
+        parse_message(raw)
+
+
+def test_a_codec_name_takes_ascii_digits_only():
+    from core.codec import NAME
+    assert NAME.match("AMR-WB/16000/1")
+    assert not NAME.match("AMR-WB/\u0661\u0666\u0660\u0660\u0660")
+
+
 def test_vp1_sig_004_body_without_content_type_is_400():
     guard = InboundGuard()
     response = guard.check(well_formed(body="v=0"))
@@ -664,6 +689,9 @@ def test_every_specification_warning_code_is_in_the_specification_table():
         # (SVC-OP-06); earlier releases answer the same step with a bare 403.
         "functional-alias-not-authorised":
             (201, "user not authorized to change the functional alias status"),
+        # Rel-13 onwards (V13.19.0 and V17.15.0 tables): 6.3.5.2 step 5b
+        # (SVC-OP-07).
+        "not-group-member": (116, "user is not part of the MCPTT group"),
     }
 
 

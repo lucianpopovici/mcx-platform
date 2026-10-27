@@ -79,7 +79,12 @@ HTTP_TLS_VALUES = ("on", "off")
 # disagreement is reported at startup (service/runtime.py).
 SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}
 SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS",
-            "MCX_SESSION_EXPIRES_MS", "MCX_SESSION_EXPIRES")
+            "MCX_SESSION_EXPIRES_MS", "MCX_SESSION_EXPIRES", "MCX_DISPLACED_HOLDER_CALLS")
+# PLT-VP-R1 FA-OP-01 item 4 (owner ruling 2026-10-27): what becomes of the
+# calls a functional alias holder is in because of the alias when another
+# user takes it over: they go on ("keep", the default; TS 24.379 says
+# nothing) or are released ("release").
+DISPLACED_HOLDER_CALLS_VALUES = ("keep", "release")
 HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
 # RES-OP-14 (owner ruling 2026-10-16): a floor transition the audit store
 # cannot take is undone and not sent ("deny", PLT-FC-011 kept: the floor
@@ -90,6 +95,9 @@ FLOOR_UNRECORDED_VALUES = ("deny", "allow")
 # declared domains -- possible when a trusted SIP core asserts it -- is
 # refused 404 + 141 ("refuse", PLT-IDM-008) or served ("allow").
 FOREIGN_INITIATOR_VALUES = ("refuse", "allow")
+# PLT-ICD-001 ICD-OP-14 (owner ruling 2026-10-26): whether a bearer decision's
+# ARP pre-emption vulnerability must agree with the priority decision's.
+ARP_BOTH_FLAGS_VALUES = {"true": True, "false": False}
 
 
 def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
@@ -226,6 +234,7 @@ class SipConfig:
     service_refusal_status: int = 503
     dialog_takeover: str = "same-party"
     location_reports: str = "read"
+    displaced_holder_calls: str = "keep"
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -299,11 +308,18 @@ class SipConfig:
         location = _choice(env, "MCX_LOCATION_REPORTS", LOCATION_REPORT_VALUES,
                            "state whether the client's location report is read "
                            "(ADHOC-OP-03)")
+        # Unlike the settings above, this one has a default (owner ruling
+        # 2026-10-27): "keep", what the platform did before it existed.
+        displaced = (env.get("MCX_DISPLACED_HOLDER_CALLS") or "keep").strip().lower()
+        if displaced not in DISPLACED_HOLDER_CALLS_VALUES:
+            raise StartupRefused(f"MCX_DISPLACED_HOLDER_CALLS={displaced!r} must be "
+                                 "'keep' or 'release'")
         return SipConfig(host, port, uri, cert, key, ca, auth, roles,
                          session_expires_ms=expires_ms,
                          session_expires_s=expires_s,
                          service_refusal_status=int(status),
-                         dialog_takeover=takeover, location_reports=location)
+                         dialog_takeover=takeover, location_reports=location,
+                         displaced_holder_calls=displaced)
 
 
 @dataclass(frozen=True)
@@ -363,6 +379,9 @@ class Config:
     floor_unrecorded: str = ""
     # RES-OP-11: "refuse" or "allow". Required, no default.
     foreign_initiator: str = ""
+    # ICD-OP-14, MCX_ARP_VULNERABILITY_CHECK: "true" or "false", whether
+    # both ARP pre-emption flags are checked. Required, no default.
+    arp_both_flags: str = ""
     # VP-OP-05: MCX_ENV, which the network profile's environment must equal.
     environment: str = ""
     sip: Optional[SipConfig] = None
@@ -479,6 +498,10 @@ class Config:
             env, "MCX_FOREIGN_INITIATOR", FOREIGN_INITIATOR_VALUES,
             "state whether a caller outside the profile's declared domains is "
             "served (PLT-VP-R1 RES-OP-11)")
+        arp_both_flags = _choice(
+            env, "MCX_ARP_VULNERABILITY_CHECK", tuple(ARP_BOTH_FLAGS_VALUES),
+            "state whether a bearer decision's ARP pre-emption vulnerability must "
+            "agree with the priority decision's (PLT-ICD-001 ICD-OP-14)")
         http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
@@ -498,6 +521,7 @@ class Config:
             environment=environment,
             floor_unrecorded=floor_unrecorded,
             foreign_initiator=foreign_initiator,
+            arp_both_flags=arp_both_flags,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
             http_tls=http_tls,

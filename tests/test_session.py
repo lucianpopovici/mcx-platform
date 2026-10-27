@@ -649,6 +649,57 @@ def test_arp_preemption_the_priority_decision_grants_is_accepted(mcx, sink):
     assert refusal is None and session.bearer.arp_preemption_capability is True
 
 
+@pytest.mark.vp("VP1-HOOK-041")
+def test_arp_immunity_against_the_priority_decision_is_a_violation_when_checked(mcx, sink):
+    """ICD-OP-14 (MCX_ARP_VULNERABILITY_CHECK=true): a bearer decision that
+    makes the call immune to network pre-emption the priority decision
+    leaves it open to is refused, as POST-5 refuses a capability."""
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_vulnerability=False),
+                   priority=lambda p: dc.replace(p, preemption_vulnerability=True),
+                   arp_both_flags=True)
+    _refused_as_violation(mgr, sink, "IF-BER")
+    failed = sink.of_type(RecordType.SESSION_FAILED)[-1].detail
+    assert "makes the call immune to ARP pre-emption, which the priority decision " \
+        "leaves it open to (§6.1 POST-5)" in str(failed)
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+@pytest.mark.parametrize("priority_flag", ["true", 1, None, "false", 0])
+def test_only_an_explicit_false_grants_arp_immunity(mcx, sink, priority_flag):
+    """Review of ICD-OP-14: immunity is the privilege, so only `False` grants
+    it; any other value IF-PRI returns (the platform's own pre-emption reads
+    the flag by truthiness) leaves the call open, and an immune bearer is
+    refused."""
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_vulnerability=False),
+                   priority=lambda p: dc.replace(p, preemption_vulnerability=priority_flag),
+                   arp_both_flags=True)
+    _refused_as_violation(mgr, sink, "IF-BER")
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+@pytest.mark.parametrize("both,priority_flag,bearer_flag", [
+    (False, True, False),          # not checked: today's behaviour
+    (True, False, False),          # nothing to agree with: the priority says immune
+    (True, False, True),           # the bearer may be more open than the priority
+    (True, True, True),            # agrees
+    (False, "true", False),        # the check off: not checked whatever IF-PRI says
+])
+def test_arp_vulnerability_accepted(mcx, sink, both, priority_flag, bearer_flag):
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_vulnerability=bearer_flag),
+                   priority=lambda p: dc.replace(p, preemption_vulnerability=priority_flag),
+                   arp_both_flags=both)
+    session, _, refusal = mgr.establish(req())
+    assert refusal is None and session.bearer.arp_preemption_vulnerability is bearer_flag
+
+
+def test_the_both_flags_setting_is_a_boolean(mcx, sink):
+    with pytest.raises(ValueError, match="arp_both_flags 'true' is not a boolean"):
+        _altered(mcx, sink, arp_both_flags="true")
+
+
 @pytest.mark.vp("VP1-HOOK-040")
 def test_a_consistent_multipath_bearer_decision_is_accepted(mcx, sink):
     mgr = _altered(mcx, sink, bearer=_bearer(
@@ -809,11 +860,129 @@ def test_vp1_cc_006_a_group_within_the_decided_limit_is_whole(mcx, sink, limit):
 
 
 @pytest.mark.vp("VP1-CC-006")
-def test_a_caller_outside_the_group_takes_no_participant_place(mcx, sink):
-    session, _, refusal = _altered(mcx, sink, decision=_decide(max_participants=2)).establish(
-        req(initiator="sip:u5@mcptt.example"))
+def test_a_caller_outside_a_functional_identity_s_group_takes_no_participant_place(
+        mcx, sink, monkeypatch):
+    """6.3.5.5 NOTE 2 counts the session's participants; a caller who is not
+    one of them takes no place. Only a group named by a functional identity
+    can still have such a caller (SVC-OP-07 refuses one on a configured
+    group), so the case is made with one (review of SVC-OP-07, M2)."""
+    mgr = _altered(mcx, sink, decision=_decide(max_participants=2))
+    monkeypatch.setattr(mcx.hooks.identity_resolver, "resolve", lambda t, r: Resolution(
+        kind=ResolutionKind.GROUP, group_id=t, resolved_from=t,
+        members=tuple(f"sip:u{i}@mcptt.example" for i in range(4))))
+    session, signals, refusal = mgr.establish(req(target="fn:area",
+                                                  initiator="sip:u5@mcptt.example"))
     assert refusal is None
     assert session.members == ("sip:u0@mcptt.example", "sip:u1@mcptt.example")
+    assert [s.target for s in signals if s.type is SignalType.INVITE] == [
+        "sip:u0@mcptt.example", "sip:u1@mcptt.example"]
+
+
+@pytest.mark.vp("VP1-CC-006")
+def test_a_caller_outside_the_group_is_refused_before_the_decision(mcx, sink):
+    """SVC-OP-07 (decided 2026-10-26): a caller who is not a member is
+    refused (TS 24.379 6.3.5.2 step 5b) before IF-PRI and IF-SES admit and
+    decide are consulted; no session decision is applied to it. (It used to
+    be admitted and take no participant place.)"""
+    session, signals, refusal = _altered(
+        mcx, sink, decision=_decide(max_participants=2)).establish(
+        req(initiator="sip:u5@mcptt.example"))
+    assert session is None and [(s.type, s.target, dict(s.detail)) for s in signals] == [
+        (SignalType.RESPONSE_REJECT, "sip:u5@mcptt.example",
+         {"reason_code": "not-group-member"})]
+    assert (refusal.reason_code, refusal.detail, refusal.step) == (
+        "not-group-member", "the caller is not a member of the group", "membership")
+    assert [(r.detail["interface"], r.detail["method"])
+            for r in sink.of_type(RecordType.HOOK_INVOCATION)] == [
+        ("IF-IDR", "identities_of"), ("IF-SES", "authorise"), ("IF-IDR", "resolve")]
+    assert [r.detail["reason_code"] for r in sink.of_type(RecordType.SESSION_REFUSED)] == [
+        "not-group-member"]
+
+
+@pytest.mark.parametrize("call_type", ["prearranged-group", "emergency-group",
+                                       "imminent-peril-group", "coordination-group"])
+def test_svc_op_07_every_group_call_type_checks_membership(mcx, sink, call_type):
+    """No call type is exempt (owner 2026-10-26), emergency and imminent
+    peril included; a member's own call of each type is not refused for it."""
+    mgr = _altered(mcx, sink)
+    _, _, refusal = mgr.establish(req(call_type=call_type, initiator="sip:u5@mcptt.example",
+                                      rid="out"))
+    assert refusal.reason_code == "not-group-member"
+    _, _, refusal = mgr.establish(req(call_type=call_type, rid="in"))
+    assert refusal is None or refusal.reason_code != "not-group-member"
+
+
+def test_svc_op_07_membership_is_compared_as_sip_compares_uris(mcx, sink):
+    """Scheme and host without case, the user part exact (RFC 3261 19.1.4)."""
+    mgr = _altered(mcx, sink)
+    _, _, refusal = mgr.establish(req(initiator="SIP:u0@MCPTT.example", rid="host"))
+    assert refusal is None
+    _, _, refusal = mgr.establish(req(initiator="sip:U0@mcptt.example", rid="user"))
+    assert refusal.reason_code == "not-group-member"
+
+
+@pytest.mark.parametrize("resolved_from,code", [
+    ("fn:area", None), (None, "not-group-member")], ids=["functional", "configured"])
+def test_svc_op_07_a_group_named_by_a_functional_identity_is_not_checked(
+        mcx, sink, resolved_from, code):
+    """A group a functional identity resolved to is a binding, not a group
+    document's (TS 24.379 6.3.5.2): its members are not checked; the same
+    group resolved directly is."""
+    mgr = _with_resolver(mcx, sink, lambda t: Resolution(
+        kind=ResolutionKind.GROUP, group_id=t, resolved_from=resolved_from,
+        members=("sip:u0@mcptt.example", "sip:u1@mcptt.example")))
+    _, _, refusal = mgr.establish(req(target="fn:area", initiator="sip:u5@mcptt.example"))
+    assert (refusal.reason_code if refusal else None) == code
+
+
+def test_svc_op_07_canonical_identity():
+    """core.identity.canonical, which the membership check and
+    core.sip.canonical_uri use: scheme and host lower-cased, the user part
+    exact, surrounding space removed, anything without a scheme left alone.
+    With no `@` the whole remainder is the host, so it is lower-cased too (as
+    canonical_uri always did; members are `sip:user@host`, PLT-IDM-008)."""
+    from core.identity import canonical
+    from core.sip import canonical_uri
+    cases = {" SIP:Alice@MCPTT.Example ": "sip:Alice@mcptt.example",
+             "sips:u0@Host.example": "sips:u0@host.example",
+             "tel:+33100": "tel:+33100", " grp:Alpha ": "grp:alpha", "plain": "plain"}
+    assert {k: canonical(k) for k in cases} == cases
+    assert {k: canonical_uri(k) for k in cases} == cases
+
+
+def test_svc_op_07_a_private_call_to_a_group_is_checked_too(mcx, sink):
+    """Review of SVC-OP-07 (H1): a private call aimed at a group small enough
+    for its limit used to invite every member; it is checked like a group
+    call. A private call to a user is not a call to a group."""
+    mgr = _altered(mcx, sink)
+    mcx.hooks.identity_resolver.register_group(
+        "grp:pair", ["sip:u0@mcptt.example", "sip:u1@mcptt.example"])
+    _, signals, refusal = mgr.establish(req(call_type="private", target="grp:pair",
+                                            initiator="sip:u5@mcptt.example", rid="pg"))
+    assert refusal.reason_code == "not-group-member"
+    assert SignalType.INVITE not in types(signals)
+    session, _, refusal = mgr.establish(req(call_type="private", target="sip:u1@mcptt.example",
+                                            initiator="sip:u5@mcptt.example", rid="pu"))
+    assert refusal is None and session is not None
+
+
+@pytest.mark.parametrize("caller,members", [
+    ("SIP:u0@MCPTT.example", ["sip:u0@mcptt.example", "sip:u1@mcptt.example"]),
+    ("sip:u0@mcptt.example", ["SIP:u0@MCPTT.EXAMPLE", "sip:u1@mcptt.example"]),
+    ("sip:u0@mcptt.example", ["sip:u0@mcptt.example", "SIP:u0@MCPTT.EXAMPLE",
+                              "sip:u1@mcptt.example"]),
+], ids=["caller-differs", "member-differs", "member-twice"])
+def test_svc_op_07_a_member_written_differently_is_not_invited_to_its_own_call(
+        mcx, sink, caller, members):
+    """Review of SVC-OP-07 (M1): the caller is the member it matched, as the
+    caller wrote itself, so it is invited nowhere and counts once."""
+    mgr = _altered(mcx, sink)
+    mcx.hooks.identity_resolver.register_group("grp:case", members)
+    session, signals, refusal = mgr.establish(req(target="grp:case", initiator=caller))
+    assert refusal is None
+    assert [s.target for s in signals if s.type is SignalType.INVITE] == [
+        "sip:u1@mcptt.example"]
+    assert session.members == (caller, "sip:u1@mcptt.example")
 
 
 @pytest.mark.vp("VP1-CC-006")

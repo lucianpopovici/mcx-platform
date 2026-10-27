@@ -22,11 +22,14 @@ from profiles.common.tables import ResolutionFailure  # noqa: E402
 from core.functional import AliasPolicy, Holding  # noqa: E402
 from core.hooks import LocationContext, MediaKind, SessionRequest  # noqa: E402
 from core.session import Platform, SessionManager  # noqa: E402
+from core.errors import StartupRefused  # noqa: E402
 from tests import mcpttinfo_fixture as mcf  # noqa: E402
 
 PROFILES = ROOT / "profiles"
 ENG = [f"sip:e{i}@utility.example" for i in range(3)]
 DRV = [f"sip:d{i}@frmcs.example" for i in range(3)]
+# train-driver is keyed by train_id (FA-OP-01 item 4): train T1's driver.
+TD = "sip:T1.train-driver@frmcs.example"
 CELL_S1 = mcf.ECGI
 CELL_S2 = "001010" + "0000000000000000000100100100"
 
@@ -106,6 +109,29 @@ def test_the_role_lets_its_holder_start_the_call_type_that_needs_it():
     assert refusal is None and session is not None
 
 
+def test_a_switching_order_needs_the_role_and_membership_of_the_group():
+    """SVC-OP-07: the role lets an engineer start a switching order, on a
+    group the engineer is a member of; on one it is not, 403/116."""
+    mgr, loaded, _ = _utility()
+    others = [f"sip:x{i}@utility.example" for i in range(5)]
+    for u in others:
+        loaded.hooks.identity_resolver.register_user(u)
+    loaded.hooks.identity_resolver.register_group("grp:sw", [ENG[0]] + others)
+    assert mgr.change_functional_aliases("p1", ENG[1], ["control-engineer"], False,
+                                         None).accepted
+    _, _, refusal = mgr.establish(SessionRequest(
+        request_id="s1", initiator=ENG[1], target="grp:sw",
+        call_type="switching-order", media=(MediaKind.VOICE,)))
+    assert refusal.reason_code == "not-group-member"
+    assert mgr.change_functional_aliases("p2", ENG[1], [], False, None).accepted
+    assert mgr.change_functional_aliases("p3", ENG[0], ["control-engineer"], False,
+                                         None).accepted
+    session, _, refusal = mgr.establish(SessionRequest(
+        request_id="s2", initiator=ENG[0], target="grp:sw",
+        call_type="switching-order", media=(MediaKind.VOICE,)))
+    assert refusal is None and session is not None
+
+
 @pytest.mark.parametrize("user,wanted,code", [
     (ENG[2], ["control-engineer"], "functional-alias-not-authorised"),     # not listed
     (ENG[0], ["no-such-role"], "functional-alias-not-authorised"),
@@ -149,11 +175,11 @@ def test_a_request_lists_the_whole_set_wanted():
     """9A.2.2.2.3 steps 10-14: held and not listed is deactivated."""
     mgr, loaded, _ = _frmcs()
     s1 = LocationContext(cell_id=CELL_S1)
-    assert mgr.change_functional_aliases("p1", DRV[0], ["train-driver", "track-controller"],
+    assert mgr.change_functional_aliases("p1", DRV[0], [TD, "track-controller"],
                                          False, s1).accepted
     assert _roles(loaded, DRV[0]) == ("track-controller", "train-driver")
     out = mgr.change_functional_aliases("p2", DRV[0], ["track-controller"], False, s1)
-    assert out.deactivated == (Holding("train-driver", "", DRV[0]),) and not out.activated
+    assert out.deactivated == (Holding("train-driver", "T1", DRV[0]),) and not out.activated
     out = mgr.change_functional_aliases("p3", DRV[0], [], False, None)
     assert out.deactivated == (Holding("track-controller", "S1", DRV[0]),)
     assert _roles(loaded, DRV[0]) == () and mgr.functional.holdings() == ()
@@ -208,14 +234,14 @@ def test_a_resolver_failing_part_way_leaves_every_holder_as_it_was(monkeypatch):
 def test_holders_kept_across_a_restart_are_bound_again_if_still_allowed():
     mgr, loaded, sink = _frmcs()
     kept = mgr.restore_functional_aliases([
-        Holding("train-driver", "", DRV[0]),
+        Holding("train-driver", "T1", DRV[0]),
         Holding("track-controller", "S2", DRV[1]),
-        Holding("train-driver", "", "sip:gone@frmcs.example"),     # not allowed now
+        Holding("train-driver", "T1", "sip:gone@frmcs.example"),   # not allowed now
         Holding("track-controller", "", DRV[2]),                    # no location
-        Holding("train-driver", "S1", DRV[2]),                      # not per location
+        Holding("train-driver", "", DRV[2]),                        # no train id
         Holding("rec-area", "S1", DRV[2]),                          # not a user's
     ], "process-start")
-    assert kept == (Holding("train-driver", "", DRV[0]),
+    assert kept == (Holding("train-driver", "T1", DRV[0]),
                     Holding("track-controller", "S2", DRV[1]))
     assert _roles(loaded, DRV[1]) == ("track-controller",)
     dropped = [r for r in _records(sink, RecordType.BINDING_CHANGED)
@@ -291,17 +317,17 @@ def test_a_role_the_resolver_will_not_unbind_stays_in_the_ledger(monkeypatch):
     monkeypatch.setattr(resolver, "bind", bind)
     monkeypatch.setattr(resolver, "unbind", _down)
     saved = []
-    out = mgr.change_functional_aliases("p1", DRV[0], ["train-driver", "track-controller"],
+    out = mgr.change_functional_aliases("p1", DRV[0], [TD, "track-controller"],
                                         False, LocationContext(cell_id=CELL_S1),
                                         persist=saved.append)
     assert out.reason_code == "resolver-unavailable"
-    left = (Holding("train-driver", "", DRV[0]),)
+    left = (Holding("train-driver", "T1", DRV[0]),)
     assert mgr.functional.holdings() == left and _roles(loaded, DRV[0]) == ("train-driver",)
     assert saved == [(), left]
     # The failed bind is unbound too, in case the resolver took it; it will
     # not unbind, so that is recorded, without a holding in the ledger.
     assert _records(sink, RecordType.BINDING_CHANGED) == [{
-        "action": "rollback-incomplete", "identity": "train-driver", "slot": "",
+        "action": "rollback-incomplete", "identity": "train-driver", "slot": "T1",
         "holder": DRV[0], "reason": "resolver-unavailable"}, {
         "action": "rollback-uncertain", "identity": "track-controller", "slot": "S1",
         "holder": DRV[0], "reason": "resolver-unavailable"}]
@@ -353,7 +379,7 @@ def test_a_take_over_the_resolver_will_not_undo_keeps_the_taker(monkeypatch):
         "track-controller": AliasPolicy(users=frozenset(DRV))},
         {CELL_S1: {"track_section": "S1"}})
     s1 = LocationContext(cell_id=CELL_S1)
-    assert mgr.change_functional_aliases("p1", DRV[0], ["train-driver"], False, None).accepted
+    assert mgr.change_functional_aliases("p1", DRV[0], [TD], False, None).accepted
     resolver = loaded.hooks.identity_resolver
     real_bind = resolver.bind
 
@@ -365,10 +391,10 @@ def test_a_take_over_the_resolver_will_not_undo_keeps_the_taker(monkeypatch):
     real_unbind = resolver.unbind
     monkeypatch.setattr(resolver, "unbind", lambda i, u: _down() if u == DRV[1]
                         else real_unbind(i, u))
-    out = mgr.change_functional_aliases("p2", DRV[1], ["train-driver", "track-controller"],
+    out = mgr.change_functional_aliases("p2", DRV[1], [TD, "track-controller"],
                                         True, s1)
     assert out.reason_code == "resolver-unavailable"
-    assert mgr.functional.holdings() == (Holding("train-driver", "", DRV[1]),)
+    assert mgr.functional.holdings() == (Holding("train-driver", "T1", DRV[1]),)
     assert (_roles(loaded, DRV[0]), _roles(loaded, DRV[1])) == ((), ("train-driver",))
     assert [(r["action"], r["holder"], r["reason"])
             for r in _records(sink, RecordType.BINDING_CHANGED)[1:]] == [
@@ -406,6 +432,104 @@ def test_restore_drops_a_location_no_cell_gives_any_more():
                 "holder": DRV[0], "reason": "unknown-location"}]
 
 
+def test_the_sessions_of_a_role_are_those_it_started_or_was_reached_by():
+    """FA-OP-01 item 4: a call the holder started as a call type that needs
+    the role (unless it holds another role the call type accepts), and a
+    call addressed to the role that reached it."""
+    mgr, loaded, _ = _frmcs()
+    s1 = LocationContext(cell_id=CELL_S1)
+    assert mgr.change_functional_aliases("p0", DRV[0], ["track-controller"], False, s1).accepted
+    assert mgr.change_functional_aliases("p2", DRV[2], [TD], False, None).accepted
+
+    def call(rid, initiator, target):
+        session, _, refusal = mgr.establish(SessionRequest(
+            request_id=rid, initiator=initiator, target=target, call_type="driver-controller",
+            media=(MediaKind.VOICE,), location=s1))
+        assert refusal is None, refusal
+    call("started", DRV[0], DRV[1])                   # d0 needs track-controller for it
+    call("reached", DRV[2], "track-controller")       # addressed to the role, reached d0
+    call("other", DRV[2], DRV[1])                     # nothing to do with d0's role
+    session, _, refusal = mgr.establish(SessionRequest(   # d0's, but needs no role
+        request_id="no-role", initiator=DRV[0], target=DRV[1], call_type="etcs-ipcon",
+        media=(MediaKind.DATA,), location=s1))
+    assert refusal is None, refusal
+    assert mgr.sessions_of_role("track-controller", DRV[0]) == ("started", "reached")
+    assert mgr.sessions_of_role("train-driver", DRV[0]) == ()
+    # Compared as SIP compares URIs, for the calls it started too.
+    assert mgr.sessions_of_role("track-controller", "SIP:d0@FRMCS.EXAMPLE") == (
+        "started", "reached")
+    # A call addressed to the alias that reached its holder at another
+    # section is that holder's, not d0's.
+    s2 = LocationContext(cell_id=CELL_S2)
+    assert mgr.change_functional_aliases("p1", DRV[1], ["track-controller"], False,
+                                         s2).accepted
+    session, _, refusal = mgr.establish(SessionRequest(
+        request_id="reached-s2", initiator=DRV[2], target="track-controller",
+        call_type="driver-controller", media=(MediaKind.VOICE,), location=s2))
+    assert refusal is None and session.members[-1] == DRV[1]
+    assert mgr.sessions_of_role("track-controller", DRV[0]) == ("started", "reached")
+    # Holding another role the call type accepts, d0's own call needs neither
+    # (train-driver is one holder network-wide, so d2 lets it go first).
+    assert mgr.change_functional_aliases("p4", DRV[2], [], False, None).accepted
+    assert mgr.change_functional_aliases("p3", DRV[0], ["track-controller", TD],
+                                         False, s1).accepted
+    assert mgr.sessions_of_role("track-controller", DRV[0]) == ("reached",)
+    # Compared as SIP compares URIs.
+    assert mgr.sessions_of_role("track-controller", "SIP:d0@FRMCS.example") == ("reached",)
+
+
+def test_an_emergency_call_is_never_a_role_s_to_release():
+    """FA-OP-01 item 4, owner ruling 2026-10-27: a railway emergency call the
+    controller started with track-controller is never selected, however the
+    role was used; nor an mcx emergency or imminent peril call (their call
+    types carry the TS 24.379 indication)."""
+    mgr, loaded, _ = _frmcs()
+    s1 = LocationContext(cell_id=CELL_S1)
+    assert mgr.change_functional_aliases("p0", DRV[0], ["track-controller"], False, s1).accepted
+    assert mgr.change_functional_aliases("p2", DRV[2], [TD], False, None).accepted
+    session, _, refusal = mgr.establish(SessionRequest(
+        request_id="rec", initiator=DRV[0], target="", call_type="rec-broadcast",
+        media=(MediaKind.VOICE,), location=s1, adhoc=True,
+        participant_criteria="train-driver"))
+    assert refusal is None, refusal
+    session, _, refusal = mgr.establish(SessionRequest(
+        request_id="dc", initiator=DRV[0], target=DRV[1], call_type="driver-controller",
+        media=(MediaKind.VOICE,), location=s1))
+    assert refusal is None, refusal
+    assert mgr.sessions_of_role("track-controller", DRV[0]) == ("dc",)
+    signatures = {ct.id: ct.mc_signature for ct in loaded.profile.call_types}
+    assert signatures["rec-broadcast"].emergency is True
+
+
+@pytest.mark.parametrize("flag", ["emergency", "imminent_peril"])
+def test_a_call_type_with_either_indication_is_never_released(monkeypatch, flag):
+    """No shipped role-restricted call type carries imminent peril, so a
+    switching order is given each indication here."""
+    import dataclasses
+    mgr, loaded, _ = _utility()
+    others = [f"sip:x{i}@utility.example" for i in range(5)]
+    for u in others:
+        loaded.hooks.identity_resolver.register_user(u)
+    loaded.hooks.identity_resolver.register_group("grp:sw", ENG + others)
+    assert mgr.change_functional_aliases("p1", ENG[0], ["control-engineer"], False,
+                                         None).accepted
+    assert mgr.establish(SessionRequest(
+        request_id="s1", initiator=ENG[0], target="grp:sw", call_type="switching-order",
+        media=(MediaKind.VOICE,)))[2] is None
+    assert mgr.sessions_of_role("control-engineer", ENG[0]) == ("s1",)
+    cls = type(loaded.profile)
+    real = cls.call_type
+
+    def call_type(self, cid):
+        ct = real(self, cid)
+        if cid != "switching-order":
+            return ct
+        return dataclasses.replace(ct, mc_signature=dataclasses.replace(
+            ct.mc_signature, **{flag: True}))
+    monkeypatch.setattr(cls, "call_type", call_type)
+    assert mgr.sessions_of_role("control-engineer", ENG[0]) == ()
+
+
 def test_restore_keeps_one_holder_of_a_single_holder_identity():
     """Review SVC-OP-06 #6: the first kept wins; the others are dropped."""
     mgr, loaded, sink = _utility()
@@ -439,6 +563,79 @@ def test_a_multi_holder_identity_has_no_holder_limit(monkeypatch):
         assert mgr2.change_functional_aliases(cid, user, ["control-engineer"], False,
                                               None).accepted
     assert mgr2.functional.holdings() == both
+
+
+@pytest.fixture
+def capped(monkeypatch):
+    """control-engineer made multi-holder, at most two, all three engineers
+    allowed and the third allowed to take over (FA-OP-01 item 3)."""
+    import dataclasses
+    mgr, loaded, sink = _manager("utility", ENG, {"control-engineer": AliasPolicy(
+        users=frozenset(ENG), take_over=frozenset([ENG[2]]), max_holders=2)})
+    cls = type(loaded.profile)
+    real = cls.functional_identity
+    multi = dataclasses.replace(real(loaded.profile, "control-engineer"),
+                                multiplicity="multi")
+    monkeypatch.setattr(cls, "functional_identity",
+                        lambda self, i: multi if i == "control-engineer" else real(self, i))
+    return mgr, loaded, sink
+
+
+def test_max_holders_refuses_one_more_unless_taken_over(capped):
+    """9A.2.2.3.3 steps 5 and 6 with <max-simultaneous-activations> 2: a third
+    is refused functional-alias-held; with take-over, the earliest holder
+    makes room."""
+    mgr, loaded, _ = capped
+    for cid, user in (("p0", ENG[0]), ("p1", ENG[1])):
+        assert mgr.change_functional_aliases(cid, user, ["control-engineer"], False,
+                                             None).accepted
+    held = mgr.change_functional_aliases("p2", ENG[2], ["control-engineer"], False, None)
+    assert (held.reason_code, held.detail) == (
+        "functional-alias-held", "'control-engineer' at 'any location' is held by "
+        f"{ENG[0]}, {ENG[1]} (at most 2)")
+    # A holder publishing again is not one more.
+    assert mgr.change_functional_aliases("p3", ENG[1], ["control-engineer"], False,
+                                         None).accepted
+    taken = mgr.change_functional_aliases("p4", ENG[2], ["control-engineer"], True, None)
+    assert taken.accepted and taken.displaced == (Holding("control-engineer", "", ENG[0]),)
+    assert mgr.functional.holdings() == (Holding("control-engineer", "", ENG[1]),
+                                         Holding("control-engineer", "", ENG[2]))
+    assert [_roles(loaded, u) for u in ENG] == [(), ("control-engineer",),
+                                                ("control-engineer",)]
+
+
+def test_the_order_holders_activated_survives_a_restart(capped, tmp_path):
+    """Review of FA-OP-01 item 3: the holders are kept in the order they
+    activated, not by URI, so after a restart a take-over still displaces
+    the earliest (e1 here, though e0 sorts first)."""
+    from service.store import SqliteStore
+    mgr, _, _ = capped
+    saved = []
+    for cid, user in (("p1", ENG[1]), ("p0", ENG[0])):
+        assert mgr.change_functional_aliases(cid, user, ["control-engineer"], False, None,
+                                             persist=saved.append).accepted
+    order = (Holding("control-engineer", "", ENG[1]), Holding("control-engineer", "", ENG[0]))
+    assert saved[-1] == order
+    store = SqliteStore(tmp_path / "data")
+    try:
+        store.save_holdings([(h.identity, h.slot, h.holder) for h in order])
+        stored = [Holding(*h) for h in store.holdings()]
+    finally:
+        store.close()
+    assert tuple(stored) == order
+    mgr2, _, _ = _manager("utility", ENG, {"control-engineer": AliasPolicy(
+        users=frozenset(ENG), take_over=frozenset([ENG[2]]), max_holders=2)})
+    assert mgr2.restore_functional_aliases(stored, "process-start") == order
+    taken = mgr2.change_functional_aliases("p2", ENG[2], ["control-engineer"], True, None)
+    assert taken.displaced == (Holding("control-engineer", "", ENG[1]),)
+
+
+def test_restore_keeps_no_more_than_max_holders(capped):
+    mgr, _, sink = capped
+    three = [Holding("control-engineer", "", u) for u in ENG]
+    assert mgr.restore_functional_aliases(three, "process-start") == tuple(three[:2])
+    assert [(r["holder"], r["reason"]) for r in _records(sink, RecordType.BINDING_CHANGED)
+            if r["action"] == "dropped-at-restart"] == [(ENG[2], "already-held")]
 
 
 # ============================================================ the PIDF body (9A.3.1)
@@ -502,7 +699,7 @@ def test_a_pidf_body_that_is_not_9a_3_1_is_refused(body, says):
 # ============================================================ PUBLISH, end to end
 
 from tests.test_sip_transport import (  # noqa: E402
-    LOCAL, SDP, Flow, invite, msg, network_yaml, pki, sip_env)
+    LOCAL, SDP, Flow, answer, invite, msg, network_yaml, pki, sip_env)
 from service.runtime import build_runtime  # noqa: E402
 from service.sip_core import SipCore  # noqa: E402
 
@@ -520,7 +717,7 @@ def publish(user, aliases, *, expires="4294967295", take_over=None, cell=None,
                ctype=mcf.CONTENT_TYPE)
 
 
-def utility_env(tmp_path, pki, release="19", take_over=()):
+def utility_env(tmp_path, pki, release="19", take_over=(), **over):
     users = ENG + [f"sip:x{i}@utility.example" for i in range(5)]
     net = network_yaml(tmp_path, fname="utility-net.yaml",
                        trusted_cores=["core-client.example"], core_ca=pki / "core-ca.crt",
@@ -529,7 +726,7 @@ def utility_env(tmp_path, pki, release="19", take_over=()):
                        functional_aliases=[{"id": "control-engineer", "users": ENG[:2],
                                             "take_over": list(take_over)}])
     return sip_env(tmp_path, pki, MCX_PROFILE="utility", MCX_RELEASE=release,
-                   MCX_NETWORK_FILE=str(net))
+                   MCX_NETWORK_FILE=str(net), **over)
 
 
 def _start(env):
@@ -670,6 +867,111 @@ def test_take_over_over_sip(tmp_path, pki):
     finally:
         core.close()
         rt.close()
+
+
+@pytest.mark.parametrize("setting,released", [(None, False), ("keep", False),
+                                              ("release", True)],
+                         ids=["default", "keep", "release"])
+def test_a_displaced_holder_s_call_is_kept_or_released_as_stated(tmp_path, pki, setting,
+                                                                 released):
+    """FA-OP-01 item 4 (owner ruling 2026-10-27, MCX_DISPLACED_HOLDER_CALLS,
+    default keep): e0 starts a switching order with control-engineer; e1
+    takes the alias over. Kept, the call goes on; released, it ends with
+    cause functional-alias-taken-over and every leg gets a BYE."""
+    over = {} if setting is None else {"MCX_DISPLACED_HOLDER_CALLS": setting}
+    rt, core = _start(utility_env(tmp_path, pki, take_over=[ENG[1]], **over))
+    try:
+        snap = rt.health.snapshot()
+        assert snap["settings"]["MCX_DISPLACED_HOLDER_CALLS"] == (setting or "keep")
+        # Neither value departs from TS 24.379, which says nothing on it.
+        assert "MCX_DISPLACED_HOLDER_CALLS" not in [d["setting"] for d in snap["deviations"]]
+        f0 = Flow(ENG[0])
+        legs = {u: Flow(u) for u in ENG[1:] + [f"sip:x{i}@utility.example" for i in range(5)]}
+        f1 = legs[ENG[1]]
+        for u, f in legs.items():
+            core.on_bytes(msg("REGISTER", "sip:utility.example", f"r-{u}", 1, u, u,
+                              extra=[f"Contact: <{u}>"]), f)
+        core.on_bytes(publish(ENG[0], ["control-engineer"], call_id="a"), f0)
+        core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f0)
+        # A switching order is held to 4 (PRF-OP-01): e0 and three invited.
+        invited = sorted(u for u, f in legs.items() if f.requests("INVITE"))
+        assert len(invited) == 3
+        for u in invited:                      # each invited member answers
+            core.on_bytes(answer(legs[u].requests("INVITE")[0], 200, SDP, tag=f"t{u[4:6]}"),
+                          legs[u])
+        assert [s.correlation_id for s in rt.manager.active] == ["sw1"]
+        assert rt.manager.sessions_of_role("control-engineer", ENG[0]) == ("sw1",)
+        core.on_bytes(publish(ENG[1], ["control-engineer"], take_over="true", call_id="b"), f1)
+        assert [m.code for m in f1.messages() if getattr(m, "code", None)][-1] == 200
+        assert [s.correlation_id for s in rt.manager.active] == ([] if released else ["sw1"])
+        causes = [r["detail"].get("cause") for r in rt.store.audit_records("sw1")
+                  if r["type"] == "session-released"]
+        assert causes == (["functional-alias-taken-over"] if released else [])
+        byes = sorted(u for u, f in legs.items() if f.requests("BYE"))
+        assert byes == (invited if released else [])
+        assert bool(f0.requests("BYE")) is released     # the caller is told too
+        # Ended through the SIP call, so its dialog and media go with it.
+        assert ("sw1" in core.calls) is not released
+    finally:
+        core.close()
+        rt.close()
+
+
+def test_a_call_that_cannot_be_released_does_not_undo_the_take_over(tmp_path, pki,
+                                                                   monkeypatch, caplog):
+    """Review of FA-OP-01 item 4 (M2): the take-over is already in force when
+    the calls are released; one that fails is logged, the next is still
+    released, and the PUBLISH is answered 200."""
+    import logging
+    rt, core = _start(utility_env(tmp_path, pki, take_over=[ENG[1]],
+                                  MCX_DISPLACED_HOLDER_CALLS="release"))
+    try:
+        f0 = Flow(ENG[0])
+        legs = {u: Flow(u) for u in ENG[1:] + [f"sip:x{i}@utility.example" for i in range(5)]}
+        for u, f in legs.items():
+            core.on_bytes(msg("REGISTER", "sip:utility.example", f"r-{u}", 1, u, u,
+                              extra=[f"Contact: <{u}>"]), f)
+        f1 = legs[ENG[1]]
+        core.on_bytes(publish(ENG[0], ["control-engineer"], call_id="a"), f0)
+        core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f0)
+        core.on_bytes(invite("sw2", ENG[0], "grp:sw", "prearranged-group",
+                             from_tag="ft2"), f0)
+        assert [s.correlation_id for s in rt.manager.active] == ["sw1", "sw2"]
+        real, failed = core._end, []
+
+        def end(call, cause, skip=None):
+            if not failed:
+                failed.append(call.cid)
+                raise RuntimeError("leg failure")
+            return real(call, cause, skip)
+        monkeypatch.setattr(core, "_end", end)
+        with caplog.at_level(logging.ERROR, logger="mcx.sip"):
+            core.on_bytes(publish(ENG[1], ["control-engineer"], take_over="true",
+                                  call_id="b"), f1)
+        assert [m.code for m in f1.messages() if getattr(m, "code", None)][-1] == 200
+        assert rt.store.holdings() == [("control-engineer", "", ENG[1])]
+        assert [s.correlation_id for s in rt.manager.active] == failed == ["sw1"]
+        assert any("session sw1: its holder's functional alias control-engineer was taken "
+                   "over, but the call could not be released" in m for m in caplog.messages)
+    finally:
+        core.close()
+        rt.close()
+
+
+def test_the_displaced_holder_calls_setting_takes_two_values(tmp_path, pki):
+    from service.config import Config
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(utility_env(tmp_path, pki, MCX_DISPLACED_HOLDER_CALLS="drop"))
+    assert str(exc.value) == "MCX_DISPLACED_HOLDER_CALLS='drop' must be 'keep' or 'release'"
+    env = utility_env(tmp_path, pki, MCX_DISPLACED_HOLDER_CALLS="RELEASE")
+    assert Config.from_env(env).sip.displaced_holder_calls == "release"
+    plain = {k: v for k, v in env.items() if not k.startswith("MCX_SIP_")
+             and k not in ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER",
+                           "MCX_LOCATION_REPORTS", "MCX_SESSION_EXPIRES_MS")}
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(plain)
+    assert str(exc.value) == ("MCX_DISPLACED_HOLDER_CALLS is set but SIP is not enabled "
+                              "(MCX_SIP_LISTEN)")
 
 
 def test_holders_survive_a_restart(tmp_path, pki):

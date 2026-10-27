@@ -638,11 +638,14 @@ def test_vp1_hook_040_bearer_decision_well_formed(name):
             request = request_for(ct.id, media=media)
             priority = lp.hooks.priority_policy.evaluate(request, res)
             d = lp.hooks.bearer_selector.select(request, priority, media)
-            SessionManager._check_bearer(d, priority)
+            # Both flags (ICD-OP-14): every in-tree profile passes the check a
+            # deployment may turn on (the frmcs etcs-ipcon rule was corrected).
+            SessionManager._check_bearer(d, priority, both_flags=True)
             assert sum(1 for p in d.paths if p.primary) == 1
             assert len({p.path_id for p in d.paths}) == len(d.paths)
             assert (len(d.paths) == 1) == (d.redundancy == "single")
             assert not d.arp_preemption_capability or priority.preemption_capability
+            assert d.arp_preemption_vulnerability or priority.preemption_vulnerability is False
             seen += 1
     assert seen >= len(lp.profile.call_types)
 
@@ -779,10 +782,11 @@ def test_a_group_source_supplying_a_foreign_member_refuses_the_group(mcx, foreig
 
 def test_vp1_hook_013_resolved_from_recorded(frmcs):
     r = frmcs.hooks.identity_resolver
-    r.bind("train-driver", "sip:driver1@frmcs.example", None)
-    res = r.resolve("train-driver", request_for("driver-controller",
-                                                target="train-driver"))
-    assert res.resolved_from == "train-driver"
+    r.bind("train-driver", "sip:driver1@frmcs.example",
+           LocationContext(attributes={"train_id": "T1"}))
+    target = "sip:T1.train-driver@frmcs.example"       # FA-OP-01 item 4: per train
+    res = r.resolve(target, request_for("driver-controller", target=target))
+    assert res.resolved_from == target
     assert res.members == ("sip:driver1@frmcs.example",)
 
 
@@ -822,10 +826,11 @@ def test_location_dependent_resolution(frmcs):
 def test_single_holder_binding_replaces(frmcs):
     """ICD-OP-02: provisional choice, asserted so a change of mind is visible."""
     r = frmcs.hooks.identity_resolver
-    r.bind("train-driver", "sip:d1@frmcs.example", None)
-    r.bind("train-driver", "sip:d2@frmcs.example", None)
-    res = r.resolve("train-driver", request_for("driver-controller",
-                                                target="train-driver"))
+    t1 = LocationContext(attributes={"train_id": "T1"})
+    r.bind("train-driver", "sip:d1@frmcs.example", t1)
+    r.bind("train-driver", "sip:d2@frmcs.example", t1)
+    target = "sip:T1.train-driver@frmcs.example"
+    res = r.resolve(target, request_for("driver-controller", target=target))
     assert res.members == ("sip:d2@frmcs.example",)
 
 

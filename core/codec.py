@@ -70,7 +70,7 @@ NOT_VOICE = frozenset({"TELEPHONE-EVENT", "CN", "RED", "ULPFEC"})
 _RTPMAP = re.compile(
     r"^a=rtpmap:([0-9]{1,3})\s+([^/\s]+)/([0-9]{1,6})(?:/([0-9]{1,2}))?\s*$", re.I)
 _FMTP = re.compile(r"^a=fmtp:([0-9]{1,3})\s+(.*)$", re.I)
-NAME = re.compile(r"^[A-Za-z0-9._-]+/\d+(?:/\d+)?$")
+NAME = re.compile(r"^[A-Za-z0-9._-]+/[0-9]+(?:/[0-9]+)?$")
 
 
 def key_of(name: str) -> Tuple[str, int, int]:

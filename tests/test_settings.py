@@ -63,7 +63,8 @@ def _plain_env(tmp_path, **over):
            "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_HTTP_PORT": "0",
            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
-           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ENV": "test"}
+           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ARP_VULNERABILITY_CHECK": "true",
+           "MCX_ENV": "test"}
     env.update(over)
     return {k: v for k, v in env.items() if v is not None}
 
@@ -364,6 +365,40 @@ def test_the_in_tree_mcx_deployment_reports_its_deviations(tmp_path, caplog):
         warned = [m for m in caplog.messages if m.startswith("deviation: ")]
         assert len(warned) == len(snap["deviations"])
         assert any("MCX_HTTP_TLS=off departs from PLT-SRS 3.1 HTTP-1" in m for m in warned)
+    finally:
+        r.close()
+
+
+def test_the_arp_vulnerability_check_is_required_with_no_default(tmp_path):
+    """ICD-OP-14 (owner ruling 2026-10-26): MCX_ARP_VULNERABILITY_CHECK."""
+    env = _plain_env(tmp_path, MCX_ARP_VULNERABILITY_CHECK=None)
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env(env)
+    assert str(exc.value) == (
+        "MCX_ARP_VULNERABILITY_CHECK is not set: state whether a bearer decision's ARP "
+        "pre-emption vulnerability must agree with the priority decision's (PLT-ICD-001 "
+        "ICD-OP-14) ('true' or 'false'); there is no default")
+    with pytest.raises(StartupRefused) as exc:
+        Config.from_env({**env, "MCX_ARP_VULNERABILITY_CHECK": "yes"})
+    assert "MCX_ARP_VULNERABILITY_CHECK='yes' must be 'true' or 'false'" in str(exc.value)
+
+
+@pytest.mark.parametrize("value,checked", [("true", True), ("FALSE", False)])
+def test_the_arp_vulnerability_check_is_in_force_and_false_is_a_deviation(
+        tmp_path, value, checked):
+    r = build_runtime(_plain_env(tmp_path, MCX_ARP_VULNERABILITY_CHECK=value), Clock())
+    try:
+        assert r.manager._arp_both_flags is checked
+        snap = r.health.snapshot()
+        assert snap["settings"]["MCX_ARP_VULNERABILITY_CHECK"] == value.lower()
+        found = [d for d in snap["deviations"] if d["setting"] == "MCX_ARP_VULNERABILITY_CHECK"]
+        assert found == ([] if checked else [{
+            "setting": "MCX_ARP_VULNERABILITY_CHECK", "value": "false", "ref": "ICD-OP-14",
+            "departs_from": "PLT-ICD-001 §6.1 POST-5 (ARP pre-emption consistent with the "
+                            "priority decision), for the vulnerability flag",
+            "consequence": "a bearer decision may make a call immune to pre-emption at the "
+                           "network that its priority decision leaves open to it"}])
+        assert _started(r)["deviations"] == snap["deviations"]
     finally:
         r.close()
 

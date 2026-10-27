@@ -24,6 +24,19 @@ def domain_of(identity: str) -> Optional[str]:
     return m.group(2).lower() if m else None
 
 
+def canonical(identity: str) -> str:
+    """An identity for comparison: scheme and host lower-cased, the user part
+    left as it is (RFC 3261 19.1.4 compares the user part case-sensitively,
+    and so do the directory and the registration store). Text that is not
+    `scheme:...` is returned stripped and otherwise unchanged."""
+    identity = identity.strip()
+    scheme, colon, rest = identity.partition(":")
+    if not colon:
+        return identity
+    user, at, host = rest.rpartition("@")
+    return f"{scheme.lower()}:{user}{at}{host.lower()}"
+
+
 def outside(identities: Iterable[str], domains: Iterable[str]) -> list:
     """The identities that are not within one of `domains`."""
     declared = {d.lower() for d in domains}

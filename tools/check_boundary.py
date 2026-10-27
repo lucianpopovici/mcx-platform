@@ -3220,9 +3220,10 @@ PRIORITY_USES: Dict[Tuple[str, str], Tuple[frozenset, str]] = {
     ("core/session.py", "SessionManager.preemption_victims"): (frozenset({"scope"}),
         "IF-PRI decisions' scopes (PLT-ICD-001 4.2 POST-1), then IF-PRI compare"),
     ("core/session.py", "SessionManager._check_bearer"): (
-        frozenset({"arp_level", "priority", "preemption_capability"}),
-        "IF-BRG's ARP level against the TS 23.501 range, and its pre-emption request "
-        "against IF-PRI's decision (contract checks)"),
+        frozenset({"arp_level", "priority", "preemption_capability",
+                   "preemption_vulnerability"}),
+        "IF-BRG's ARP level against the TS 23.501 range, and its pre-emption flags "
+        "against IF-PRI's decision (contract checks; vulnerability since ICD-OP-14)"),
     ("core/validation.py", "_priority_totality"): (frozenset({"urgency"}),
         "checks at load that the declared table covers every call type"),
     ("core/validation.py", "_bearer_totality"): (frozenset(),

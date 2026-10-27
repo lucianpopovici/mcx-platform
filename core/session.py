@@ -44,6 +44,7 @@ from .errors import (
     PARTNER_NOT_PERMITTED,
     PARTICIPANT_LIMIT_EXCEEDED,
     INITIATOR_NOT_SERVED,
+    NOT_GROUP_MEMBER,
     PARTNER_UNAVAILABLE,
     QOS_UNAVAILABLE,
     RECORDING_UNAVAILABLE,
@@ -187,6 +188,7 @@ class SessionManager:
                  cells: Optional[Mapping[str, Mapping[str, str]]] = None,
                  floor_unrecorded: str = "deny",
                  foreign_initiator: str = "refuse",
+                 arp_both_flags: bool = True,
                  functional_aliases: Optional[Mapping[str, AliasPolicy]] = None) -> None:
         self._loaded = loaded
         # The core holds each hook through a view that exposes only the
@@ -235,6 +237,12 @@ class SessionManager:
             raise ValueError(f"foreign_initiator {foreign_initiator!r} is not one of "
                              f"{', '.join(FOREIGN_INITIATOR)}")
         self._foreign_initiator = foreign_initiator
+        # ICD-OP-14 (owner ruling 2026-10-26, MCX_ARP_VULNERABILITY_CHECK,
+        # required in the service): whether §6.1 POST-5 also holds the bearer
+        # decision's ARP pre-emption vulnerability to the priority decision's.
+        if not isinstance(arp_both_flags, bool):
+            raise ValueError(f"arp_both_flags {arp_both_flags!r} is not a boolean")
+        self._arp_both_flags = arp_both_flags
         # SVC-OP-06 (decided 2026-10-23): who holds which functional identity,
         # activated by the users the deployment allows (TS 24.379 clause 9A).
         # The host feeds it requests; the holders it keeps are what
@@ -304,9 +312,12 @@ class SessionManager:
             return self.functional.refuse(correlation_id, user, wanted,
                                           exc.reason_code, str(exc))
         if persist is not None:
-            after = {*self.functional.holdings()} - removed | set(outcome.activated)
+            # In the ledger's order, the new holders last: the order holders
+            # activated survives a restart (review of FA-OP-01 item 3).
+            after = tuple(h for h in self.functional.holdings() if h not in removed) + \
+                tuple(h for h in outcome.activated if h not in self.functional.holdings())
             try:
-                persist(tuple(sorted(after, key=lambda h: (h.identity, h.slot, h.holder))))
+                persist(after)
             except Exception as store_exc:                      # noqa: BLE001
                 not_persisted("after-resolver", store_exc)
                 self._roll_back_aliases(correlation_id, invoker, bound, undone)
@@ -323,10 +334,11 @@ class SessionManager:
 
         `pending` is the holding whose bind failed (the last one tried): the
         resolver may have taken it all the same (a deadline overrun, an
-        unrecordable result), so it is unbound too; unbinding nothing is a no-op (§3.3 POST-2). A
-        single-holder identity the taker could not be unbound from keeps the
-        taker: the holder it was taken from is not bound again (the resolver
-        would replace the taker) but dropped, as taken over."""
+        unrecordable result), so it is unbound too; unbinding nothing is a no-op (§3.3 POST-2). An
+        identity the taker could not be unbound from keeps the taker: the
+        holder it was taken from is not bound again (for a single-holder
+        identity the resolver would replace the taker; for one at its
+        max_holders it would exceed it) but dropped, as taken over."""
         stuck = set()
         for h in (*bound, *((pending,) if pending else ())):
             try:
@@ -344,7 +356,8 @@ class SessionManager:
                                    action="rollback-incomplete", identity=h.identity,
                                    slot=h.slot, holder=h.holder, reason=exc.reason_code)
         for h in undone:
-            # Only a take-over displaces, and only of a single-holder identity.
+            # Only a take-over displaces: of a single-holder identity, or of a
+            # multi-holder one at its max_holders (FA-OP-01 item 3).
             if (h.identity, h.slot) in stuck:
                 self.functional.drop(h)
                 self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,
@@ -360,6 +373,33 @@ class SessionManager:
                                    action="dropped-on-rollback", identity=h.identity,
                                    slot=h.slot, holder=h.holder, reason=exc.reason_code)
 
+    def sessions_of_role(self, identity_id: str, holder: str) -> Tuple[str, ...]:
+        """The established sessions `holder` takes part in because it held
+        functional identity `identity_id` (PLT-VP-R1 FA-OP-01 item 4): those
+        it started as a call type that needs the identity, unless it still
+        holds another role the call type accepts; and those addressed to the
+        identity that reached it. Never an emergency or imminent peril call
+        (its call type's TS 24.379 indication; owner ruling 2026-10-27).
+        Correlation ids, oldest first. The service decides what to do with
+        them (MCX_DISPLACED_HOLDER_CALLS)."""
+        who = identity.canonical(holder)
+        others = {h.identity for h in self.functional.holdings()
+                  if identity.canonical(h.holder) == who} - {identity_id}
+        out = []
+        for s in self.active:
+            declared = self._profile.call_type(s.request.call_type)
+            signature = declared.mc_signature if declared is not None else None
+            if signature is not None and (signature.emergency or signature.imminent_peril):
+                continue
+            needed = set(declared.initiator_roles) if declared is not None else set()
+            started = identity.canonical(s.request.initiator) == who and \
+                identity_id in needed and not needed & others
+            reached = self.functional.addressed(s.resolution.resolved_from) == identity_id and \
+                who in {identity.canonical(m) for m in s.members}
+            if started or reached:
+                out.append(s.correlation_id)
+        return tuple(out)
+
     def restore_functional_aliases(self, holdings: Sequence[Holding],
                                    correlation_id: str) -> Tuple[Holding, ...]:
         """Holders the host kept across a restart, bound again. One the
@@ -373,7 +413,11 @@ class SessionManager:
             reason = None
             if not self.functional.restorable(h):
                 reason = "not-allowed"
-            elif h.slot and not self._slot_mapped(h):
+            elif any(k.identity == h.identity and k.holder == h.holder for k in kept):
+                # One value per user (review of FA-OP-01 item 4).
+                reason = "one-per-user"
+            elif h.slot and self.functional.location_key(h.identity) and \
+                    not self._slot_mapped(h):
                 reason = "unknown-location"
             elif self.functional.single_held(h):
                 reason = "already-held"
@@ -473,6 +517,30 @@ class SessionManager:
                                           self._hooks.identity_resolver.resolve,
                                           request.target, request,
                                           post=self._check_resolution)
+                if resolution.kind is ResolutionKind.GROUP:
+                    # The caller, where it is a member, as the caller wrote
+                    # itself: compared as SIP compares URIs (scheme and host
+                    # without case, RFC 3261 19.1.4), as it was authenticated,
+                    # so it is not invited to its own call and counts once.
+                    caller = identity.canonical(request.initiator)
+                    resolution = dataclasses.replace(resolution, members=tuple(
+                        dict.fromkeys(request.initiator if identity.canonical(m) == caller
+                                      else m for m in resolution.members)))
+                # 1a — a call to a group is made by a member of the group
+                # (TS 24.379 6.3.5.2 step 5b; PLT-VP-R1 SVC-OP-07, decided
+                # 2026-10-26: no call type exempt, emergency and imminent
+                # peril included, as the standard has it; nor a private call
+                # aimed at a group, which would otherwise reach a group small
+                # enough for its limit). Before anything is prioritised,
+                # admitted or invited. A group named by a functional identity
+                # is a binding, not a group document's, and is not checked; a
+                # relayed request is, like any other (§7.2).
+                if resolution.kind is ResolutionKind.GROUP and \
+                        resolution.resolved_from is None and \
+                        request.initiator not in resolution.members:
+                    return self._refuse(cid, request, NOT_GROUP_MEMBER,
+                                        "the caller is not a member of the group",
+                                        step="membership")
 
             # 2 — IF-IWF, only when resolution says the target is foreign.
             #
@@ -593,7 +661,9 @@ class SessionManager:
             bearer = invoker.call("IF-BER", "select",
                                   self._hooks.bearer_selector.select,
                                   request, priority, tuple(request.media),
-                                  post=lambda b: self._check_bearer(b, priority))
+                                  post=lambda b: self._check_bearer(
+                                      b, priority,
+                                      both_flags=self._arp_both_flags))
 
             # 7b — IF-ICX.map_outbound: what the partner is told, before any
             # QoS is reserved, so a failing hook leaves nothing to undo.
@@ -1126,7 +1196,8 @@ class SessionManager:
                     "of milliseconds")
 
     @staticmethod
-    def _check_bearer(bearer: BearerDecision, priority: PriorityDecision) -> None:
+    def _check_bearer(bearer: BearerDecision, priority: PriorityDecision,
+                      both_flags: bool = True) -> None:
         """PLT-ICD-001 §6.1 POST-1/2/3/5, and of POST-4 what the core can
         know: the ARP level is within TS 23.501 5.7.2.2. Which 5QIs a network
         offers is deployment knowledge (RES-OP-07). Each check is one profile
@@ -1190,6 +1261,17 @@ class SessionManager:
             raise HookContractViolation(
                 "bearer decision asks for ARP pre-emption capability, which the "
                 "priority decision does not grant (§6.1 POST-5)")
+        # POST-5, vulnerability (ICD-OP-14, when the deployment checks it):
+        # a call the priority decision leaves open to pre-emption is open to
+        # it at the network too. Here the privilege is immunity, so only an
+        # explicit `False` from IF-PRI grants it (`is not False`): a truthy
+        # "true" or a `None` must not, as only `True` grants capability above
+        # (review of ICD-OP-14). The bearer's flag is a boolean by now.
+        if both_flags and not bearer.arp_preemption_vulnerability and \
+                priority.preemption_vulnerability is not False:
+            raise HookContractViolation(
+                "bearer decision makes the call immune to ARP pre-emption, which "
+                "the priority decision leaves it open to (§6.1 POST-5)")
 
     def _located(self, request: SessionRequest) -> SessionRequest:
         """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains

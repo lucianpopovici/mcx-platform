@@ -158,6 +158,11 @@ identity:
       label: Driver of a train
       binding: dynamic
       location_dependent: false
+      # FRS 6.2.1.1: a train function identity is the train ID with the
+      # function label, not location-dependent (6.2.1.1.5): one leading
+      # driver per train, activated and called as
+      # sip:<train-id>.train-driver@<domain> (PLT-VP-R1 FA-OP-01 item 4).
+      identification_key: train_id
       multiplicity: single
       resolves_to: user
     - id: track-controller
@@ -299,7 +304,12 @@ bearer:
         qos_identifier: 4
         arp_level: 4
         arp_preemption_capability: true
-        arp_preemption_vulnerability: false
+        # true, as its priority rule (band C, PLT-CONF-AUDIT CA-19): a railway
+        # emergency call must be able to take its resources at the network
+        # too. This was false, which kept the ETCS session un-preemptable at
+        # the network after CA-19 made it pre-emptable in the platform
+        # (PLT-ICD-001 ICD-OP-14, owner 2026-10-26).
+        arp_preemption_vulnerability: true
         redundancy: multihomed
         paths:
           - {id: bearer-a, transport: sctp, primary: true, weight: 2, attributes: {multihoming: "true"}}
@@ -310,13 +320,11 @@ bearer:
     # (ARP=8). A driver-to-controller call is 10.3/10.4, so ARP 5 -- it was
     # falling through to the catch-all at 6, which the note reserves for
     # ground-to-ground and public address (PLT-CONF-AUDIT CA-17).
-    # Pre-emption capability stays false: this call type resolves to the
-    # `operational` priority decision, which does not authorise it, and the
-    # platform refuses a bearer rule that asks for more than its priority
-    # decision grants. That refusal is correct and it exposes a real gap --
-    # FRS table J-1 puts 10.3/10.4 in a band above ATO, while this profile's
-    # single `voice-operational` application drops them into the catch-all.
-    # See FRMCS-OP-02.
+    # ARP pre-emption capability is false: less than its `voice-operational`
+    # priority decision grants (band D since PLT-CONF-AUDIT CA-19, which
+    # closed FRMCS-OP-02), which POST-5 allows; whether a driver-to-controller
+    # call should pre-empt at the network is not stated by Annex A. Vulnerable,
+    # as its priority decision (PLT-ICD-001 ICD-OP-14).
     - match: {call_type: driver-controller, media: voice}
       decision:
         qos_identifier: 65

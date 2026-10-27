@@ -199,7 +199,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_ROLES": "controlling,participating",
            "MCX_SESSION_EXPIRES_MS": "1800000",
            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
-           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ENV": "test",
+           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ARP_VULNERABILITY_CHECK": "true", "MCX_ENV": "test",
            "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
            "MCX_LOCATION_REPORTS": "read",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
@@ -461,6 +461,35 @@ def test_retransmitted_invite_reaches_the_session_manager_once(core, rt, world):
     assert world[U[0]].sent[:len(first)] == first
 
 
+# ============================================================ SIP-OP-19
+
+
+@pytest.mark.parametrize("expires", ["\u0663\u0660\u0660", "\uff13\uff10\uff10", "3\u00b2",
+                                     "\u00b3"])
+def test_a_register_expires_in_other_digits_is_the_default(core, expires):
+    """SIP-OP-19: an Expires header or Contact parameter that is not ASCII
+    digits is unreadable, so the RFC 3261 default (3600), as any unreadable
+    value; it is never read as a number nor fails the request in int()."""
+    for n, extra in enumerate(([f"Contact: <{U[1]}>", f"Expires: {expires}"],
+                               [f"Contact: <{U[1]}>;expires={expires}"]), 1):
+        f = Flow(U[1])
+        core.on_bytes(msg("REGISTER", "sip:mcptt.example", f"r19-{n}", 1, U[1], U[1],
+                          extra=extra), f)
+        assert [(m.code, m.headers.get("Expires")) for m in f.messages()] == [(200, "3600")]
+
+
+@pytest.mark.parametrize("contact", [
+    "<{u}>;expires=60;q=0.5", "<{u}>;EXPIRES=60", "<{u}>;expires=60 , <sip:x@mcptt.example>",
+    '"Bob" <{u}>;expires=60', "<{u}>;expires=60\t"])
+def test_a_register_contact_expires_in_ascii_digits_is_read(core, contact):
+    """SIP-OP-19 review: the anchored Contact parameter still reads every
+    legitimate form."""
+    f = Flow(U[1])
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r19-ok", 1, U[1], U[1],
+                      extra=[f"Contact: {contact.format(u=U[1])}"]), f)
+    assert [(m.code, m.headers.get("Expires")) for m in f.messages()] == [(200, "60")]
+
+
 # ============================================================ SIP-OP-05
 
 
@@ -493,19 +522,22 @@ def test_a_caller_not_in_the_directory_is_admitted(core, rt, world):
             if r["type"] in ("session-admitted", "session-refused")] == ["session-admitted"]
 
 
-def test_a_non_member_may_start_a_group_call_svc_op_07(core, rt, world):
-    """SVC-OP-07 (open): no member check is made, so a caller who is not in
-    the group (here not listed at all) starts emergency and imminent peril
-    calls on it and every member is invited. TS 24.379 6.3.5.2 step 5b says
-    403 "116 user is not part of the MCPTT group". This pins today's
-    behaviour; it changes when SVC-OP-07 is decided."""
+@pytest.mark.parametrize("call_type", ["prearranged-group", "emergency-group",
+                                       "imminent-peril-group"])
+def test_a_non_member_cannot_start_a_group_call(core, rt, world, call_type):
+    """SVC-OP-07 (decided 2026-10-26, no call type exempt): TS 24.379
+    6.3.5.2 step 5b, 403 "116 user is not part of the MCPTT group", before
+    anyone is invited. Here the caller is not listed at all."""
     f = Flow(UNLISTED)
-    for n, call_type in enumerate(("emergency-group", "imminent-peril-group")):
-        core.on_bytes(invite(f"op07-{n}", UNLISTED, "grp:alpha", call_type), f)
-        assert [r["type"] for r in rt.store.audit_records(f"op07-{n}")
-                if r["type"] in ("session-admitted", "session-refused")] == \
-            ["session-admitted"]
-    assert [len(world[u].requests("INVITE")) for u in U] == [2, 2, 2, 2]
+    core.on_bytes(invite("op07", UNLISTED, "grp:alpha", call_type), f)
+    refusal = f.messages()[-1]
+    assert (refusal.code, refusal.headers.get("Warning")) == (
+        403, '399 mcptt.example "116 user is not part of the MCPTT group"')
+    assert [len(world[u].requests("INVITE")) for u in U] == [0, 0, 0, 0]
+    assert [(r["type"], r["detail"].get("reason_code"))
+            for r in rt.store.audit_records("op07")
+            if r["type"] in ("session-admitted", "session-refused")] == [
+        ("session-refused", "not-group-member")]
 
 
 # ============================================================ VP1-CC-004 / PLT-CC-003

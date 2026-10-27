@@ -26,7 +26,7 @@ REFERENCE_POINT = "SIP-2"
 T1_MS = 500
 T2_MS = 4000
 _BRANCH = re.compile(r"branch=([^;,\s>]+)")
-_CSEQ = re.compile(r"^\s*(\d+)\s+([A-Za-z]+)")
+_CSEQ = re.compile(r"^\s*([0-9]+)\s+([A-Za-z]+)")    # [0-9], not \d (SIP-OP-19)
 
 
 def top_branch(headers) -> str:

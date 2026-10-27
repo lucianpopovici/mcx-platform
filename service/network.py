@@ -28,8 +28,8 @@ learn, and it changes with the organisation, not with the service. Every group
 member is also a known user. Registering over SIP does not make a user known
 (SIP-OP-05, closed 2026-10-26): being registered says where a user can be
 reached, this file says who exists. A caller is checked against the declared
-domains only, not against `users` (accepted), nor against a group's members
-(SVC-OP-07, open).
+domains only, not against `users` (accepted); a group call's caller must be
+one of the group's members (SVC-OP-07, decided 2026-10-26: 403, warning 116).
 
 The environment is the production indicator (VP-OP-05, decided 2026-10-21):
 it is stated here, beside the PLMNs, MCX_ENV must agree with it, and anything
@@ -61,6 +61,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from core import mcinfo
 from core.errors import StartupRefused
 from core.functional import AliasPolicy
+from core.hooks import keyed_identity
 from core.loader import ENVIRONMENTS, PRODUCTION, content_hash, safe_load_unique
 
 from .config import is_fqdn
@@ -70,6 +71,9 @@ NONE = "none"
 KEYS = {"name", "version", "environment", "plmns", "cells", "sip", "groups", "users",
         "functional_aliases"}
 ALIAS_KEYS = {"id", "users", "take_over"}
+# Optional (FA-OP-01 item 3, owner 2026-10-27): how many may hold a
+# multi-holder identity at once; absent, no limit.
+ALIAS_OPTIONAL = {"max_holders", "values"}
 GROUP_KEYS = {"id", "display_name", "members", "call_type"}
 SIP_KEYS = {"trusted_cores", "core_ca"}
 # "/" and "+" separate the parts of the audit identifier, so neither may occur.
@@ -353,8 +357,10 @@ def _functional_aliases(raw: Any, known: Set[str], defects: List[str],
         {f.id: f for f in functional if f.resolves_to == "user"}
     for i, entry in enumerate(raw):
         where = f"functional_aliases[{i}]"
-        if not isinstance(entry, dict) or set(entry) != ALIAS_KEYS:
-            defects.append(f"{where}: expected exactly 'id', 'users' and 'take_over'")
+        if not isinstance(entry, dict) or not ALIAS_KEYS <= set(entry) or \
+                set(entry) - ALIAS_KEYS - ALIAS_OPTIONAL:
+            defects.append(f"{where}: expected 'id', 'users' and 'take_over', and "
+                           "optionally 'max_holders' and 'values'")
             continue
         ident = entry["id"]
         if not isinstance(ident, str) or not ident.strip():
@@ -386,7 +392,36 @@ def _functional_aliases(raw: Any, known: Set[str], defects: List[str],
             defects.append(f"{where}.take_over: may take over but may not hold: "
                            f"{', '.join(map(repr, outside))}")
             continue
-        out[ident] = AliasPolicy(users=frozenset(users), take_over=frozenset(takers))
+        limit = entry.get("max_holders")
+        if "max_holders" in entry:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                defects.append(f"{where}.max_holders: expected an integer of at least 1, "
+                               f"not {limit!r}")
+                continue
+            if declared is not None and declared[ident].multiplicity != "multi":
+                defects.append(f"{where}.max_holders: {ident!r} is single-holder, so one "
+                               "holds it at a time; max_holders is for a multi-holder "
+                               "identity")
+                continue
+        # FA-OP-01 item 4: for an identity keyed by an identification value,
+        # the values its users may hold it for (FRMCS FRS 8.2.4.3.6: a role
+        # set may name a train number), as patterns; absent, any value.
+        values: tuple = ()
+        if "values" in entry:
+            raw_values = entry["values"]
+            if not isinstance(raw_values, list) or not raw_values or not all(
+                    isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9*?]+", v)
+                    for v in raw_values):
+                defects.append(f"{where}.values: expected a non-empty list of patterns of "
+                               "letters, digits, '*' and '?'")
+                continue
+            if declared is not None and not declared[ident].identification_key:
+                defects.append(f"{where}.values: {ident!r} is not keyed by an "
+                               "identification value (identification_key)")
+                continue
+            values = tuple(dict.fromkeys(raw_values))
+        out[ident] = AliasPolicy(users=frozenset(users), take_over=frozenset(takers),
+                                 max_holders=limit, values=values)
     return out
 
 
@@ -493,6 +528,15 @@ def load_network(path: Path, location_keys: Set[str],
 
     groups, users = _groups(raw["groups"], raw["users"], defects, call_types)
     known = set(users) | {m for g in groups for m in g.members}
+    # A user, member or group written as a keyed functional identity would be
+    # shadowed by it, and reached by whoever activated that value (review of
+    # FA-OP-01 item 4; PLT-ICD-001 §3.2 PRE-5): refused, in any domain.
+    keyed_ids = [f.id for f in (functional or ()) if getattr(f, "identification_key", None)]
+    colliding = sorted(x for x in known | {g.id for g in groups}
+                       if keyed_identity(x, keyed_ids, [x.rpartition("@")[2]]))
+    if colliding:
+        defects.append("users and groups: written as a keyed functional identity "
+                       f"(sip:<value>.<identity>@<domain>): {', '.join(map(repr, colliding))}")
     aliases = _functional_aliases(raw["functional_aliases"], known, defects, functional)
 
     if defects:

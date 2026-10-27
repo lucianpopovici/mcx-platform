@@ -75,6 +75,24 @@ def test_malformed_session_expires(value):
             parse_session_expires(value)
 
 
+# SIP-OP-19: digits outside ASCII. Arabic-Indic and fullwidth digits pass
+# str.isdigit and \\d, and int() reads them; "²" and "³" pass str.isdigit and
+# int() refuses them.
+NON_ASCII_DIGITS = ["\u0663\u0660\u0660", "\uff16\uff10\uff10", "6\u00b2", "\u00b3"]
+
+
+@pytest.mark.parametrize("value", NON_ASCII_DIGITS)
+def test_session_expires_and_min_se_take_ascii_digits_only(value):
+    """SIP-OP-19: refused as malformed (SipError, so 400), never read as a
+    number nor left to fail in int()."""
+    with pytest.raises(SipError):
+        parse_session_expires(value)
+    with pytest.raises(SipError):
+        parse_session_expires(value + ";refresher=uac")
+    with pytest.raises(SipError):
+        parse_min_se(value)
+
+
 def test_session_expires_parameters():
     assert parse_session_expires(" 600 ; refresher=UAS ;x=1").refresher == "uas"
     assert parse_session_expires("600").refresher is None

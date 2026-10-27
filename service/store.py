@@ -163,9 +163,12 @@ class SqliteStore:
                 raise
 
     def holdings(self) -> List[Tuple[str, str, str]]:
+        """In the order they were saved, which is the order the holders of
+        each identity activated (FA-OP-01 item 3: a take-over at the limit
+        displaces the earliest, and restore keeps the earliest)."""
         with self._lock:
             rows = self._db.execute("SELECT identity, slot, holder FROM holdings "
-                                    "ORDER BY identity, slot, holder").fetchall()
+                                    "ORDER BY rowid").fetchall()
         return [tuple(r) for r in rows]
 
     def close(self) -> None:

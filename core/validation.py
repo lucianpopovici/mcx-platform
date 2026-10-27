@@ -628,7 +628,7 @@ def _identity(c: _Checker, node: Any) -> model.Identity:
         fp = f"{p}.functional[{i}]"
         if not c.keys(fp, item, allowed=(
                 "id", "label", "binding", "location_dependent", "location_key",
-                "multiplicity", "resolves_to"),
+                "identification_key", "multiplicity", "resolves_to"),
                 required=("id", "label", "binding", "location_dependent",
                           "multiplicity", "resolves_to")):
             continue
@@ -642,6 +642,10 @@ def _identity(c: _Checker, node: Any) -> model.Identity:
         if loc_key is not None and not isinstance(loc_key, str):
             c.add(f"{fp}.location_key", "bad-type", "expected a string or null")
             loc_key = None
+        id_key = item.get("identification_key")
+        if id_key is not None and not isinstance(id_key, str):
+            c.add(f"{fp}.identification_key", "bad-type", "expected a string or null")
+            id_key = None
         functional.append(model.FunctionalIdentity(
             id=ident,
             label=c.typed(fp, item, "label", str, "") or "",
@@ -652,6 +656,7 @@ def _identity(c: _Checker, node: Any) -> model.Identity:
                                 MULTIPLICITIES) or "",
             resolves_to=c.enum(f"{fp}.resolves_to", item.get("resolves_to"),
                                RESOLVES_TO) or "",
+            identification_key=id_key,
         ))
     return model.Identity(domains=tuple(parsed_domains), functional=tuple(functional))
 
@@ -667,6 +672,24 @@ def _identity_consistency(c: _Checker, identity: model.Identity) -> None:
         if not f.location_dependent and f.location_key:
             c.add(f"{p}.location_key", "inconsistent",
                   "location_key is set but the identity is not location-dependent")
+        # FA-OP-01 item 4: keyed by an identification value, not by
+        # location, and written sip:<value>.<id>@<domain>.
+        if f.identification_key is not None:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", f.identification_key):
+                c.add(f"{p}.identification_key", "bad-value",
+                      "expected a lower-case name such as unit_id")
+            if f.location_dependent:
+                c.add(f"{p}.identification_key", "inconsistent",
+                      "an identity is keyed by its location or by an identification "
+                      "value, not both")
+            if f.resolves_to != "user":
+                c.add(f"{p}.identification_key", "inconsistent",
+                      "only an identity that resolves to a user is keyed by an "
+                      "identification value")
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", f.id):
+                c.add(f"{p}.id", "bad-value",
+                      "a keyed identity's id is written in sip:<value>.<id>@<domain>, "
+                      "so letters, digits, '-' and '_' only")
 
 
 def _priority(c: _Checker, node: Any, scopes: Set[str], call_types: Set[str],

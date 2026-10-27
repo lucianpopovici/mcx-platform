@@ -1169,29 +1169,42 @@ VP1-HOOK-034:
 VP1-HOOK-040:
   verdict: pass
   by: independent review (agent)
-  date: '2026-09-29'
+  date: '2026-10-27'
   evidence:
-  - tests/test_loader.py::test_vp1_hook_040_bearer_decision_well_formed
-  - tests/test_session.py::test_a_consistent_multipath_bearer_decision_is_accepted
-  - tests/test_session.py::test_an_inconsistent_bearer_decision_from_a_hook_is_a_contract_violation
-  - tests/test_session.py::test_bearer_decisions_profile_validation_accepts_are_accepted
-  note: 'Re-reviewed after RES-OP-07: every call type of mcx, frmcs and utility, with every non-empty
-    set of the media it declares, is selected and passed through the core''s own post-check, and the
-    POSTs are also asserted directly. A substituted selector breaking POST-1, 2 or 3 is refused as hook-contract-violation
-    on IF-BER.'
+    - tests/test_loader.py::test_vp1_hook_040_bearer_decision_well_formed
+    - tests/test_session.py::test_a_consistent_multipath_bearer_decision_is_accepted
+    - tests/test_session.py::test_an_inconsistent_bearer_decision_from_a_hook_is_a_contract_violation
+    - tests/test_session.py::test_bearer_decisions_profile_validation_accepts_are_accepted
+  note: >-
+    Re-reviewed after PLT-ICD-001 ICD-OP-14 was closed (2026-10-26: MCX_ARP_VULNERABILITY_CHECK,
+    required). Every call type of mcx, frmcs and utility, with every non-empty set of the media
+    it declares, is selected and passed through the core's own post-check with both ARP flags
+    checked, and the POSTs are also asserted directly, both flags included; the frmcs etcs-ipcon
+    bearer rule, the one pair that failed (ETCS immune at the network after CA-19 made it
+    pre-emptable), was corrected. A substituted selector breaking POST-1, 2 or 3 is refused as
+    hook-contract-violation on IF-BER.
 VP1-HOOK-041:
   verdict: pass
   by: independent review (agent)
-  date: '2026-09-29'
+  date: '2026-10-27'
   evidence:
-  - tests/test_session.py::test_a_truthy_priority_flag_does_not_grant_arp_preemption
-  - tests/test_session.py::test_arp_preemption_beyond_the_priority_decision_is_a_contract_violation
-  - tests/test_session.py::test_arp_preemption_the_priority_decision_grants_is_accepted
-  - tests/test_loader.py::test_vp1_hook_041_arp_consistency_violation
-  note: 'Re-reviewed after RES-OP-07: a substituted selector returning ARP pre-emption capability against
-    a non-capable priority decision, or one whose flag is a truthy non-boolean, is refused through establish
-    as hook-contract-violation, with no INVITE and no session. The granted case establishes. Consistency of
-    the vulnerability flag is not in POST-5 as written (ICD-OP-14).'
+    - tests/test_loader.py::test_vp1_hook_041_arp_consistency_violation
+    - tests/test_session.py::test_a_truthy_priority_flag_does_not_grant_arp_preemption
+    - tests/test_session.py::test_arp_immunity_against_the_priority_decision_is_a_violation_when_checked
+    - tests/test_session.py::test_arp_preemption_beyond_the_priority_decision_is_a_contract_violation
+    - tests/test_session.py::test_arp_preemption_the_priority_decision_grants_is_accepted
+    - tests/test_session.py::test_arp_vulnerability_accepted
+    - tests/test_session.py::test_only_an_explicit_false_grants_arp_immunity
+  note: >-
+    Re-reviewed after PLT-ICD-001 ICD-OP-14 was closed. Capability: a substituted selector
+    returning ARP pre-emption capability against a non-capable priority decision, or against a
+    truthy non-boolean, is refused through establish as hook-contract-violation, no QoS reserved
+    and no INVITE; the granted case establishes. Vulnerability, with the check on: a bearer
+    immune to ARP pre-emption under a priority decision that does not grant immunity is refused
+    the same way, with the exact message; only an explicit False from IF-PRI grants immunity, so
+    a truthy 'true', 1, None, 'false' or 0 is refused too (review: 'true' had passed as immune
+    while the platform's own pre-emption read it as open). Accepted: a bearer more open than the
+    priority decision, the check off (a reported deviation), each state through establish.
 VP1-FC-001:
   verdict: partial
   by: independent review (agent)
@@ -1443,14 +1456,20 @@ VP1-OAM-004:
 VP1-OAM-005:
   verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-26'
   evidence:
-  - tests/test_service.py::test_vp1_oam_005_committed_records_survive_kill_and_service_returns
-  note: 'Process killed (SIGKILL) after 3 establishes and 1 release. On restart all three session rows
-    are present with the correct states and members, c2''s audit ends in session-released, and the real
-    process returns to /readyz 200. Weak spots: audit record counts for c0/c1 are not compared with pre-kill,
-    ''returns to service'' is readiness only (no new call is placed), and SVC-OP-02 leaves recovered established
-    sessions unresolved.'
+    - tests/test_service.py::test_vp1_oam_005_committed_records_survive_kill_and_service_returns
+  note: >-
+    Re-reviewed after SVC-OP-02 was decided (2026-10-26, option 1: sessions the previous process
+    left established are released at start, cause process-restart). Process killed (SIGKILL)
+    after three establishes and one release; the child prints each session's committed record
+    count before the kill. On restart all three rows are present with their members, and each
+    audit trail is exactly what the killed process committed plus one session-released
+    (process-restart) for each of the two it cut off; the one released before the kill keeps its
+    single normal release. The count is in the health document; a second start finds nothing
+    established and places a new call, and the real process returns to /readyz 200. A release
+    recorded but not marked, and a start stopped between record and row, are finished once
+    without a second record.
 VP1-SIG-002:
   verdict: partial
   by: independent review (agent)
@@ -1638,28 +1657,35 @@ VP1-CC-005:
 VP1-CC-006:
   verdict: pass
   by: independent review (agent)
-  date: '2026-09-29'
+  date: '2026-10-26'
   evidence:
-  - tests/test_session.py::test_a_broadcast_area_over_the_limit_is_refused_not_truncated
-  - tests/test_session.py::test_a_caller_outside_the_group_takes_no_participant_place
-  - tests/test_session.py::test_a_group_call_type_with_no_signature_is_truncated_too
-  - tests/test_session.py::test_a_limit_leaving_no_one_to_invite_is_refused
-  - tests/test_session.py::test_a_private_call_over_the_limit_is_refused_not_made_a_group_call
-  - tests/test_session.py::test_an_ad_hoc_call_over_the_decided_limit_is_warning_189
-  - tests/test_session.py::test_an_inconsistent_session_decision_is_a_contract_violation
-  - tests/test_session.py::test_vp1_cc_006_a_changed_table_changes_nothing_the_hook_decided
-  - tests/test_session.py::test_vp1_cc_006_a_group_over_the_decided_limit_is_truncated
-  - tests/test_session.py::test_vp1_cc_006_a_group_within_the_decided_limit_is_whole
-  - tests/test_session.py::test_vp1_cc_006_session_decision_applied_verbatim
-  - tests/test_session.py::test_vp1_cc_006_the_hook_s_decision_is_applied_not_the_table_s
-  - tests/test_sip_transport.py::test_a_group_call_over_its_limit_is_answered_with_warning_122
-  note: 'Re-reviewed after RES-OP-12: a substituted decide() differing from the profile in every field
-    is what the session follows, and a profile changed under an unchanged hook changes nothing. The limit
-    is the decision''s: a group over it is truncated per TS 24.379 6.3.5.5 with 122 on the 200 OK, an
-    ad hoc call refused 189, anything else refused 486 + 122. The model is checked against the call type
-    (POST-1 as equality); R1 call types are all on-demand by the owner''s ruling, so applying it is
-    running on-demand. The one place the core reads the table''s limit, the ad hoc step-6 list check, is
-    an exception the ICD names.'
+    - tests/test_session.py::test_a_broadcast_area_over_the_limit_is_refused_not_truncated
+    - tests/test_session.py::test_a_caller_outside_a_functional_identity_s_group_takes_no_participant_place
+    - tests/test_session.py::test_a_caller_outside_the_group_is_refused_before_the_decision
+    - tests/test_session.py::test_a_group_call_type_with_no_signature_is_truncated_too
+    - tests/test_session.py::test_a_limit_leaving_no_one_to_invite_is_refused
+    - tests/test_session.py::test_a_private_call_over_the_limit_is_refused_not_made_a_group_call
+    - tests/test_session.py::test_an_ad_hoc_call_over_the_decided_limit_is_warning_189
+    - tests/test_session.py::test_an_inconsistent_session_decision_is_a_contract_violation
+    - tests/test_session.py::test_vp1_cc_006_a_changed_table_changes_nothing_the_hook_decided
+    - tests/test_session.py::test_vp1_cc_006_a_group_over_the_decided_limit_is_truncated
+    - tests/test_session.py::test_vp1_cc_006_a_group_within_the_decided_limit_is_whole
+    - tests/test_session.py::test_vp1_cc_006_session_decision_applied_verbatim
+    - tests/test_session.py::test_vp1_cc_006_the_hook_s_decision_is_applied_not_the_table_s
+    - tests/test_sip_transport.py::test_a_group_call_over_its_limit_is_answered_with_warning_122
+  note: >-
+    Re-reviewed after SVC-OP-07 was decided (2026-10-26: a call to a configured group whose
+    caller is not a member is refused 403/116, TS 24.379 6.3.5.2 step 5b). A substituted
+    decide() differing from the profile in every field is what the session follows, and a
+    profile changed under an unchanged hook changes nothing. The limit is the decision's: a
+    group over it is truncated per TS 24.379 6.3.5.5 with 122 on the 200 OK, an ad hoc call
+    refused 189, anything else refused 486 + 122. A caller outside a configured group is now
+    refused before IF-PRI, admission and decide are consulted, so no decision is applied to it;
+    a caller outside a group named by a functional identity (not checked) still takes no
+    participant place, the test that kills the non-member truncation branch. The model is
+    checked against the call type (POST-1 as equality); R1 call types are all on-demand by the
+    owner's ruling. The one place the core reads the table's limit, the ad hoc step-6 list
+    check, is an exception the ICD names.
 VP1-CC-007:
   verdict: partial
   by: independent review (agent)

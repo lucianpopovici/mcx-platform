@@ -43,6 +43,7 @@ from core.hooks import (
     ResolutionKind,
     SessionDecision,
     SessionModel,
+    keyed_identity,
     SessionRequest,
     TargetRef,
 )
@@ -494,12 +495,23 @@ class FunctionalResolver(DirectoryResolver):
             if any(service_id in holders for holders in slots.values())))
 
     def resolve(self, target: TargetRef, request: SessionRequest) -> Resolution:
-        declared = self._profile.functional_identity(target)
+        # A keyed identity is called as sip:<value>.<id>@<domain> (PLT-ICD-001
+        # §3.2, FA-OP-01 item 4): that value's holder.
+        keyed = keyed_identity(target, self._keyed(), self._profile.identity.domains)
+        identity = keyed[0] if keyed else target
+        declared = self._profile.functional_identity(identity)
         if declared is None:
             return super().resolve(target, request)
+        if declared.identification_key and not keyed:
+            raise ResolutionFailure(
+                UNKNOWN_TARGET,
+                f"functional identity {identity!r} is held per "
+                f"{declared.identification_key}; call "
+                f"sip:<{declared.identification_key}>.{identity}@<domain>")
 
-        slot = self._location_slot(declared, request.location, for_binding=False)
-        holders = self._bindings.get(target, {}).get(slot, ())
+        slot = keyed[1] if keyed else \
+            self._location_slot(declared, request.location, for_binding=False)
+        holders = self._bindings.get(identity, {}).get(slot, ())
         if not holders:
             raise ResolutionFailure(
                 NO_BINDING,
@@ -516,7 +528,7 @@ class FunctionalResolver(DirectoryResolver):
         return Resolution(
             kind=kind,
             members=holders,
-            group_id=target if kind is ResolutionKind.GROUP else None,
+            group_id=identity if kind is ResolutionKind.GROUP else None,
             resolved_from=target,  # PLT-HOK-014
         )
 
@@ -538,21 +550,29 @@ class FunctionalResolver(DirectoryResolver):
             raise ResolutionFailure(ADHOC_PARTICIPANTS_UNDETERMINED,
                                     "empty participant criteria")
         members: List[MCServiceId] = []
-        for identity in wanted:
+        for criterion in wanted:
+            keyed = keyed_identity(criterion, self._keyed(), self._profile.identity.domains)
+            identity = keyed[0] if keyed else criterion
             declared = self._profile.functional_identity(identity)
             if declared is None:
                 raise ResolutionFailure(
                     ADHOC_PARTICIPANTS_UNDETERMINED,
                     f"criterion {identity!r} is not a functional identity of "
                     "this profile")
-            try:
-                slot = self._location_slot(declared, request.location,
-                                           for_binding=False)
-            except ResolutionFailure:
-                continue
-            for holder in self._bindings.get(identity, {}).get(slot, ()):
-                if holder not in members:
-                    members.append(holder)
+            if declared.identification_key:
+                # A keyed identity: one value's holder, or, named alone,
+                # every value's holders (FA-OP-01 item 4).
+                slots = [keyed[1]] if keyed else list(self._bindings.get(identity, {}))
+            else:
+                try:
+                    slots = [self._location_slot(declared, request.location,
+                                                 for_binding=False)]
+                except ResolutionFailure:
+                    continue
+            for slot in slots:
+                for holder in self._bindings.get(identity, {}).get(slot, ()):
+                    if holder not in members:
+                        members.append(holder)
         if not members:
             raise ResolutionFailure(
                 ADHOC_PARTICIPANTS_UNDETERMINED,
@@ -560,9 +580,23 @@ class FunctionalResolver(DirectoryResolver):
         return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
                           group_id=None, resolved_from=f"criteria:{criteria}")
 
+    def _keyed(self) -> Tuple[str, ...]:
+        return tuple(f.id for f in self._profile.identity.functional
+                     if f.identification_key)
+
     def _location_slot(self, declared: FunctionalIdentity,
                        location: Optional[LocationContext],
                        for_binding: bool) -> str:
+        if declared.identification_key:
+            # The core binds a keyed identity with its value under the
+            # identification key (PLT-ICD-001 §3.3).
+            value = location.attributes.get(declared.identification_key) \
+                if location else None
+            if not value:
+                raise ResolutionFailure(
+                    UNKNOWN_TARGET, f"identity {declared.id!r} is held per "
+                    f"{declared.identification_key}, which was not given")
+            return value
         if not declared.location_dependent:
             return ""
         key = declared.location_key or ""

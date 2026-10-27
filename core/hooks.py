@@ -14,7 +14,9 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
+import re
+from typing import (Any, Iterable, Mapping, Optional, Protocol, Sequence, Tuple,
+                    runtime_checkable)
 
 # --------------------------------------------------------------------------
 # Opaque identifiers. Profile-defined vocabulary, core-defined plumbing.
@@ -194,6 +196,26 @@ class SessionRequest(Value):
     # <adhoc-grp-emg-alert-grp-ind> true: the call follows an ad hoc
     # emergency alert and names that alert's group (17.4.2.2 step 7A).
     adhoc_alert_group: bool = False
+
+
+# PLT-ICD-001 §3.2 (since 0.33, PLT-VP-R1 FA-OP-01 item 4): a functional
+# identity keyed by an identification value, which a profile declares with an
+# identification_key, is written sip:<value>.<identity>@<domain>, e.g.
+# sip:42.duty-officer@example.org: the value alphanumeric, the identity one
+# the profile declares so keyed, the domain one the profile serves.
+_KEYED = re.compile(r"(?i:sips?):([A-Za-z0-9]+)\.([A-Za-z0-9_-]+)@([A-Za-z0-9.-]+)")
+
+
+def keyed_identity(text: str, keyed: Iterable[str],
+                   domains: Iterable[str]) -> Optional[Tuple[str, str]]:
+    """(identity, value) when `text` is a keyed functional identity of one of
+    `keyed` within one of `domains`, else None. The host is compared without
+    case; the value and the identity exactly."""
+    m = _KEYED.fullmatch(text.strip()) if isinstance(text, str) else None
+    if m is None or m.group(2) not in set(keyed) or \
+            m.group(3).lower() not in {d.lower() for d in domains}:
+        return None
+    return m.group(2), m.group(1)
 
 
 @dataclass(frozen=True)

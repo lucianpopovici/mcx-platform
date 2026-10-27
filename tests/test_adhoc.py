@@ -31,6 +31,8 @@ from core.session import Platform  # noqa: E402
 
 F = [f"sip:f{i}@frmcs.example" for i in range(6)]
 YARD = LocationContext(attributes={"yard_id": "Y1"})
+# The train a driver drives (FA-OP-01 item 4: train-driver is keyed by train_id).
+T1 = LocationContext(attributes={"train_id": "T1"})
 
 
 @pytest.fixture
@@ -63,7 +65,7 @@ def rt(tmp_path, pki, clock, list_max, cells):
     resolver = r.loaded.hooks.identity_resolver
     resolver.bind("shunting-team-leader", F[0], YARD)   # may start shunting calls
     # train-driver is single-holder (multiplicity: single): one holder.
-    resolver.bind("train-driver", F[3], None)
+    resolver.bind("train-driver", F[3], T1)
     yield r
     r.close()
 
@@ -370,7 +372,7 @@ def test_a_listed_group_is_not_a_participant(core, world):
 
 
 def test_criteria_matching_only_the_caller_are_refused_187(core, rt, world):
-    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], None)
+    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], T1)
     core.on_bytes(adhoc_invite("ac7", mcf.adhoc_xml(criteria="train-driver")),
                   world[F[0]])
     code, warning = refusal(world[F[0]])
@@ -432,7 +434,7 @@ def test_a_private_call_carrying_a_resource_list_is_not_read_as_ad_hoc(core, rt,
     """Other INVITEs may carry resource lists (TS 24.379 clause 4.8); only an
     ad hoc call's list is this code's business, so a list it could not use
     must not refuse a private call."""
-    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], None)
+    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], T1)
     xml = mcf.mcinfo_xml("private", F[1])
     body = mcf.adhoc_body(SDP, xml, mcf.resource_list([F[2]], extra='<entry-ref ref="x"/>'))
     core.on_bytes(msg("INVITE", LOCAL, "rv6", 1, F[0], LOCAL, body=body,
@@ -529,7 +531,7 @@ def test_a_list_at_the_cap_goes_ahead_and_the_caller_is_not_counted(core, world)
 def test_the_cap_bounds_a_call_type_that_declares_no_limit(core, rt, world):
     """rec-broadcast declares no max_participants: before the cap, its list
     was unbounded (the reviewer's 20,001-entry case)."""
-    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], None)
+    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], T1)
     calls = _count_resolves(rt)
     listed = [F[1], F[2], "sip:p1@frmcs.example"]
     core.on_bytes(adhoc_invite("cap3", mcf.adhoc_xml(emergency=True),
