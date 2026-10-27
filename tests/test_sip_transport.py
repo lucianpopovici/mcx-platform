@@ -199,7 +199,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_ROLES": "controlling,participating",
            "MCX_SESSION_EXPIRES_MS": "1800000",
            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
-           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ENV": "test",
+           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ARP_VULNERABILITY_CHECK": "true", "MCX_ENV": "test",
            "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
            "MCX_LOCATION_REPORTS": "read",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}

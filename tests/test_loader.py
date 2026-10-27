@@ -638,11 +638,14 @@ def test_vp1_hook_040_bearer_decision_well_formed(name):
             request = request_for(ct.id, media=media)
             priority = lp.hooks.priority_policy.evaluate(request, res)
             d = lp.hooks.bearer_selector.select(request, priority, media)
-            SessionManager._check_bearer(d, priority)
+            # Both flags (ICD-OP-14): every in-tree profile passes the check a
+            # deployment may turn on (the frmcs etcs-ipcon rule was corrected).
+            SessionManager._check_bearer(d, priority, both_flags=True)
             assert sum(1 for p in d.paths if p.primary) == 1
             assert len({p.path_id for p in d.paths}) == len(d.paths)
             assert (len(d.paths) == 1) == (d.redundancy == "single")
             assert not d.arp_preemption_capability or priority.preemption_capability
+            assert d.arp_preemption_vulnerability or priority.preemption_vulnerability is False
             seen += 1
     assert seen >= len(lp.profile.call_types)
 

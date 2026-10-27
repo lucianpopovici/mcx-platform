@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.29 (draft)
+**Version:** 0.30 (draft)
 **Date:** 2026-10-26
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -609,7 +609,11 @@ bearer is selected or QoS reserved.
 4. `qos_identifier` and `arp_level` are valid for the deployment's core network.
 5. ARP pre-emption flags are consistent with the priority decision: a decision
    with `preemption_capability=False` shall not request
-   `arp_preemption_capability=True`.
+   `arp_preemption_capability=True`; and, where the deployment states
+   `MCX_ARP_VULNERABILITY_CHECK=true` (since v0.30, ICD-OP-14), a decision with
+   `preemption_vulnerability=True` shall not set
+   `arp_preemption_vulnerability=False`. The bearer may be more open to
+   pre-emption than the priority decision, never less.
 
 **Checked by the core (since v0.19, PLT-VP-R1 RES-OP-07).** The core checks
 the returned value before it reserves QoS: it is a `BearerDecision` whose paths
@@ -620,7 +624,14 @@ profile validation allows, and each weight is an integer of at least 1; the
 booleans; and POST-5, where only `preemption_capability is True` grants. A
 failure is `hook-contract-violation` on IF-BER. Each check is one profile
 validation makes of a bearer rule, so a profile that validates is never
-refused here. Whether POST-5 also covers the vulnerability flag is ICD-OP-14.
+refused here. The vulnerability half of POST-5 is checked where the
+deployment states `MCX_ARP_VULNERABILITY_CHECK=true` (required, no default;
+`false` is a deviation the service reports). There the privilege is
+immunity, so only `preemption_vulnerability is False` grants it: any other
+value IF-PRI returns leaves the call open, as only `True` grants capability.
+Profile validation does not pair bearer rules with priority rules, so a
+profile that validates can still be refused here with the check on (every
+in-tree profile passes it).
 
 **INV**
 1. The core performs no priority-to-QoS mapping (PLT-HOK-043).
@@ -835,7 +846,7 @@ environmental condition.
 | ICD-OP-11 | **From v0.9.** The inbound guard records a request's (Call-ID, CSeq) before the identity check runs. A refused, spoofed request therefore uses up that pair, and a genuine request that later carries the same pair is answered 482. This matters only if Call-IDs can be predicted. | R2 |
 | ICD-OP-12 | **From v0.12.** TS 24.379 annex F.3 writes a PLMN as six digits (`\d{3}\d{3}`), and the ECGI and NCGI start with them. It does not say how a two-digit MNC fills three digits. The network profile's `plmns` must therefore be written exactly as the deployment's clients write the first six digits of a cell. Confirm against TS 23.003 and the client implementations before a network with a two-digit MNC is configured. Since 0.25 the answer also fixes how the test PLMN 999-99 is written (ICD-NET-006 takes `999990`, the trailing-zero form of the examples' `001010`): if a two-digit MNC is written otherwise, `TEST_PLMNS` in `service/network.py` changes with it. | before a two-digit-MNC deployment |
 | ICD-OP-13 | **From v0.13.** A request relayed by a gateway (§7.2) has two weaknesses. (1) Its audit trail records `session-admitted` before §8.1 runs, so a request refused at step 0 shows "admitted" and then "refused". (2) The gateway may name a local user as the initiator, and step 0 then authorises it with that user's roles. The gateway's word is taken for who is calling. Both predate v0.13. The remedy for the second is to authorise gateway-originated requests on the gateway's own rights. | R4 start |
-| ICD-OP-14 | **From v0.19.** §6.1 POST-5 says the ARP pre-emption *flags* are consistent with the priority decision, but states only capability. A bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` is accepted, and makes the session immune to network pre-emption that IF-PRI left it open to. Decide whether POST-5 covers vulnerability (a major change: it tightens a POST, and every in-tree bearer rule must then agree with its priority rule). Related: IF-PRI's own decision is not checked by the core, and the 5QI is checked only as an integer, in profile validation and at runtime alike (TS 23.501 values are 0 to 255). | R2 start |
+| ICD-OP-14 | **CLOSED 2026-10-26 (owner ruling: a deployment parameter, `MCX_ARP_VULNERABILITY_CHECK=true|false`, required, no default).** §6.1 POST-5 stated only capability: a bearer decision with `arp_preemption_vulnerability=False` under a priority decision with `preemption_vulnerability=True` was accepted, and made the session immune to network pre-emption that IF-PRI left it open to. Now, with `true`, the core refuses it as `hook-contract-violation` on IF-BER; with `false` it is accepted as before and the service reports the deviation. Checking every in-tree call type with the check on found one such pair: the frmcs `etcs-ipcon` bearer rule kept `arp_preemption_vulnerability: false` after PLT-CONF-AUDIT CA-19 made its priority vulnerable (band C, so a railway emergency call can take its resources, FRS appendix J); corrected to `true` (owner ruling the same day). Only an explicit `False` from IF-PRI grants immunity (review: a truthy value had passed as immune while the platform's own pre-emption read it as open). Open notes, not this item's defects: the bearer may be more open than the priority decision (in-tree, the mcx imminent-peril bearer rule is pre-emptable at the network while its priority is not), as POST-5 also allows for capability; an inbound IF-ICX path, when wired, gets `preemption_vulnerability=True` from the partner mapping, so with the check on every bearer rule such a call can reach must be pre-emptable; IF-PRI's own decision is not checked by the core (so `preemption_victims` reads the incoming call's capability by truthiness: a substituted IF-PRI returning `"false"` would make it capable, the same fail-open shape fixed here for the bearer), and the 5QI is checked only as an integer (TS 23.501 values are 0 to 255). | closed |
 | ICD-OP-15 | **From v0.21.** §5.2 POST-1 is read as equality, and R1 runs on-demand sessions only (the in-tree call types that are pre-established or broadcast by nature are declared on-demand until their release, PLT-VP-R1 RES-OP-12). In TS 24.379, falling back to on-demand when no pre-established session exists is ordinary, and equality forbids a hook from choosing it. Revisit POST-1 with PLT-SIG-006 (pre-established sessions). | R2 start |
 
 ---
@@ -844,6 +855,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.30 | 2026-10-26 | §6.1 POST-5 and its core check: the vulnerability flag too, where the deployment states `MCX_ARP_VULNERABILITY_CHECK=true` (ICD-OP-14 closed, owner ruling: a required parameter, `false` a reported deviation). The frmcs `etcs-ipcon` bearer rule corrected to `arp_preemption_vulnerability: true`, as its priority rule. A major change for a deployment that turns it on; no hook signature change. |
 | 0.29 | 2026-10-26 | §2.8 ICD-NET-005, §8.1 step 1a and §9: a group call's caller must be a member of the group, else `not-group-member`, SIP 403 with warning 116 (PLT-VP-R1 SVC-OP-07 decided: as TS 24.379 6.3.5.2 step 5b, no call type exempt). A new core-originated reason code; no hook change. |
 | 0.28 | 2026-10-26 | §2.8 ICD-NET-005: registration never provisions a user, and a caller is checked against the declared domains only (PLT-VP-R1 SIP-OP-05 closed, option 1), nor against a group's members (PLT-VP-R1 SVC-OP-07, open). No interface change. |
 | 0.27 | 2026-10-23 | §2.8: the network profile gains `functional_aliases` (ICD-NET-007; PLT-VP-R1 SVC-OP-06 decided, option B): who may activate each functional identity and take it over; users activate by SIP PUBLISH from Rel-15 (TS 24.379 clause 9A), the core binding through IF-IDR (§3.3 note), take-over as the standard has it (ICD-OP-02 closed), location from the PUBLISH's report or else the last reported cell, holders durable. §9: four core codes `functional-alias-*`. A minor change: no hook signature changes. Review: `SIP-ETag` on the 200, holders written ahead of the resolver, §3.3 rollback records. |

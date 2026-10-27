@@ -26,7 +26,8 @@ from core.session import (Platform, Refusal, Session, SessionManager, Signal)
 
 from core import mcinfo
 
-from .config import BEARER_STUB, IDMS_STUB, RECORDER_STUB, Config
+from .config import (ARP_BOTH_FLAGS_VALUES, BEARER_STUB, IDMS_STUB,
+                     RECORDER_STUB, Config)
 from .http_tls import make_context as make_http_context
 from .network import Network, load_network
 from .groups import GroupDirectory
@@ -266,7 +267,8 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
     allows override."""
     settings: dict = {"MCX_HTTP_TLS": "off" if config.http_tls is None else "on",
                       "MCX_FLOOR_UNRECORDED": config.floor_unrecorded,
-                      "MCX_FOREIGN_INITIATOR": config.foreign_initiator}
+                      "MCX_FOREIGN_INITIATOR": config.foreign_initiator,
+                      "MCX_ARP_VULNERABILITY_CHECK": config.arp_both_flags}
     if config.http_tls is not None:
         settings["MCX_HTTP_CLIENT_AUTH"] = config.http_tls.client_auth
     deviations: list = []
@@ -280,6 +282,13 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
                            "partner system's users, whose priority is then not capped "
                            "by its interconnection rules (there is no inbound IF-ICX "
                            "path); such a caller still cannot register here"})
+    if config.arp_both_flags == "false":
+        deviations.append({
+            "setting": "MCX_ARP_VULNERABILITY_CHECK", "value": "false", "ref": "ICD-OP-14",
+            "departs_from": "PLT-ICD-001 §6.1 POST-5 (ARP pre-emption consistent with "
+                            "the priority decision), for the vulnerability flag",
+            "consequence": "a bearer decision may make a call immune to pre-emption at "
+                           "the network that its priority decision leaves open to it"})
     if config.floor_unrecorded == "allow":
         deviations.append({
             "setting": "MCX_FLOOR_UNRECORDED", "value": "allow", "ref": "RES-OP-14",
@@ -473,6 +482,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                  cells=network.cells,
                                  floor_unrecorded=config.floor_unrecorded,
                                  foreign_initiator=config.foreign_initiator,
+                                 arp_both_flags=ARP_BOTH_FLAGS_VALUES[
+                                     config.arp_both_flags],
                                  functional_aliases=network.functional_aliases)
 
         groups = GroupDirectory(network.groups, network.users)

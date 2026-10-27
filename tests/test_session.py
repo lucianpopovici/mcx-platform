@@ -649,6 +649,57 @@ def test_arp_preemption_the_priority_decision_grants_is_accepted(mcx, sink):
     assert refusal is None and session.bearer.arp_preemption_capability is True
 
 
+@pytest.mark.vp("VP1-HOOK-041")
+def test_arp_immunity_against_the_priority_decision_is_a_violation_when_checked(mcx, sink):
+    """ICD-OP-14 (MCX_ARP_VULNERABILITY_CHECK=true): a bearer decision that
+    makes the call immune to network pre-emption the priority decision
+    leaves it open to is refused, as POST-5 refuses a capability."""
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_vulnerability=False),
+                   priority=lambda p: dc.replace(p, preemption_vulnerability=True),
+                   arp_both_flags=True)
+    _refused_as_violation(mgr, sink, "IF-BER")
+    failed = sink.of_type(RecordType.SESSION_FAILED)[-1].detail
+    assert "makes the call immune to ARP pre-emption, which the priority decision " \
+        "leaves it open to (§6.1 POST-5)" in str(failed)
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+@pytest.mark.parametrize("priority_flag", ["true", 1, None, "false", 0])
+def test_only_an_explicit_false_grants_arp_immunity(mcx, sink, priority_flag):
+    """Review of ICD-OP-14: immunity is the privilege, so only `False` grants
+    it; any other value IF-PRI returns (the platform's own pre-emption reads
+    the flag by truthiness) leaves the call open, and an immune bearer is
+    refused."""
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_vulnerability=False),
+                   priority=lambda p: dc.replace(p, preemption_vulnerability=priority_flag),
+                   arp_both_flags=True)
+    _refused_as_violation(mgr, sink, "IF-BER")
+
+
+@pytest.mark.vp("VP1-HOOK-041")
+@pytest.mark.parametrize("both,priority_flag,bearer_flag", [
+    (False, True, False),          # not checked: today's behaviour
+    (True, False, False),          # nothing to agree with: the priority says immune
+    (True, False, True),           # the bearer may be more open than the priority
+    (True, True, True),            # agrees
+    (False, "true", False),        # the check off: not checked whatever IF-PRI says
+])
+def test_arp_vulnerability_accepted(mcx, sink, both, priority_flag, bearer_flag):
+    import dataclasses as dc
+    mgr = _altered(mcx, sink, bearer=_bearer(arp_preemption_vulnerability=bearer_flag),
+                   priority=lambda p: dc.replace(p, preemption_vulnerability=priority_flag),
+                   arp_both_flags=both)
+    session, _, refusal = mgr.establish(req())
+    assert refusal is None and session.bearer.arp_preemption_vulnerability is bearer_flag
+
+
+def test_the_both_flags_setting_is_a_boolean(mcx, sink):
+    with pytest.raises(ValueError, match="arp_both_flags 'true' is not a boolean"):
+        _altered(mcx, sink, arp_both_flags="true")
+
+
 @pytest.mark.vp("VP1-HOOK-040")
 def test_a_consistent_multipath_bearer_decision_is_accepted(mcx, sink):
     mgr = _altered(mcx, sink, bearer=_bearer(

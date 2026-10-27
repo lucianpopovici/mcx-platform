@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.53 (draft)
+**Version:** 0.54 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -185,7 +185,7 @@ declared decision space. Contracts are those of PLT-ICD-001.
 | VP1-HOOK-033 | Session decision applied verbatim | Vary auto-answer, acknowledgement, recording and participant limit | Observed behaviour matches the decision exactly; core infers nothing |
 | VP1-HOOK-034 | Floor policy consistency | Return queueing disabled with non-zero depth, and the converse | Both rejected as contract violations |
 | VP1-HOOK-040 | Bearer decision well-formed | Select for every declared (call type, media) | Exactly one primary path; unique path IDs; redundancy consistent with path count |
-| VP1-HOOK-041 | ARP consistency | Return ARP pre-emption capability against a non-capable priority decision | Rejected as a contract violation |
+| VP1-HOOK-041 | ARP consistency | Return ARP pre-emption capability against a non-capable priority decision; with `MCX_ARP_VULNERABILITY_CHECK=true`, ARP immunity against a priority decision that does not grant it (PLT-ICD-001 ICD-OP-14) | Rejected as a contract violation |
 
 ---
 
@@ -637,6 +637,7 @@ not by relaxing its pass criterion.
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
 | 0.42 | 2026-10-17 | RES-OP-11 closed on the owner's ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required; `refuse` answers a caller outside the declared domains 404 + 141 before any hook runs, `allow` is a reported deviation. |
+| 0.54 | 2026-10-26 | PLT-ICD-001 ICD-OP-14 closed (owner: a parameter): `MCX_ARP_VULNERABILITY_CHECK=true|false`, required, decides whether a bearer decision's ARP pre-emption vulnerability must agree with the priority decision's; `false` is a reported deviation. The frmcs `etcs-ipcon` bearer rule, which kept ETCS un-preemptable at the network after CA-19, is corrected. VP1-HOOK-040 and 041 re-recorded. |
 | 0.53 | 2026-10-26 | SVC-OP-02 decided (owner: option 1) and built: sessions the previous process left established are released at start with cause `process-restart`, each audit trail ending in its own record, before anything is served; the count is in the health document. SVC-OP-08 opened for the option of ending such calls with a BYE (needs persisted dialog state and outbound connections). |
 | 0.52 | 2026-10-26 | SIP-OP-19 closed (owner: now rather than R2): peer numbers take ASCII digits only at the three sites found and at five more of the same defect found closing it (status line, both CSeq checks, the Contact expires parameter, the codec-name pattern); a status line in other digits was read as a 200. SIP-OP-20 opened (review): older REGISTER expiry parsing limits. |
 | 0.51 | 2026-10-26 | SVC-OP-07 decided (owner: as the standard, no call type exempt) and built: a call to a configured group (a private call aimed at one included) whose caller is not a member is refused 403, warning 116 (TS 24.379 6.3.5.2 step 5b), before priority, admission, the session decision and any invitation; ad hoc calls and groups named by a functional identity are not group documents' and are not checked; relayed requests are; a member written differently is the caller once, never invited to its own call. VP1-CC-006: a non-member caller is refused before the decision, and the caller outside a functional identity's group still takes no participant place. |

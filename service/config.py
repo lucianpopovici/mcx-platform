@@ -90,6 +90,9 @@ FLOOR_UNRECORDED_VALUES = ("deny", "allow")
 # declared domains -- possible when a trusted SIP core asserts it -- is
 # refused 404 + 141 ("refuse", PLT-IDM-008) or served ("allow").
 FOREIGN_INITIATOR_VALUES = ("refuse", "allow")
+# PLT-ICD-001 ICD-OP-14 (owner ruling 2026-10-26): whether a bearer decision's
+# ARP pre-emption vulnerability must agree with the priority decision's.
+ARP_BOTH_FLAGS_VALUES = {"true": True, "false": False}
 
 
 def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
@@ -363,6 +366,9 @@ class Config:
     floor_unrecorded: str = ""
     # RES-OP-11: "refuse" or "allow". Required, no default.
     foreign_initiator: str = ""
+    # ICD-OP-14, MCX_ARP_VULNERABILITY_CHECK: "true" or "false", whether
+    # both ARP pre-emption flags are checked. Required, no default.
+    arp_both_flags: str = ""
     # VP-OP-05: MCX_ENV, which the network profile's environment must equal.
     environment: str = ""
     sip: Optional[SipConfig] = None
@@ -479,6 +485,10 @@ class Config:
             env, "MCX_FOREIGN_INITIATOR", FOREIGN_INITIATOR_VALUES,
             "state whether a caller outside the profile's declared domains is "
             "served (PLT-VP-R1 RES-OP-11)")
+        arp_both_flags = _choice(
+            env, "MCX_ARP_VULNERABILITY_CHECK", tuple(ARP_BOTH_FLAGS_VALUES),
+            "state whether a bearer decision's ARP pre-emption vulnerability must "
+            "agree with the priority decision's (PLT-ICD-001 ICD-OP-14)")
         http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
@@ -498,6 +508,7 @@ class Config:
             environment=environment,
             floor_unrecorded=floor_unrecorded,
             foreign_initiator=foreign_initiator,
+            arp_both_flags=arp_both_flags,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,
             http_tls=http_tls,

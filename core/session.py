@@ -188,6 +188,7 @@ class SessionManager:
                  cells: Optional[Mapping[str, Mapping[str, str]]] = None,
                  floor_unrecorded: str = "deny",
                  foreign_initiator: str = "refuse",
+                 arp_both_flags: bool = True,
                  functional_aliases: Optional[Mapping[str, AliasPolicy]] = None) -> None:
         self._loaded = loaded
         # The core holds each hook through a view that exposes only the
@@ -236,6 +237,12 @@ class SessionManager:
             raise ValueError(f"foreign_initiator {foreign_initiator!r} is not one of "
                              f"{', '.join(FOREIGN_INITIATOR)}")
         self._foreign_initiator = foreign_initiator
+        # ICD-OP-14 (owner ruling 2026-10-26, MCX_ARP_VULNERABILITY_CHECK,
+        # required in the service): whether §6.1 POST-5 also holds the bearer
+        # decision's ARP pre-emption vulnerability to the priority decision's.
+        if not isinstance(arp_both_flags, bool):
+            raise ValueError(f"arp_both_flags {arp_both_flags!r} is not a boolean")
+        self._arp_both_flags = arp_both_flags
         # SVC-OP-06 (decided 2026-10-23): who holds which functional identity,
         # activated by the users the deployment allows (TS 24.379 clause 9A).
         # The host feeds it requests; the holders it keeps are what
@@ -618,7 +625,9 @@ class SessionManager:
             bearer = invoker.call("IF-BER", "select",
                                   self._hooks.bearer_selector.select,
                                   request, priority, tuple(request.media),
-                                  post=lambda b: self._check_bearer(b, priority))
+                                  post=lambda b: self._check_bearer(
+                                      b, priority,
+                                      both_flags=self._arp_both_flags))
 
             # 7b — IF-ICX.map_outbound: what the partner is told, before any
             # QoS is reserved, so a failing hook leaves nothing to undo.
@@ -1151,7 +1160,8 @@ class SessionManager:
                     "of milliseconds")
 
     @staticmethod
-    def _check_bearer(bearer: BearerDecision, priority: PriorityDecision) -> None:
+    def _check_bearer(bearer: BearerDecision, priority: PriorityDecision,
+                      both_flags: bool = True) -> None:
         """PLT-ICD-001 §6.1 POST-1/2/3/5, and of POST-4 what the core can
         know: the ARP level is within TS 23.501 5.7.2.2. Which 5QIs a network
         offers is deployment knowledge (RES-OP-07). Each check is one profile
@@ -1215,6 +1225,17 @@ class SessionManager:
             raise HookContractViolation(
                 "bearer decision asks for ARP pre-emption capability, which the "
                 "priority decision does not grant (§6.1 POST-5)")
+        # POST-5, vulnerability (ICD-OP-14, when the deployment checks it):
+        # a call the priority decision leaves open to pre-emption is open to
+        # it at the network too. Here the privilege is immunity, so only an
+        # explicit `False` from IF-PRI grants it (`is not False`): a truthy
+        # "true" or a `None` must not, as only `True` grants capability above
+        # (review of ICD-OP-14). The bearer's flag is a boolean by now.
+        if both_flags and not bearer.arp_preemption_vulnerability and \
+                priority.preemption_vulnerability is not False:
+            raise HookContractViolation(
+                "bearer decision makes the call immune to ARP pre-emption, which "
+                "the priority decision leaves it open to (§6.1 POST-5)")
 
     def _located(self, request: SessionRequest) -> SessionRequest:
         """PLT-ICD-001 2.8: a reported serving cell the deployment maps gains
