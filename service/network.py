@@ -70,6 +70,9 @@ NONE = "none"
 KEYS = {"name", "version", "environment", "plmns", "cells", "sip", "groups", "users",
         "functional_aliases"}
 ALIAS_KEYS = {"id", "users", "take_over"}
+# Optional (FA-OP-01 item 3, owner 2026-10-27): how many may hold a
+# multi-holder identity at once; absent, no limit.
+ALIAS_OPTIONAL = {"max_holders"}
 GROUP_KEYS = {"id", "display_name", "members", "call_type"}
 SIP_KEYS = {"trusted_cores", "core_ca"}
 # "/" and "+" separate the parts of the audit identifier, so neither may occur.
@@ -353,8 +356,10 @@ def _functional_aliases(raw: Any, known: Set[str], defects: List[str],
         {f.id: f for f in functional if f.resolves_to == "user"}
     for i, entry in enumerate(raw):
         where = f"functional_aliases[{i}]"
-        if not isinstance(entry, dict) or set(entry) != ALIAS_KEYS:
-            defects.append(f"{where}: expected exactly 'id', 'users' and 'take_over'")
+        if not isinstance(entry, dict) or not ALIAS_KEYS <= set(entry) or \
+                set(entry) - ALIAS_KEYS - ALIAS_OPTIONAL:
+            defects.append(f"{where}: expected 'id', 'users' and 'take_over', and "
+                           "optionally 'max_holders'")
             continue
         ident = entry["id"]
         if not isinstance(ident, str) or not ident.strip():
@@ -386,7 +391,19 @@ def _functional_aliases(raw: Any, known: Set[str], defects: List[str],
             defects.append(f"{where}.take_over: may take over but may not hold: "
                            f"{', '.join(map(repr, outside))}")
             continue
-        out[ident] = AliasPolicy(users=frozenset(users), take_over=frozenset(takers))
+        limit = entry.get("max_holders")
+        if "max_holders" in entry:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                defects.append(f"{where}.max_holders: expected an integer of at least 1, "
+                               f"not {limit!r}")
+                continue
+            if declared is not None and declared[ident].multiplicity != "multi":
+                defects.append(f"{where}.max_holders: {ident!r} is single-holder, so one "
+                               "holds it at a time; max_holders is for a multi-holder "
+                               "identity")
+                continue
+        out[ident] = AliasPolicy(users=frozenset(users), take_over=frozenset(takers),
+                                 max_holders=limit)
     return out
 
 

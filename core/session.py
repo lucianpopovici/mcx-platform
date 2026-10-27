@@ -312,9 +312,12 @@ class SessionManager:
             return self.functional.refuse(correlation_id, user, wanted,
                                           exc.reason_code, str(exc))
         if persist is not None:
-            after = {*self.functional.holdings()} - removed | set(outcome.activated)
+            # In the ledger's order, the new holders last: the order holders
+            # activated survives a restart (review of FA-OP-01 item 3).
+            after = tuple(h for h in self.functional.holdings() if h not in removed) + \
+                tuple(h for h in outcome.activated if h not in self.functional.holdings())
             try:
-                persist(tuple(sorted(after, key=lambda h: (h.identity, h.slot, h.holder))))
+                persist(after)
             except Exception as store_exc:                      # noqa: BLE001
                 not_persisted("after-resolver", store_exc)
                 self._roll_back_aliases(correlation_id, invoker, bound, undone)
@@ -331,10 +334,11 @@ class SessionManager:
 
         `pending` is the holding whose bind failed (the last one tried): the
         resolver may have taken it all the same (a deadline overrun, an
-        unrecordable result), so it is unbound too; unbinding nothing is a no-op (§3.3 POST-2). A
-        single-holder identity the taker could not be unbound from keeps the
-        taker: the holder it was taken from is not bound again (the resolver
-        would replace the taker) but dropped, as taken over."""
+        unrecordable result), so it is unbound too; unbinding nothing is a no-op (§3.3 POST-2). An
+        identity the taker could not be unbound from keeps the taker: the
+        holder it was taken from is not bound again (for a single-holder
+        identity the resolver would replace the taker; for one at its
+        max_holders it would exceed it) but dropped, as taken over."""
         stuck = set()
         for h in (*bound, *((pending,) if pending else ())):
             try:
@@ -352,7 +356,8 @@ class SessionManager:
                                    action="rollback-incomplete", identity=h.identity,
                                    slot=h.slot, holder=h.holder, reason=exc.reason_code)
         for h in undone:
-            # Only a take-over displaces, and only of a single-holder identity.
+            # Only a take-over displaces: of a single-holder identity, or of a
+            # multi-holder one at its max_holders (FA-OP-01 item 3).
             if (h.identity, h.slot) in stuck:
                 self.functional.drop(h)
                 self._auditor.emit(RecordType.BINDING_CHANGED, correlation_id,

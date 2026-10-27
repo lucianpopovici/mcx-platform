@@ -60,10 +60,13 @@ EVERYWHERE = ""
 
 @dataclass(frozen=True)
 class AliasPolicy:
-    """Deployment data for one functional identity: who may hold it, and who
-    of them may take it over from another holder."""
+    """Deployment data for one functional identity: who may hold it, who of
+    them may take it over from another holder, and, for a multi-holder
+    identity, how many may hold it at once (None: no limit; TS 24.484
+    <max-simultaneous-activations>, FA-OP-01 item 3)."""
     users: FrozenSet[str]
     take_over: FrozenSet[str] = frozenset()
+    max_holders: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -142,16 +145,25 @@ class FunctionalAliases:
                         f"{identity!r} is held per {declared.location_key}, and no "
                         "reported location gives one")
             others = tuple(h for h in self._held.get((identity, slot), ()) if h != user)
-            if declared.multiplicity == SINGLE and others:
+            # 9A.2.2.3.3 step 5: <max-simultaneous-activations> reached. One
+            # for a single-holder identity; for a multi-holder one, the
+            # deployment's max_holders, if it states one (FA-OP-01 item 3).
+            # Counting the others only: a holder publishing again is not one
+            # more, and holders never exceed the limit (restore caps them).
+            limit = 1 if declared.multiplicity == SINGLE else policy.max_holders
+            if limit is not None and len(others) >= limit:
                 if not take_over:
                     return self.refuse(correlation_id, user, wanted, FUNCTIONAL_ALIAS_HELD,
                                        f"{identity!r} at {slot or 'any location'!r} is "
-                                       f"held by {others[0]}")
+                                       f"held by {', '.join(others)}"
+                                       + (f" (at most {limit})" if limit > 1 else ""))
                 if user not in policy.take_over:
                     return self.refuse(correlation_id, user, wanted,
                                        FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
                                        f"{user} may not take over {identity!r}")
-                displaced += [Holding(identity, slot, o) for o in others]
+                # Step 6: room is made by the earliest holders, as many as needed.
+                displaced += [Holding(identity, slot, o)
+                              for o in others[:len(others) - limit + 1]]
             plan.append(Holding(identity, slot, user))
         activated = tuple(h for h in plan if current.get(h.identity) != h)
         deactivated = tuple(h for i, h in sorted(current.items())
@@ -187,11 +199,16 @@ class FunctionalAliases:
         return (declared.location_key or "") if declared is not None else ""
 
     def single_held(self, h: Holding) -> bool:
-        """Whether `h`'s identity is single-holder and already held at `h`'s
-        slot (by another: restore takes each holding once)."""
+        """Whether `h`'s identity has as many holders at `h`'s slot as it may
+        (by others: restore takes each holding once): one for a single-holder
+        identity, the deployment's max_holders for a multi-holder one."""
         declared = self._profile.functional_identity(h.identity)
-        return declared is not None and declared.multiplicity == SINGLE and \
-            bool(self._held.get((h.identity, h.slot)))
+        if declared is None:
+            return False
+        policy = self._policy.get(h.identity)
+        limit = 1 if declared.multiplicity == SINGLE else \
+            (policy.max_holders if policy is not None else None)
+        return limit is not None and len(self._held.get((h.identity, h.slot), ())) >= limit
 
     def location_for(self, h: Holding, location: Optional[LocationContext]
                      ) -> Optional[LocationContext]:

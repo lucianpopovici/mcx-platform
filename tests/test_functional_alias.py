@@ -563,6 +563,79 @@ def test_a_multi_holder_identity_has_no_holder_limit(monkeypatch):
     assert mgr2.functional.holdings() == both
 
 
+@pytest.fixture
+def capped(monkeypatch):
+    """control-engineer made multi-holder, at most two, all three engineers
+    allowed and the third allowed to take over (FA-OP-01 item 3)."""
+    import dataclasses
+    mgr, loaded, sink = _manager("utility", ENG, {"control-engineer": AliasPolicy(
+        users=frozenset(ENG), take_over=frozenset([ENG[2]]), max_holders=2)})
+    cls = type(loaded.profile)
+    real = cls.functional_identity
+    multi = dataclasses.replace(real(loaded.profile, "control-engineer"),
+                                multiplicity="multi")
+    monkeypatch.setattr(cls, "functional_identity",
+                        lambda self, i: multi if i == "control-engineer" else real(self, i))
+    return mgr, loaded, sink
+
+
+def test_max_holders_refuses_one_more_unless_taken_over(capped):
+    """9A.2.2.3.3 steps 5 and 6 with <max-simultaneous-activations> 2: a third
+    is refused functional-alias-held; with take-over, the earliest holder
+    makes room."""
+    mgr, loaded, _ = capped
+    for cid, user in (("p0", ENG[0]), ("p1", ENG[1])):
+        assert mgr.change_functional_aliases(cid, user, ["control-engineer"], False,
+                                             None).accepted
+    held = mgr.change_functional_aliases("p2", ENG[2], ["control-engineer"], False, None)
+    assert (held.reason_code, held.detail) == (
+        "functional-alias-held", "'control-engineer' at 'any location' is held by "
+        f"{ENG[0]}, {ENG[1]} (at most 2)")
+    # A holder publishing again is not one more.
+    assert mgr.change_functional_aliases("p3", ENG[1], ["control-engineer"], False,
+                                         None).accepted
+    taken = mgr.change_functional_aliases("p4", ENG[2], ["control-engineer"], True, None)
+    assert taken.accepted and taken.displaced == (Holding("control-engineer", "", ENG[0]),)
+    assert mgr.functional.holdings() == (Holding("control-engineer", "", ENG[1]),
+                                         Holding("control-engineer", "", ENG[2]))
+    assert [_roles(loaded, u) for u in ENG] == [(), ("control-engineer",),
+                                                ("control-engineer",)]
+
+
+def test_the_order_holders_activated_survives_a_restart(capped, tmp_path):
+    """Review of FA-OP-01 item 3: the holders are kept in the order they
+    activated, not by URI, so after a restart a take-over still displaces
+    the earliest (e1 here, though e0 sorts first)."""
+    from service.store import SqliteStore
+    mgr, _, _ = capped
+    saved = []
+    for cid, user in (("p1", ENG[1]), ("p0", ENG[0])):
+        assert mgr.change_functional_aliases(cid, user, ["control-engineer"], False, None,
+                                             persist=saved.append).accepted
+    order = (Holding("control-engineer", "", ENG[1]), Holding("control-engineer", "", ENG[0]))
+    assert saved[-1] == order
+    store = SqliteStore(tmp_path / "data")
+    try:
+        store.save_holdings([(h.identity, h.slot, h.holder) for h in order])
+        stored = [Holding(*h) for h in store.holdings()]
+    finally:
+        store.close()
+    assert tuple(stored) == order
+    mgr2, _, _ = _manager("utility", ENG, {"control-engineer": AliasPolicy(
+        users=frozenset(ENG), take_over=frozenset([ENG[2]]), max_holders=2)})
+    assert mgr2.restore_functional_aliases(stored, "process-start") == order
+    taken = mgr2.change_functional_aliases("p2", ENG[2], ["control-engineer"], True, None)
+    assert taken.displaced == (Holding("control-engineer", "", ENG[1]),)
+
+
+def test_restore_keeps_no_more_than_max_holders(capped):
+    mgr, _, sink = capped
+    three = [Holding("control-engineer", "", u) for u in ENG]
+    assert mgr.restore_functional_aliases(three, "process-start") == tuple(three[:2])
+    assert [(r["holder"], r["reason"]) for r in _records(sink, RecordType.BINDING_CHANGED)
+            if r["action"] == "dropped-at-restart"] == [(ENG[2], "already-held")]
+
+
 # ============================================================ the PIDF body (9A.3.1)
 
 
