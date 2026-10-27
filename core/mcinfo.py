@@ -91,6 +91,9 @@ class McInfo:
     # Ad hoc group calls, from <anyExt> (TS 24.379 17.2.2.1.1 items 10d, 12).
     participant_criteria: Optional[str] = None
     adhoc_alert_group: Optional[bool] = None
+    # What a request asks for, from <anyExt> <request-type> (annex F.1), e.g.
+    # "functional-alias-status-determination" (9A.2.1.3).
+    request_type: Optional[str] = None
     # Content elements carried with type="Encrypted" (clause 6.6.2). The
     # platform holds no key to read them, so they are recorded, not guessed.
     encrypted: FrozenSet[str] = field(default_factory=frozenset)
@@ -295,10 +298,12 @@ def parse(text: str) -> McInfo:
     ext = params.find(_NS + "anyExt")
     crit = ext.find(_NS + "call-participants-criterias") if ext is not None else None
     alert = ext.find(_NS + "adhoc-grp-emg-alert-grp-ind") if ext is not None else None
+    rtype = ext.find(_NS + "request-type") if ext is not None else None
 
     return McInfo(
         participant_criteria=(crit.text or "").strip() if crit is not None else None,
         adhoc_alert_group=_boolean(alert.text) if alert is not None else None,
+        request_type=(rtype.text or "").strip() if rtype is not None else None,
         session_type=session_type,
         request_uri=content("mcptt-request-uri"),
         calling_user_id=content("mcptt-calling-user-id"),
@@ -528,6 +533,9 @@ class AliasStatusChange:
     client_id: str
     aliases: Tuple[str, ...]
     take_over: bool = False
+    # The <p-id-fa> of the request, echoed in the NOTIFY it causes
+    # (9A.2.2.2.5 item 2c); None when the request carries none.
+    p_id_fa: Optional[str] = None
 
 
 def alias_status_change(content_type: str, body: str) -> AliasStatusChange:
@@ -565,7 +573,39 @@ def alias_status_change(content_type: str, body: str) -> AliasStatusChange:
             raise McInfoError("a <functionalAlias> without functionalAliasID")
         aliases.append(ident)
     take_over = status.find(_FA + "take-over")
+    pid = root.find(_FA + "p-id-fa")
     return AliasStatusChange(
         entity=entity, client_id=(tuples[0].get("id") or "").strip(),
         aliases=tuple(dict.fromkeys(aliases)),
-        take_over=bool(_boolean(take_over.text)) if take_over is not None else False)
+        take_over=bool(_boolean(take_over.text)) if take_over is not None else False,
+        p_id_fa=(pid.text or "").strip() if pid is not None else None)
+
+
+# 9A.2.1.3: the <request-type> of a functional alias status subscription.
+FA_STATUS_DETERMINATION = "functional-alias-status-determination"
+# The 9A.3.1.2 statusType values this platform reports. It answers a PUBLISH
+# when it has decided (a recorded deviation, PLT-VP-R1 SVC-OP-06), so no alias
+# is ever "activating" or "deactivating" here.
+FA_ACTIVATED = "activated"
+FA_TAKE_OVER_POSSIBLE = "take-over-possible"
+
+
+def alias_status_document(entity: str, client_id: str,
+                          aliases: Sequence[Tuple[str, str]],
+                          p_id_fa: Optional[str] = None) -> str:
+    """The application/pidf+xml body indicating per-user functional alias
+    information (9A.3.1.2, first form) a NOTIFY carries (9A.2.2.2.5): the
+    user in "entity", one <tuple> whose id is the MCPTT client ID, and one
+    <functionalAlias> per (functional alias ID, status) in `aliases`.
+
+    Element order is RFC 3863's: a <presence> holds its <tuple>s and then
+    elements of other namespaces, so <p-id-fa> follows the tuple."""
+    fas = "".join(f'<mcpttPIFA10:functionalAlias functionalAliasID="{_esc(a)}" '
+                  f'status="{_esc(st)}"/>' for a, st in aliases)
+    pid = f"<mcpttPIFA10:p-id-fa>{_esc(p_id_fa)}</mcpttPIFA10:p-id-fa>" \
+        if p_id_fa is not None else ""
+    return ('<?xml version="1.0" encoding="UTF-8"?>\r\n'
+            '<presence xmlns="urn:ietf:params:xml:ns:pidf" '
+            'xmlns:mcpttPIFA10="urn:3gpp:ns:mcpttPresInfoFA:1.0" '
+            f'entity="{_esc(entity)}"><tuple id="{_esc(client_id)}"><status>{fas}'
+            f"</status></tuple>{pid}</presence>\r\n")

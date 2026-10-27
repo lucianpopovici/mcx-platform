@@ -669,7 +669,7 @@ def test_the_pidf_body_is_read_as_9a_3_1_writes_it():
         ENG[0], ["control-engineer", "control-engineer", "x"], take_over="true"))
     assert got == mcinfo.AliasStatusChange(entity=ENG[0], client_id="client-1",
                                            aliases=("control-engineer", "x"),
-                                           take_over=True)
+                                           take_over=True, p_id_fa="abc")
     assert mcinfo.alias_status_change(mcf.CONTENT_TYPE, publish_body(ENG[0], [])).aliases == ()
 
 
@@ -838,18 +838,19 @@ def test_publish_does_not_exist_before_rel_15(tmp_path, pki, release):
         core.on_bytes(publish(ENG[0], ["control-engineer"]), f)
         got = _last(f)
         assert got.code == 501 and "PUBLISH" not in got.headers.get("Allow")
+        assert "SUBSCRIBE" not in got.headers.get("Allow")
         assert rt.store.holdings() == []
     finally:
         core.close()
         rt.close()
 
 
-def test_the_allow_header_names_publish_from_rel_15():
+def test_the_allow_header_names_publish_and_subscribe_from_rel_15():
     from core.release import Release
     from core.sip import allow
     assert allow(Release.REL_14) == "INVITE, ACK, BYE, CANCEL, UPDATE, REGISTER, OPTIONS"
     assert allow(Release.REL_15) == ("INVITE, ACK, BYE, CANCEL, UPDATE, REGISTER, OPTIONS, "
-                                     "PUBLISH")
+                                     "PUBLISH, SUBSCRIBE")
 
 
 def test_take_over_over_sip(tmp_path, pki):

@@ -39,7 +39,8 @@ from core.sip import (
     parse_message, parse_sdp,
     OPTION_TIMER, SUPPORTED_ON_ANSWER, SUPPORTED_ON_PROVISIONAL, allows,
     parse_min_se, uac_session_timer, uas_session_timer, valid_call_id,
-    FUNCTIONAL_ALIAS_EXPIRES, allow, parse_publish,
+    FUNCTIONAL_ALIAS_EXPIRES, allow, parse_publish, parse_subscribe,
+    subscribe_expires, accepts_pidf, clip,
 )
 from core.release import supports_procedure
 
@@ -70,6 +71,20 @@ _DEFAULT_REGISTER_S = 3600     # RFC 3261 §10.2: protocol default, not policy
 # The release cause of a call ended because its holder's functional alias
 # was taken over (FA-OP-01 item 4, MCX_DISPLACED_HOLDER_CALLS=release).
 TAKEN_OVER_CAUSE = "functional-alias-taken-over"
+# Functional alias status subscriptions (FA-OP-01 item 1). RFC 3856 6.4: the
+# presence package's default duration, for a SUBSCRIBE without Expires.
+_DEFAULT_SUBSCRIBE_S = 3600
+# At most this many subscriptions per user; one more is refused 403. A client
+# needs one (9A.2.1.3); the bound keeps a client that subscribes again
+# without ending the last from filling memory.
+MAX_ALIAS_SUBSCRIPTIONS_PER_USER = 8
+# And at most this many in all: a trusted core may assert any user of the
+# profile's domains, provisioned or not (review). One more is refused 503.
+MAX_ALIAS_SUBSCRIPTIONS = 4096
+# A Contact that becomes a NOTIFY Request-URI: a SIP URI with no space, quote
+# or angle bracket, which a start line could not carry (review).
+_SIP_TARGET = re.compile(r"(?i:sips?):[^\s\"<>]+")
+_EVENT_ID = re.compile(r";\s*id\s*=\s*([^;\s]+)", re.I)
 
 
 @dataclass
@@ -158,6 +173,36 @@ class Refresh:
     ack: str = ""
     method: str = "UPDATE"
     txn: Any = None
+
+
+@dataclass
+class AliasSubscription:
+    """One functional alias status subscription (TS 24.379 9A.2.2.2.4, RFC
+    6665): a dialog the platform created with its 200 to an initial
+    SUBSCRIBE, and NOTIFYs to the subscriber in it."""
+    call_id: str
+    local_tag: str
+    remote_tag: str
+    event_id: str                     # RFC 6665 7.2.1 "id", "" when none
+    subscriber: str                   # the served user, canonical
+    remote_from: str                  # the SUBSCRIBE's From: the NOTIFY's To
+    remote_target: str
+    route_set: List[str]
+    flow: Any                         # None: its connection closed (review)
+    expires_at: Optional[int] = None  # ms on the core's clock; None: ended
+    cseq: int = 0
+    remote_cseq: int = 0
+    # The status last sent, to tell a change (9A.2.2.2.5).
+    # None: not known to have been told anything (a NOTIFY unanswered).
+    last: Optional[Tuple[Tuple[str, str], ...]] = ()
+
+    @property
+    def key(self) -> Tuple[str, str, str]:
+        return (self.call_id, self.remote_tag, self.event_id)
+
+    @property
+    def event(self) -> str:
+        return "presence" + (f";id={self.event_id}" if self.event_id else "")
 
 
 @dataclass
@@ -328,6 +373,13 @@ class SipCore:
         # SVC-OP-06: the cell each user last reported, from an authenticated
         # request, for a functional alias PUBLISH that reports none.
         self.last_location: Dict[str, Any] = {}
+        # FA-OP-01 item 1: functional alias status subscriptions, by dialog
+        # and event id, and each user's MCPTT client ID as its last accepted
+        # PUBLISH gave it (the <tuple> id a NOTIFY carries, 9A.3.1.2 item 5).
+        # Neither survives a restart: a subscriber whose refresh is answered
+        # 481 subscribes again (RFC 6665 4.1.2.2).
+        self.alias_subs: Dict[Tuple[str, str, str], AliasSubscription] = {}
+        self.client_ids: Dict[str, str] = {}
         # RFC 4028: the interval asked for, and the cap on a longer one, in
         # the seconds of the Session-Expires header (configured in ms, a
         # whole number of seconds: service/config.py).
@@ -399,6 +451,13 @@ class SipCore:
     def on_flow_closed(self, flow: Any) -> None:
         for uri in [u for u, f in self.flows_by_user.items() if f is flow]:
             del self.flows_by_user[uri]
+        # The subscription outlives its connection: a 9A client asks for
+        # 4294967295 seconds and never refreshes, so it would never learn it
+        # had gone (review). Its NOTIFYs go to the user's connection once it
+        # has one again (_send_notify), what changed meanwhile with them.
+        for sub in self.alias_subs.values():
+            if sub.flow is flow:
+                sub.flow = None
 
     def _on_request(self, req: Request, flow: Any) -> None:
         # 1 — retransmission?
@@ -453,9 +512,9 @@ class SipCore:
                    "BYE": self._bye, "CANCEL": self._cancel,
                    "UPDATE": self._in_dialog,
                    "OPTIONS": self._options}.get(req.method)
-        if req.method == "PUBLISH" and \
+        if req.method in ("PUBLISH", "SUBSCRIBE") and \
                 supports_procedure(self.rt.config.release, "functional-alias"):
-            handler = self._publish
+            handler = self._publish if req.method == "PUBLISH" else self._subscribe
         if handler is None:
             resp = Response(Status.NOT_IMPLEMENTED,
                             Headers([("Allow", allow(self.rt.config.release))]))
@@ -489,7 +548,7 @@ class SipCore:
         # into each response that can create a dialog. Without it the
         # initiator has no route set, and its ACK and BYE reach the proxy
         # with no Route header -- which Kamailio, correctly, dropped.
-        if req.method == "INVITE" and 100 < resp.status.code < 300 \
+        if req.method in ("INVITE", "SUBSCRIBE") and 100 < resp.status.code < 300 \
                 and not _tag_of(req.headers.get("To")):
             # A re-INVITE does not change the route set (12.2).
             for v in _header_values(req.headers.get_all("Record-Route")):
@@ -543,16 +602,37 @@ class SipCore:
             raise SipError("the PIDF entity is not the user named in <mcptt-request-uri>")
         location = pub.location or self.last_location.get(pub.served)
         wanted = pub.change.aliases if pub.expires else ()
-        # The store is written ahead of the resolver (SessionManager.change_
-        # functional_aliases): a store that fails is a 500 with nothing changed.
-        outcome = self.rt.manager.change_functional_aliases(
-            txn.call_id, pub.served, wanted, pub.change.take_over, location,
-            persist=lambda held: self.rt.store.save_holdings(
-                [(h.identity, h.slot, h.holder) for h in held]))
+        accepted = False
+        try:
+            # The store is written ahead of the resolver (SessionManager.change_
+            # functional_aliases): a store that fails is a 500 with nothing
+            # changed.
+            outcome = self.rt.manager.change_functional_aliases(
+                txn.call_id, pub.served, wanted, pub.change.take_over, location,
+                persist=lambda held: self.rt.store.save_holdings(
+                    [(h.identity, h.slot, h.holder) for h in held]))
+            self._answer_publish(req, txn, pub, outcome)
+            # Only a PUBLISH answered 200 is the publisher's to be told of with
+            # its p-id-fa; one that faulted after the change was answered 500
+            # (review).
+            accepted = outcome.accepted
+        finally:
+            # 9A.2.2.2.3 step 17: every subscriber whose status this changed
+            # is told, after the answer (FA-OP-01 item 1). Also after a refusal
+            # or a fault: a rollback the resolver would not take changes
+            # holders too. The publisher's own subscriptions are told of an
+            # accepted PUBLISH with its p-id-fa even when nothing changed.
+            self._notify_alias_status(pub.served,
+                                      pub.change.p_id_fa if accepted else None,
+                                      published=accepted)
+
+    def _answer_publish(self, req: Request, txn: ServerTxn, pub: Any, outcome: Any) -> None:
         if not outcome.accepted:
             return self._reject(txn, outcome.reason_code)
         if pub.location is not None:
             self.last_location[pub.served] = pub.location
+        if pub.change.client_id:
+            self.client_ids[pub.served] = pub.change.client_id
         if self.rt.config.sip.displaced_holder_calls == "release":
             # FA-OP-01 item 4 (MCX_DISPLACED_HOLDER_CALLS=release): the calls a
             # holder is in because of an alias taken over from it end with it.
@@ -575,6 +655,239 @@ class SipCore:
         # RFC 3903 6: a 2xx to PUBLISH carries the entity-tag of the state.
         self._final(txn, Response(Status.OK, Headers([
             ("SIP-ETag", secrets.token_hex(8)), ("Expires", str(pub.expires))])))
+
+    # -- SUBSCRIBE / NOTIFY: functional alias status (9A.2.2.2.4-5, Rel-15 on) --
+
+    def _subscribe(self, req: Request, txn: ServerTxn, flow: Any) -> None:
+        """9A.2.2.2.4 with RFC 6665 as the notifier: an initial SUBSCRIBE
+        creates a subscription, one within its dialog refreshes or ends it
+        (FA-OP-01 item 1)."""
+        event = req.headers.get("Event") or ""
+        if event.split(";")[0].strip().lower() != "presence":
+            return self._final(txn, Response(Status.BAD_EVENT,
+                                             Headers([("Allow-Events", "presence")])))
+        m = _EVENT_ID.search(event)
+        event_id = m.group(1) if m else ""
+        remote_tag = _tag_of(req.headers.get("From"))
+        if not remote_tag:
+            raise SipError("SUBSCRIBE without a From tag")    # RFC 3261 8.1.1.3
+        if _tag_of(req.headers.get("To")):
+            return self._resubscribe(req, txn, flow, remote_tag, event_id)
+        sub = parse_subscribe(req)
+        # Step 4: the platform holds no authorisation for one user to watch
+        # another's aliases, so only the user's own are given, to that user
+        # authenticated (ICD-OP-08) -- as for PUBLISH.
+        if sub.originating != sub.served or not self._authenticated_as(flow, sub.served):
+            return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        if identity.outside((sub.served,), self.rt.loaded.profile.identity.domains):
+            return self._reject(txn, NOT_AUTHORISED)
+        if not sub.accepts_pidf:
+            return self._final(txn, Response(Status.NOT_ACCEPTABLE,
+                                             Headers([("Accept", mcinfo.CT_PIDF)])))
+        contact = self._contact_of(req)
+        if not contact:
+            raise SipError("SUBSCRIBE without a Contact")       # RFC 6665 4.1.2.1
+        seconds = _DEFAULT_SUBSCRIBE_S if sub.expires is None else sub.expires
+        key = (txn.call_id, remote_tag, event_id)
+        existing = self.alias_subs.get(key)
+        if existing is not None and existing.subscriber != sub.served:
+            # Another user's dialog identifiers: neither replaced nor ended
+            # by this one (review).
+            return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        held = [x for x in self.alias_subs.values() if x.subscriber == sub.served]
+        if seconds and existing is None:
+            if len(held) >= MAX_ALIAS_SUBSCRIPTIONS_PER_USER:
+                # A client that restarted subscribes anew, and its old
+                # subscriptions wait with no connection: the oldest of those
+                # makes room (review).
+                waiting = [x for x in held if x.flow is None]
+                if waiting:
+                    self._drop_alias_sub(waiting[0], "replaced by a new subscription")
+                    held.remove(waiting[0])
+            if len(held) >= MAX_ALIAS_SUBSCRIPTIONS_PER_USER:
+                return self._final(txn, Response(Status.FORBIDDEN, Headers([(
+                    "Warning", f'399 mcx "at most {MAX_ALIAS_SUBSCRIPTIONS_PER_USER} '
+                               'functional alias subscriptions per user"')])))
+            if len(self.alias_subs) >= MAX_ALIAS_SUBSCRIPTIONS:
+                return self._final(txn, Response(Status.SERVICE_UNAVAILABLE, Headers([(
+                    "Warning", f'399 mcx "at most {MAX_ALIAS_SUBSCRIPTIONS} '
+                               'functional alias subscriptions"')])))
+        # The same dialog identifiers again are the same subscription, and its
+        # NOTIFYs go on counting (RFC 3261 12.2.1.1; review): the platform's
+        # tag is a function of the Call-ID.
+        subscription = existing or AliasSubscription(
+            call_id=txn.call_id, local_tag=_tag(txn.call_id), remote_tag=remote_tag,
+            event_id=event_id, subscriber=sub.served, remote_from="", remote_target="",
+            route_set=[], flow=flow)
+        subscription.remote_from = req.headers.get("From") or ""
+        subscription.remote_target = contact
+        subscription.route_set = _header_values(req.headers.get_all("Record-Route"))
+        subscription.flow = flow
+        subscription.remote_cseq = max(subscription.remote_cseq, cseq_of(req.headers)[0])
+        if seconds:
+            subscription.expires_at = self.clock() + seconds * 1000
+            self.alias_subs[key] = subscription
+        else:
+            subscription.expires_at = None
+            self.alias_subs.pop(key, None)
+        self._final(txn, self._subscribed(seconds))
+        # RFC 6665 4.2.1.2: a NOTIFY follows the 200 at once, with the status
+        # now; Expires 0 fetches it, and ends the subscription with it
+        # (9A.2.1.3 item 5).
+        self._notify_safely(subscription)
+
+    def _resubscribe(self, req: Request, txn: ServerTxn, flow: Any,
+                     remote_tag: str, event_id: str) -> None:
+        sub = self.alias_subs.get((txn.call_id, remote_tag, event_id))
+        if sub is None or _tag_of(req.headers.get("To")) != sub.local_tag:
+            return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
+        if not self._authenticated_as(flow, sub.subscriber):
+            return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
+        cseq = cseq_of(req.headers)[0]
+        if cseq <= sub.remote_cseq:
+            # RFC 3261 12.2.2: out of order within the dialog.
+            return self._final(txn, Response(Status.SERVER_ERROR))
+        expires = subscribe_expires(req)
+        if not accepts_pidf(req):
+            return self._final(txn, Response(Status.NOT_ACCEPTABLE,
+                                             Headers([("Accept", mcinfo.CT_PIDF)])))
+        sub.remote_cseq = cseq
+        # A refresh may come on the connection the subscriber has now (as it
+        # was authenticated on it); the NOTIFYs follow it.
+        sub.flow = flow
+        contact = self._contact_of(req)
+        if contact:
+            sub.remote_target = contact                  # RFC 6665 4.1.2.2
+        seconds = _DEFAULT_SUBSCRIBE_S if expires is None else expires
+        if seconds:
+            sub.expires_at = self.clock() + seconds * 1000
+        else:
+            del self.alias_subs[sub.key]                 # 9A.2.1.3: de-subscribe
+            sub.expires_at = None
+        self._final(txn, self._subscribed(seconds))
+        self._notify_safely(sub)
+
+    @staticmethod
+    def _contact_of(req: Request) -> str:
+        contact = _addr_uri(req.headers.get("Contact") or "")
+        if contact and not _SIP_TARGET.fullmatch(contact):
+            raise SipError(f"Contact {clip(contact)} is not a SIP URI a request can be sent to")
+        return contact
+
+    def _notify_safely(self, sub: AliasSubscription) -> None:
+        """A NOTIFY after the 200: a fault in it is logged, never a second
+        final response to the SUBSCRIBE (review)."""
+        try:
+            self._send_notify(sub)
+        except Exception:                                       # noqa: BLE001
+            log.exception("functional alias status NOTIFY to %s failed", sub.subscriber)
+
+    def _resume_alias_subs(self, user: str) -> None:
+        """The user has a connection again: each of its subscriptions left
+        without one takes it and is told the status now, changed or not, so
+        that one its client no longer knows is answered 481 and goes
+        (review); one that still has a connection is told only of a change."""
+        for sub in list(self.alias_subs.values()):
+            if sub.subscriber == user:
+                try:
+                    if sub.flow is None or \
+                            self.rt.manager.functional.status_of(user) != sub.last:
+                        self._send_notify(sub)
+                except Exception:                               # noqa: BLE001
+                    log.exception("functional alias status NOTIFY to %s failed", user)
+
+    def _subscribed(self, seconds: int) -> Response:
+        # RFC 6665 4.2.1.1: the 200 carries the duration granted and a Contact.
+        return Response(Status.OK, Headers([("Expires", str(seconds)),
+                                            ("Contact", f"<{self.local_uri}>")]))
+
+    def _send_notify(self, sub: AliasSubscription, p_id_fa: Optional[str] = None) -> None:
+        """A NOTIFY with the subscriber's status now (9A.2.2.2.5): the state
+        "active" with the seconds left, or "terminated" once it has ended.
+        Sent on the subscription's connection, or, once that closed, on the
+        user's registered one; with neither it waits (_resume_alias_subs)."""
+        flow = sub.flow or self.flows_by_user.get(sub.subscriber)
+        if flow is None:
+            return
+        sub.flow = flow
+        status = self.rt.manager.functional.status_of(sub.subscriber)
+        client = self.client_ids.get(sub.subscriber) or \
+            "mcx-" + hashlib.sha256(sub.subscriber.encode()).hexdigest()[:12]
+        body = mcinfo.alias_status_document(sub.subscriber, client, status, p_id_fa)
+        if sub.expires_at is None:
+            state = "terminated;reason=timeout"
+        else:
+            # Whole seconds left, rounded up: the grant itself, at once.
+            state = f"active;expires={max(0, -((self.clock() - sub.expires_at) // 1000))}"
+        sub.cseq += 1
+        h = Headers([
+            ("Via", f"SIP/2.0/TLS {self.local_uri.rpartition('@')[2]};branch=z9hG4bK"),
+            ("From", f"<{self.local_uri}>;tag={sub.local_tag}"),
+            ("To", sub.remote_from), ("Call-ID", sub.call_id),
+            ("CSeq", f"{sub.cseq} NOTIFY"), ("Max-Forwards", "70"),
+            ("Event", sub.event), ("Subscription-State", state),
+            ("Contact", f"<{self.local_uri}>"), ("Content-Type", mcinfo.CT_PIDF)])
+        ruri, routes = dialog_target(sub.remote_target, sub.route_set)
+        for r in routes:
+            h.add("Route", r)
+        req = self._with_branch(Request("NOTIFY", ruri, h, body))
+        try:
+            flow.send(req.render())
+        except Exception:                                       # noqa: BLE001
+            # A connection going away: the subscription waits for the next
+            # one, and is told then (review).
+            sub.flow = None
+            log.warning("functional alias status NOTIFY to %s not sent: its connection "
+                        "failed", sub.subscriber)
+            return
+        self.client.start(req, flow, user=sub)
+        # Only once sent: what the subscriber was last told (review).
+        sub.last = status
+
+    def _notify_alias_status(self, publisher: str, p_id_fa: Optional[str],
+                             published: bool) -> None:
+        """Tell each subscriber whose status is no longer what it was last
+        told (9A.2.2.2.5), and the publisher's own subscriptions of an
+        accepted PUBLISH, with its p-id-fa (item 2c). One that cannot be
+        told is logged; the others still are."""
+        for sub in list(self.alias_subs.values()):
+            try:
+                own = published and sub.subscriber == publisher
+                if own or self.rt.manager.functional.status_of(sub.subscriber) != sub.last:
+                    self._send_notify(sub, p_id_fa if own else None)
+            except Exception:                                   # noqa: BLE001
+                log.exception("functional alias status NOTIFY to %s failed",
+                              sub.subscriber)
+
+    def _notify_answered(self, txn: ClientTxn, resp: ReceivedResponse) -> None:
+        if resp.code < 200:
+            return
+        self.client.finish(txn)
+        sub: AliasSubscription = txn.user
+        if resp.code == 481:
+            # RFC 6665 4.2.2: the subscriber knows no such subscription.
+            self._drop_alias_sub(sub, "answered 481")
+        elif resp.code >= 300:
+            log.info("functional alias status NOTIFY to %s answered %s",
+                     sub.subscriber, resp.code)
+
+    def _drop_alias_sub(self, sub: AliasSubscription, why: str) -> None:
+        if self.alias_subs.get(sub.key) is sub:
+            del self.alias_subs[sub.key]
+            log.info("functional alias status subscription of %s removed: %s",
+                     sub.subscriber, why)
+
+    def _expire_alias_subs(self) -> None:
+        now = self.clock()
+        for sub in [x for x in self.alias_subs.values()
+                    if x.expires_at is not None and x.expires_at <= now]:
+            del self.alias_subs[sub.key]
+            sub.expires_at = None
+            try:
+                self._send_notify(sub)                # RFC 6665 4.2.2: timeout
+            except Exception:                         # noqa: BLE001
+                log.exception("functional alias status NOTIFY to %s failed",
+                              sub.subscriber)
 
     def _register(self, req: Request, txn: ServerTxn, flow: Any) -> None:
         # Canonical form (scheme and host lower-cased, RFC 3261 19.1.4), so
@@ -612,6 +925,9 @@ class SipCore:
                                         seconds * 1000)
             self.flows_by_user[aor] = flow
         self._final(txn, Response(Status.OK, Headers([("Expires", str(seconds))])))
+        # After the 200 (review): the subscriptions waiting for a connection
+        # (after a deregistration there is none, and they go on waiting).
+        self._resume_alias_subs(aor)
 
     # -- INVITE (initiator side) ---------------------------------------------
 
@@ -889,6 +1205,8 @@ class SipCore:
         request (`_on_response` has checked)."""
         if isinstance(txn.user, Refresh):
             return self._refresh_response(txn, resp)
+        if isinstance(txn.user, AliasSubscription):
+            return self._notify_answered(txn, resp)
         if txn.user is None:
             # A BYE that ended a stray forked dialog: nothing waits on it.
             if resp.code >= 200:
@@ -1827,6 +2145,7 @@ class SipCore:
         self.rt.auditor.try_flush()
         self.media.tick()
         self._session_timers()
+        self._expire_alias_subs()
         events = self.server.tick()
         for txn, text in events.retransmit:
             txn.flow.send(text)
@@ -1864,6 +2183,16 @@ class SipCore:
         """A client transaction the timers ended (RFC 3261 17.1)."""
         if ctxn.accepted:
             return            # Timer M: the 2xx window closed, not a failure
+        if isinstance(ctxn.user, AliasSubscription):
+            # RFC 6665 4.2.2 lets a NOTIFY that times out end the subscription;
+            # here it waits for the user's next connection instead, as a 9A
+            # client never refreshes to find out it is gone (review). One its
+            # client no longer knows is answered 481 then.
+            sub = ctxn.user
+            if sub.flow is ctxn.flow:
+                sub.flow = None
+            sub.last = None
+            return None
         if isinstance(ctxn.user, Refresh):
             r = ctxn.user
             state = r.leg if r.leg is not None else r.call
