@@ -308,7 +308,8 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
         sip = config.sip
         settings.update({"MCX_SERVICE_REFUSAL_STATUS": sip.service_refusal_status,
                          "MCX_DIALOG_TAKEOVER": sip.dialog_takeover,
-                         "MCX_LOCATION_REPORTS": sip.location_reports})
+                         "MCX_LOCATION_REPORTS": sip.location_reports,
+                         "MCX_DISPLACED_HOLDER_CALLS": sip.displaced_holder_calls})
         if sip.service_refusal_status != 503:
             deviations.append({
                 "setting": "MCX_SERVICE_REFUSAL_STATUS",

@@ -55,7 +55,7 @@ count, and the values are the same on every Python version.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (3065 tests)
+python3 -m pytest tests/ -q                   # must stay green (3074 tests)
 python3 tools/check_boundary.py --root .      # must stay 21/21
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
@@ -65,6 +65,7 @@ MCX_PROFILE=mcx MCX_RELEASE=19 MCX_IDMS=stub MCX_RECORDER=none MCX_BEARER=none \
   MCX_ENV=dev python3 -m service      # MCX_ENV = the network profile's environment
 # with SIP (MCX_SIP_LISTEN) also MCX_SERVICE_REFUSAL_STATUS=503|480,
 # MCX_DIALOG_TAKEOVER=same-party|never, MCX_LOCATION_REPORTS=read|ignore;
+# optional with SIP: MCX_DISPLACED_HOLDER_CALLS=keep|release (default keep);
 # MCX_HTTP_TLS=on needs MCX_HTTP_TLS_CERT/KEY and MCX_HTTP_CLIENT_AUTH (+ _CA).
 # A value that departs from the standard is reported at startup (deviations).
 # VP1-SIG-001: the real process against a third-party SIP core (needs the

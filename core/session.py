@@ -368,6 +368,33 @@ class SessionManager:
                                    action="dropped-on-rollback", identity=h.identity,
                                    slot=h.slot, holder=h.holder, reason=exc.reason_code)
 
+    def sessions_of_role(self, identity_id: str, holder: str) -> Tuple[str, ...]:
+        """The established sessions `holder` takes part in because it held
+        functional identity `identity_id` (PLT-VP-R1 FA-OP-01 item 4): those
+        it started as a call type that needs the identity, unless it still
+        holds another role the call type accepts; and those addressed to the
+        identity that reached it. Never an emergency or imminent peril call
+        (its call type's TS 24.379 indication; owner ruling 2026-10-27).
+        Correlation ids, oldest first. The service decides what to do with
+        them (MCX_DISPLACED_HOLDER_CALLS)."""
+        who = identity.canonical(holder)
+        others = {h.identity for h in self.functional.holdings()
+                  if identity.canonical(h.holder) == who} - {identity_id}
+        out = []
+        for s in self.active:
+            declared = self._profile.call_type(s.request.call_type)
+            signature = declared.mc_signature if declared is not None else None
+            if signature is not None and (signature.emergency or signature.imminent_peril):
+                continue
+            needed = set(declared.initiator_roles) if declared is not None else set()
+            started = identity.canonical(s.request.initiator) == who and \
+                identity_id in needed and not needed & others
+            reached = s.resolution.resolved_from == identity_id and \
+                who in {identity.canonical(m) for m in s.members}
+            if started or reached:
+                out.append(s.correlation_id)
+        return tuple(out)
+
     def restore_functional_aliases(self, holdings: Sequence[Holding],
                                    correlation_id: str) -> Tuple[Holding, ...]:
         """Holders the host kept across a restart, bound again. One the

@@ -79,7 +79,12 @@ HTTP_TLS_VALUES = ("on", "off")
 # disagreement is reported at startup (service/runtime.py).
 SECONDS_FORMS = {"MCX_SESSION_EXPIRES": "MCX_SESSION_EXPIRES_MS"}
 SIP_ONLY = ("MCX_SERVICE_REFUSAL_STATUS", "MCX_DIALOG_TAKEOVER", "MCX_LOCATION_REPORTS",
-            "MCX_SESSION_EXPIRES_MS", "MCX_SESSION_EXPIRES")
+            "MCX_SESSION_EXPIRES_MS", "MCX_SESSION_EXPIRES", "MCX_DISPLACED_HOLDER_CALLS")
+# PLT-VP-R1 FA-OP-01 item 4 (owner ruling 2026-10-27): what becomes of the
+# calls a functional alias holder is in because of the alias when another
+# user takes it over: they go on ("keep", the default; TS 24.379 says
+# nothing) or are released ("release").
+DISPLACED_HOLDER_CALLS_VALUES = ("keep", "release")
 HTTP_CLIENT_AUTH_VALUES = ("required", "optional", "none")
 # RES-OP-14 (owner ruling 2026-10-16): a floor transition the audit store
 # cannot take is undone and not sent ("deny", PLT-FC-011 kept: the floor
@@ -229,6 +234,7 @@ class SipConfig:
     service_refusal_status: int = 503
     dialog_takeover: str = "same-party"
     location_reports: str = "read"
+    displaced_holder_calls: str = "keep"
 
     @staticmethod
     def from_env(env: Mapping[str, str]) -> Optional["SipConfig"]:
@@ -302,11 +308,18 @@ class SipConfig:
         location = _choice(env, "MCX_LOCATION_REPORTS", LOCATION_REPORT_VALUES,
                            "state whether the client's location report is read "
                            "(ADHOC-OP-03)")
+        # Unlike the settings above, this one has a default (owner ruling
+        # 2026-10-27): "keep", what the platform did before it existed.
+        displaced = (env.get("MCX_DISPLACED_HOLDER_CALLS") or "keep").strip().lower()
+        if displaced not in DISPLACED_HOLDER_CALLS_VALUES:
+            raise StartupRefused(f"MCX_DISPLACED_HOLDER_CALLS={displaced!r} must be "
+                                 "'keep' or 'release'")
         return SipConfig(host, port, uri, cert, key, ca, auth, roles,
                          session_expires_ms=expires_ms,
                          session_expires_s=expires_s,
                          service_refusal_status=int(status),
-                         dialog_takeover=takeover, location_reports=location)
+                         dialog_takeover=takeover, location_reports=location,
+                         displaced_holder_calls=displaced)
 
 
 @dataclass(frozen=True)

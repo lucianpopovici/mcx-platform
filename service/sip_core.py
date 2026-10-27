@@ -67,6 +67,9 @@ _STATUS_BY_CODE = {s.code: s for s in Status}
 # whole value, so "3²" is not read as 3 (SIP-OP-19).
 _EXPIRES_PARAM = re.compile(r";\s*expires=([0-9]+)(?=\s*(?:[;,>]|$))", re.I)
 _DEFAULT_REGISTER_S = 3600     # RFC 3261 §10.2: protocol default, not policy
+# The release cause of a call ended because its holder's functional alias
+# was taken over (FA-OP-01 item 4, MCX_DISPLACED_HOLDER_CALLS=release).
+TAKEN_OVER_CAUSE = "functional-alias-taken-over"
 
 
 @dataclass
@@ -550,6 +553,25 @@ class SipCore:
             return self._reject(txn, outcome.reason_code)
         if pub.location is not None:
             self.last_location[pub.served] = pub.location
+        if self.rt.config.sip.displaced_holder_calls == "release":
+            # FA-OP-01 item 4 (MCX_DISPLACED_HOLDER_CALLS=release): the calls a
+            # holder is in because of an alias taken over from it end with it.
+            # The take-over is already in force and stored, so a call that
+            # cannot be released is logged and the others still are: the
+            # PUBLISH is answered 200, never 500 for a change that was made
+            # (review of FA-OP-01 item 4).
+            for h in outcome.displaced:
+                for cid in self.rt.manager.sessions_of_role(h.identity, h.holder):
+                    try:
+                        call = self.calls.get(cid)
+                        if call is not None:
+                            self._end(call, cause=TAKEN_OVER_CAUSE)
+                        else:
+                            self.rt.release(cid, TAKEN_OVER_CAUSE)
+                    except Exception:                       # noqa: BLE001
+                        log.exception("session %s: its holder's functional alias %s "
+                                      "was taken over, but the call could not be "
+                                      "released", cid, h.identity)
         # RFC 3903 6: a 2xx to PUBLISH carries the entity-tag of the state.
         self._final(txn, Response(Status.OK, Headers([
             ("SIP-ETag", secrets.token_hex(8)), ("Expires", str(pub.expires))])))
