@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.58 (draft)
+**Version:** 0.59 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -637,6 +637,7 @@ not by relaxing its pass criterion.
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
 | 0.42 | 2026-10-17 | RES-OP-11 closed on the owner's ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required; `refuse` answers a caller outside the declared domains 404 + 141 before any hook runs, `allow` is a reported deviation. |
+| 0.59 | 2026-10-27 | VP1-LOAD-031 re-reviewed: pass (was fail since 2026-09-28, its only evidence a malformed-YAML test). Three late rejections of a well-formed profile now leave no store and build no component; the refusals for the release (`MCX_STRICT_RELEASE`) and for a resolver with no provisioning surface moved before the store, where they had run after it was opened. Review: SIP TLS material is loaded in `build_runtime` too, so an unloadable SIP certificate is refused (exit 2) before the store and the HTTP bind. |
 | 0.58 | 2026-10-27 | FA-OP-01 item 1 built (owner: proceed): functional alias status determination, the 9A.2.1.3 SUBSCRIBE to the presence event answered as 9A.2.2.2.4 and RFC 6665, with NOTIFYs carrying the 9A.3.1 per-user PIDF ("activated", "take-over-possible", the publisher's `<p-id-fa>`) after every change, so a displaced holder is told. Own status only. Review (three rounds): subscriptions outlive their connection and are probed when the user registers again, another user's dialog identifiers refused, a fault after the 200 not a second answer, no take-over-possible for a location-dependent alias, Contact checked, a global bound. FA-OP-01 closed. |
 | 0.57 | 2026-10-27 | FA-OP-01 item 4 decided (owner: option b, an identification key, and the format) and built: a functional identity keyed by an identification value, written `sip:<value>.<identity>@<domain>`; the frmcs `train-driver` is keyed by `train_id`, one leading driver per train (FRS 6.2.1.1); the network profile may limit the values (`values`). FA-OP-01 stays open for status determination (item 1). |
 | 0.56 | 2026-10-27 | FA-OP-01 item 3 decided (owner) and built: an optional `max_holders` per multi-holder alias in the network profile, refused 403 at the limit unless taken over, the earliest holders making room. Item 2 closed as client-side (owner). |

@@ -975,3 +975,101 @@ def test_startup_says_what_no_caller_can_obtain(env, caplog):
         for cid, held in (("driver-controller", "train-driver, track-controller"),
                           ("shunting-group", "shunting-team-leader"),
                           ("rec-broadcast", "train-driver, track-controller")))
+
+
+# -- VP1-LOAD-031: no partial start ----------------------------------------------
+
+def _late_hook(env, tmp_path, monkeypatch):
+    """A well-formed, valid profile whose hook cannot be resolved: refused by
+    the loader after the profile was parsed and validated."""
+    import shutil
+    root = tmp_path / "profiles"
+    shutil.copytree(ROOT / "profiles" / "mcx", root / "mcx",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    p = root / "mcx" / "profile.yaml"
+    text = p.read_text(encoding="utf-8")
+    assert text.count("profiles.mcx.hooks:TablePriorityPolicy") == 1
+    p.write_text(text.replace("profiles.mcx.hooks:TablePriorityPolicy",
+                              "profiles.mcx.hooks:NoSuchPolicy"), encoding="utf-8")
+    return {**env, "MCX_PROFILES_ROOT": str(root)}, "NoSuchPolicy"
+
+
+def _late_release(env, tmp_path, monkeypatch):
+    """The railway profile at Rel-17 with MCX_STRICT_RELEASE=true: refused
+    for the release, once profile and network profile are both read."""
+    return _frmcs(env, "17", "true"), "MCX_STRICT_RELEASE=true"
+
+
+def _late_resolver(env, tmp_path, monkeypatch):
+    """Groups configured and a resolver with no provisioning surface."""
+    from profiles.common.tables import DirectoryResolver
+    monkeypatch.delattr(DirectoryResolver, "register_group")
+    return env, "no provisioning surface"
+
+
+@pytest.mark.parametrize("case", [_late_hook, _late_release, _late_resolver],
+                         ids=["hook-unresolved", "strict-release", "no-provisioning"])
+def test_vp1_load_031_a_late_refusal_leaves_no_trace(env, tmp_path, monkeypatch, case):
+    """VP1-LOAD-031: a profile rejected after it was parsed starts nothing: no
+    store is opened (the data directory is not even created), and neither the
+    auditor nor the session manager is built. Each refusal that depends on
+    the profile, the release or the network profile comes before them."""
+    import service.runtime as runtime_mod
+    built = []
+
+    def spy(name):
+        def make(*a, **kw):
+            built.append(name)
+            raise AssertionError(f"{name} built before the refusal")
+        return make
+    for name in ("SqliteStore", "Auditor", "SessionManager"):
+        monkeypatch.setattr(runtime_mod, name, spy(name))
+    e, says = case(env, tmp_path, monkeypatch)
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, Clock())
+    assert says in str(exc.value)
+    assert built == []
+    assert not (tmp_path / "data").exists()
+
+
+from tests.test_sip_transport import pki, sip_env  # noqa: E402,F401
+
+
+@pytest.mark.parametrize("var,says", [
+    ("MCX_SIP_TLS_CERT", "MCX_SIP_TLS_CERT/MCX_SIP_TLS_KEY"),
+    ("MCX_SIP_TLS_KEY", "MCX_SIP_TLS_CERT/MCX_SIP_TLS_KEY"),
+    # The users' anchor was already read by the network profile's checks
+    # (ICD-OP-10), which refuse it first.
+    ("MCX_SIP_TLS_CA", "MCX_SIP_TLS_CA"),
+])
+def test_unloadable_sip_tls_material_is_refused_before_the_store(tmp_path, pki,  # noqa: F811
+                                                                  monkeypatch, var, says):
+    """Review of VP1-LOAD-031: SIP TLS material is loaded in build_runtime,
+    as the HTTPS one is (RES-OP-05), so a file that exists and cannot be
+    loaded refuses the start (exit 2) before the store is opened, and not
+    after the store was written and the HTTP port bound."""
+    import service.runtime as runtime_mod
+    built = []
+    monkeypatch.setattr(runtime_mod, "SqliteStore",
+                        lambda *a, **k: built.append("store") or (_ for _ in ()).throw(
+                            AssertionError("store opened")))
+    junk = tmp_path / "junk.pem"
+    junk.write_text("not a PEM file\n")
+    e = sip_env(tmp_path, pki, **{var: str(junk)})
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime(e, Clock())
+    assert says in str(exc.value) and str(junk) in str(exc.value)
+    assert built == []
+
+
+def test_the_sip_listener_uses_the_context_build_runtime_checked(tmp_path, pki):  # noqa: F811
+    from service.sip_core import SipCore
+    from service.sip_tls import TlsListener
+    rt = build_runtime(sip_env(tmp_path, pki), Clock())
+    try:
+        assert rt.sip_context is not None
+        core = SipCore(rt, rt.config.sip.uri, Clock())
+        assert TlsListener(core, rt.config.sip)._ctx is rt.sip_context
+        core.close()
+    finally:
+        rt.close()

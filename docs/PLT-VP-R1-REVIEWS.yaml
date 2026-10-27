@@ -250,18 +250,29 @@ VP1-LOAD-030:
     SIP/HTTP ports are never bound (connect refused) during and after the attempt; and no ready/health
     response at any point.'
 VP1-LOAD-031:
-  verdict: fail
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-10-27'
   evidence:
-  - tests/test_loader.py::test_vp1_load_031_malformed_yaml_reports_clearly
-  gap: Neither clause is asserted. The test only checks that malformed YAML yields a diagnostic mentioning
-    YAML/well-formed, and malformed YAML is a parse failure, not a rejection after partial parse. Close
-    with a well-formed profile that fails late validation or hook resolution, run through build_runtime
-    with a spy/temporary MCX_DATA_DIR and a stub store/auditor, asserting that the store directory is
-    untouched (no files created) and that no component constructor (SessionManager, Auditor, store, transport)
-    was called.
-  note: Cannot serve as evidence for either clause. Ahead of phase.
+    - tests/test_loader.py::test_vp1_load_031_malformed_yaml_reports_clearly
+    - tests/test_service.py::test_vp1_load_031_a_late_refusal_leaves_no_trace
+  note: >-
+    Re-reviewed 2026-10-27; closes the fail of 2026-09-28. Three late rejections of a
+    well-formed, valid profile run through the real build_runtime: a hook that cannot be
+    resolved (refused by the loader after parsing and validation), MCX_STRICT_RELEASE=true with
+    call types the release cannot carry, and groups configured for a resolver with no
+    provisioning surface. With spies on the store, the auditor and the session manager, none is
+    built and the data directory is not created; the refusal names its reason. Two of the three
+    failed on the code before: the release and provisioning refusals ran after the store was
+    opened and the components built, and a start refused for its release could already have
+    rewritten the stored functional alias holders; both now run before the store. Transports are
+    not reachable, since build_runtime raises before main builds them; SIP TLS material is now
+    loaded there too, so an unloadable SIP certificate is refused before the store, not after it
+    was written and the HTTP port bound (review). Malformed YAML is refused by the loader before
+    anything (the earlier test). Accepted: on a hook that cannot be resolved the loader still
+    imports and builds the profile's other hooks, to report every failure at once; these are
+    profile code under check, not platform components, and the in-tree hooks have no side
+    effects.
 VP1-LOAD-040:
   verdict: partial
   by: independent review (agent)
