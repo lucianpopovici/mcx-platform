@@ -1,0 +1,264 @@
+From 64d2663aefa46a5a231413c11232bde4d08fb4d7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 07:24:29 +0100
+Subject: [PATCH] VP1-ANL-002 (re-run on bdca845+): introduce a fourth profile
+ (metro operator)
+
+---
+ .github/workflows/ci.yml    |   2 +-
+ profiles/metro/__init__.py  |   0
+ profiles/metro/hooks.py     |  27 ++++++
+ profiles/metro/profile.yaml | 176 ++++++++++++++++++++++++++++++++++++
+ tools/check_boundary.py     |   2 +-
+ 5 files changed, 205 insertions(+), 2 deletions(-)
+ create mode 100644 profiles/metro/__init__.py
+ create mode 100644 profiles/metro/hooks.py
+ create mode 100644 profiles/metro/profile.yaml
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 83b9ee5..2e5e369 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -36,7 +36,7 @@ jobs:
+     strategy:
+       fail-fast: false
+       matrix:
+-        profile: [mcx, frmcs, utility]
++        profile: [mcx, frmcs, utility, metro]
+         # Every supported release (core.release.SUPPORTED), not a sample: the
+         # boundary gate fails if this list and that tuple differ (RES-OP-08).
+         release: [13, 14, 15, 16, 17, 18, 19, 20]
+diff --git a/profiles/metro/__init__.py b/profiles/metro/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/profiles/metro/hooks.py b/profiles/metro/hooks.py
+new file mode 100644
+index 0000000..5de93ab
+--- /dev/null
++++ b/profiles/metro/hooks.py
+@@ -0,0 +1,27 @@
++"""Urban metro operator profile hooks.
++
++A fourth profile, written to re-run PLT-VP-R1 VP1-ANL-002 (PLT-PRF-023:
++introducing a profile requires no change under core/). Every hook is a shared
++table implementation, unchanged; what makes this deployment different is in
++profile.yaml.
++"""
++
++from __future__ import annotations
++
++from profiles.common.tables import (
++    FunctionalResolver,
++    PrefixInterworkingGateway,
++    TableBearerSelector,
++    TableInterconnectionGateway,
++    TablePriorityPolicy,
++    TableSessionPolicy,
++)
++
++__all__ = [
++    "FunctionalResolver",
++    "TablePriorityPolicy",
++    "TableSessionPolicy",
++    "TableBearerSelector",
++    "PrefixInterworkingGateway",
++    "TableInterconnectionGateway",
++]
+diff --git a/profiles/metro/profile.yaml b/profiles/metro/profile.yaml
+new file mode 100644
+index 0000000..a64a6b3
+--- /dev/null
++++ b/profiles/metro/profile.yaml
+@@ -0,0 +1,176 @@
++# Urban metro operator profile — metro and tram operations.
++#
++# Written to re-run PLT-VP-R1 VP1-ANL-002 on the current core. Every hook is a
++# shared table implementation used unchanged; everything that makes this
++# deployment different is data. Unlike the other profiles it has a private
++# call, a location-dependent role per line, and an emergency group call.
++
++$schema: "https://mcx-platform.invalid/schema/profile/v1"
++
++profile:
++  name: metro
++  version: 0.1.0
++  description: Urban metro and tram operations
++  hooks:
++    identity_resolver: profiles.metro.hooks:FunctionalResolver
++    priority_policy: profiles.metro.hooks:TablePriorityPolicy
++    session_policy: profiles.metro.hooks:TableSessionPolicy
++    bearer_selector: profiles.metro.hooks:TableBearerSelector
++    interworking_gateway: profiles.metro.hooks:PrefixInterworkingGateway
++    interconnection_gateway: profiles.metro.hooks:TableInterconnectionGateway
++
++urgencies:
++  - {id: service, label: Service}
++  - {id: disruption, label: Service disruption}
++  - {id: passenger-emergency, label: Passenger emergency}
++
++preemption_scopes:
++  - {id: metro-operations, label: Transit operations}
++
++applications:
++  - {id: operations-voice, label: Operations voice, media: [voice], safety_relevant: false}
++  - {id: line-control, label: Line control, media: [voice], safety_relevant: true}
++
++call_types:
++  - id: one-to-one
++    label: Private call
++    # TS 24.379 11.1.1.2.1.1: <session-type> private.
++    mc_signature: {session_type: private}
++    no_answer_ms: 32000
++    group_over_limit: truncate
++    media: [voice]
++    session_model: on-demand
++    urgency: service
++    application: operations-voice
++    auto_answer: false
++    acknowledgement_required: false
++    recording_required: true
++    max_participants: 2
++    initiator_roles: []
++    floor:
++      initial_grant_to_initiator: true
++      queueing_enabled: false
++      override_allowed: false
++      max_queue_depth: 0
++      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
++      timers_ms: {T2: 5000, T20: 100, T8: 1000, T3: 3000}
++
++  - id: station-group
++    label: Station staff group call
++    # TS 24.379 10.1.1.2.1.1 item 14a: <session-type> prearranged.
++    mc_signature: {session_type: prearranged}
++    no_answer_ms: 32000
++    group_over_limit: truncate        # TS 24.379 6.3.5.5
++    media: [voice]
++    session_model: on-demand
++    urgency: service
++    application: operations-voice
++    auto_answer: false
++    acknowledgement_required: false
++    recording_required: true
++    max_participants: 40
++    initiator_roles: []
++    floor:
++      initial_grant_to_initiator: true
++      queueing_enabled: true
++      override_allowed: false
++      max_queue_depth: 8
++      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
++      timers_ms: {T2: 5000, T20: 100, T8: 1000, T3: 3000}
++
++  - id: passenger-alarm-group
++    label: Passenger alarm call
++    # TS 24.379 10.1.1.2.1.1: prearranged with <emergency-ind> true.
++    mc_signature: {session_type: prearranged, emergency: true}
++    no_answer_ms: 32000
++    group_over_limit: truncate
++    media: [voice]
++    session_model: on-demand
++    urgency: passenger-emergency
++    application: line-control
++    auto_answer: true
++    acknowledgement_required: false
++    recording_required: true
++    max_participants: 40
++    initiator_roles: [line-controller]
++    floor:
++      initial_grant_to_initiator: true
++      queueing_enabled: true
++      override_allowed: true
++      max_queue_depth: 4
++      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
++      timers_ms: {T2: 3000, T20: 100, T8: 1000, T3: 3000}
++
++identity:
++  domains: ["metro.example"]
++  functional:
++    - id: line-controller
++      label: Controller for a line
++      binding: dynamic
++      location_dependent: true
++      location_key: line_id
++      multiplicity: single
++      resolves_to: user
++
++priority:
++  default_scope: metro-operations
++  rules:
++    - match: {call_type: "*", application: "*", urgency: passenger-emergency}
++      decision:
++        level: 90
++        scope: metro-operations
++        preemption_capability: true
++        preemption_vulnerability: false
++        floor_priority: 250
++        label: passenger-emergency
++    - match: {call_type: "*", application: "*", urgency: disruption}
++      decision:
++        level: 60
++        scope: metro-operations
++        preemption_capability: true
++        preemption_vulnerability: false
++        floor_priority: 180
++        label: disruption
++    - match: {call_type: "*", application: "*", urgency: "*"}
++      decision:
++        level: 20
++        scope: metro-operations
++        preemption_capability: false
++        preemption_vulnerability: true
++        floor_priority: 80
++        label: service
++
++bearer:
++  rules:
++    - match: {call_type: passenger-alarm-group, media: voice}
++      decision:
++        qos_identifier: 65
++        arp_level: 1
++        arp_preemption_capability: true
++        arp_preemption_vulnerability: false
++        redundancy: single
++        paths: [{id: default, transport: udp, primary: true, weight: 1, attributes: {}}]
++    - match: {call_type: "*", media: voice}
++      decision:
++        qos_identifier: 65
++        arp_level: 7
++        arp_preemption_capability: false
++        arp_preemption_vulnerability: true
++        redundancy: single
++        paths: [{id: default, transport: udp, primary: true, weight: 1, attributes: {}}]
++
++admission:
++  max_concurrent_sessions: 400
++  reserved_for_urgency:
++    passenger-emergency: 60
++  reject_reason_codes:
++    - capacity-exhausted
++    - not-authorised
++    - unknown-target
++    - call-type-not-permitted
++
++media:
++  codecs:
++    - {name: "AMR-WB/16000"}
++    - {name: "EVS/16000"}
++    - {name: "PCMA/8000"}
+diff --git a/tools/check_boundary.py b/tools/check_boundary.py
+index c2fada3..8247d17 100644
+--- a/tools/check_boundary.py
++++ b/tools/check_boundary.py
+@@ -1068,7 +1068,7 @@ def file_fingerprint(root: Path, rel: str) -> str:
+ # read as YAML (comments and layout aside). A job that packs, uploads or
+ # pushes the tree, however it is written, is a change to review.
+ REVIEWED_WORKFLOW = (".github/workflows/ci.yml",
+-                     "575d5ca096d9b1d3cbfa8ae4c61db4adaaf129e04e84e352e6460d71b48bc0aa")
++                     "a27aaea461aaa1453ebaf7f788b4df5572e518e5f9b9cd9821389dce2f0ee154")
+ 
+ 
+ def workflow_fingerprint(root: Path, rel: str = REVIEWED_WORKFLOW[0]) -> str:
+-- 
+2.43.0
+

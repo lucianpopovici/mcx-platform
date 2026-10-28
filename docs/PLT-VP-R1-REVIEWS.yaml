@@ -1816,3 +1816,67 @@ VP1-REL-007:
     in WARNING_TEXTS and ADHOC_WARNING_TEXTS × release 13..20, asserting that where the code post-dates
     the release the Warning carries the phrase without the number, the status equals the in-release status
     and is 4xx/5xx, and no exception is raised.'
+
+VP1-ANL-001:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-10-28'
+  signed: Lucian (owner), 2026-10-28
+  evidence:
+    - 'docs/PLT-ANL-R1.md §1, §1.1'
+    - 'docs/analysis/VP1-ANL-001-rerun.patch'
+    - 'docs/analysis/VP1-ANL-001-demo.py'
+    - 'commit b444443'
+  note: >-
+    Applied to f61c724, the re-run change set (docs/analysis/VP1-ANL-001-rerun.patch) changes
+    one file, profiles/mcx/profile.yaml (+40 lines), and nothing under core/; no core file names
+    the new urgency, application or call type, and the boundary gates pass 21/21. The committed
+    demo (docs/analysis/VP1-ANL-001-demo.py) establishes incident-command-group through
+    SessionManager at priority level 60 from the new rule, with floor queue depth 3 and T2 2500
+    ms from its own declaration, values no other call type has. The full suite shows two
+    failures, both platform tests pinning the shipped profile's selected_by_group literal; the
+    core and the conformance suite are unaffected. Accepted: the change's cost includes those
+    two test expectations; the record recommends they derive from the profile. The original run
+    (b444443) also touched only the profile.
+
+VP1-ANL-002:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-10-28'
+  signed: Lucian (owner), 2026-10-28
+  evidence:
+    - 'docs/PLT-ANL-R1.md §2, §2.1'
+    - 'docs/analysis/VP1-ANL-002-rerun.patch'
+    - 'commit 13ea24b'
+  note: >-
+    Introducing the metro profile on f61c724 (docs/analysis/VP1-ANL-002-rerun.patch) changes no
+    file under core/: three files are added under profiles/metro/, and two are edited elsewhere,
+    the CI matrix entry (without it VP1-BND-020 and VP1-REL-002 fail) and the re-pinned workflow
+    fingerprint (without it VP1-BND-006 fails). The conformance suite, unmodified, passes 18/18
+    at each of Rel-13 to Rel-20. The full suite shows six failures, all tests pinning the
+    three-profile set or the CI matrix literal, four of them the gate's own self-tests; a
+    profile name occurring inside a core word (transit) is refused by VP1-BND-001. Accepted as
+    the documented cost; the original run (13ea24b, utility) also touched no core file. The
+    method is the one section 8 names since 0.64, a profile introduced into the finished core:
+    the FRMCS stub's history cannot show the claim, 17 of 24 frmcs commits touching core/, and
+    the owner accepted the substitution and amended section 8.
+
+VP1-ANL-003:
+  verdict: pass
+  by: independent review (agent)
+  date: '2026-10-28'
+  signed: Lucian (owner), 2026-10-28
+  evidence:
+    - 'docs/PLT-ANL-R1.md §3'
+    - 'commits bdca845, 3ea4872, c324c5a, eaae339'
+  note: >-
+    Section 3.1 defines the procedure PLT-VER-003 asks for: detection by a conformance job
+    failing for some profiles and not others, classification by the change's author into leak,
+    profile defect or interface change, and the record in the commit message, checked by the
+    independent review (as amended 2026-10-28). The R1 examples are correctly classified:
+    bdca845 interface change (PLT-ICD-001 0.37, a major change, kind_of in every profile),
+    3ea4872 interface change (0.33, the core reads a declared attribute, not a profile's name),
+    and c324c5a an interface change with the profile defect it found (POST-5 tightened in 0.30,
+    the frmcs ETCS bearer corrected). The record states that no commit carried a class, that the
+    classes were assigned after the fact by the record's author, and that the detection path has
+    not fired in R1. Accepted: those weaknesses, addressed going forward by the amendment.

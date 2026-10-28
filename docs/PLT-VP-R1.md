@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.63 (draft)
+**Version:** 0.64 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -376,7 +376,7 @@ a concrete artefact is not evidence.
 | Case | Requirement | Argument required |
 |---|---|---|
 | VP1-ANL-001 | PLT-PRF-022 | Demonstrate by worked change that adding a call type, urgency and application to the MCX profile requires no change under `core/`. Evidence: the change set, showing files touched. |
-| VP1-ANL-002 | PLT-PRF-023 | Demonstrate by the FRMCS stub's own history that introducing a profile touched no file under `core/`. Evidence: the diff. |
+| VP1-ANL-002 | PLT-PRF-023 | Demonstrate, by introducing a profile into the finished core, that doing so touches no file under `core/`. Evidence: the diff. (Until 0.64: "by the FRMCS stub's own history", which cannot show it, the frmcs profile having been built together with the core; amended by owner decision 2026-10-28, PLT-ANL-R1 §2.1.) |
 | VP1-ANL-003 | PLT-VER-003 | Define the procedure for handling a change that breaks one profile suite and not the other, including who classifies it and how a boundary defect is recorded. Evidence: the procedure, plus one worked example from the R1 period. |
 
 > VP1-ANL-001 and VP1-ANL-002 are the two that matter most in R1. They are the
@@ -638,6 +638,7 @@ not by relaxing its pass criterion.
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
 | 0.42 | 2026-10-17 | RES-OP-11 closed on the owner's ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required; `refuse` answers a caller outside the declared domains 404 + 141 before any hook runs, `allow` is a reported deviation. |
+| 0.64 | 2026-10-28 | §8: VP1-ANL-001, -002 and -003 reviewed (pass) and signed by the owner, from PLT-ANL-R1 0.3 (both worked changes re-run on the current core). VP1-ANL-002's method amended (owner): a profile introduced into the finished core, not the FRMCS stub's history, which cannot show it. The PLT-VER-003 procedure amended (owner): the class in the commit message, checked by the independent review. |
 | 0.63 | 2026-10-28 | ADHOC-OP-04: the owner keeps `MCX_ADHOC_LIST_MAX` at most 1 000 now that a listed user entry costs two IF-IDR invocations (about 39 ms at the median for 1 000). |
 | 0.62 | 2026-10-28 | ADHOC-OP-06 decided (owner) and built: `MCX_ADHOC_LIST_ENTRIES=users|users-and-groups` (optional, default users); IF-IDR `kind_of` tells a listed group apart before it is resolved; users only leaves it out and warns the caller in the 200 OK; users and groups invites its members and counts them all against the cap (PLT-ICD-001 0.37). |
 | 0.61 | 2026-10-28 | ADHOC-OP-04 amended (owner): `MCX_ADHOC_LIST_MAX` is at most 1 000, a larger value refusing startup (PLT-ICD-001 0.36). Review: ADHOC-OP-06 opened, a listed group resolved over all its members before it is left out. |

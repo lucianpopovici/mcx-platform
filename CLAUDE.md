@@ -128,6 +128,11 @@ ROUTE_EXTERNAL, ROUTE_PARTNER. `service/sip_core.py` consumes them via
 - **No default is ever substituted** for a missing hook, an unmapped label, an
   unrouted target or an unknown partner. Refuse instead. Several tests exist
   solely to pin this.
+- **Boundary class in the commit message.** A commit that changes `core/`
+  together with a profile, or that a conformance job failing for some profiles
+  and not others made necessary, states its class and why: (a) leak, (b)
+  profile defect or (c) interface change (PLT-ANL-R1 §3.1, PLT-VER-003, owner
+  decision 2026-10-28). The independent review checks the class.
 
 ## Testing expectations
 

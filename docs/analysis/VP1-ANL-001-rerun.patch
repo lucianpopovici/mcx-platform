@@ -1,0 +1,84 @@
+From f7e3dbc9d205b25a7bfad5f63a39311097bb2f86 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 28 Oct 2026 07:19:46 +0100
+Subject: [PATCH] VP1-ANL-001 (re-run on bdca845+): add an urgency, an
+ application and a call type to the MCX profile
+
+---
+ profiles/mcx/profile.yaml | 40 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/profiles/mcx/profile.yaml b/profiles/mcx/profile.yaml
+index eac5a1d..30a090e 100644
+--- a/profiles/mcx/profile.yaml
++++ b/profiles/mcx/profile.yaml
+@@ -20,12 +20,14 @@ urgencies:
+   - {id: imminent-peril, label: Imminent peril}
+   - {id: emergency, label: Emergency}
+   - {id: elevated, label: Elevated}
++  - {id: heightened, label: Heightened}
+ 
+ preemption_scopes:
+   - {id: public-safety, label: Public safety}
+ 
+ applications:
+   - {id: coordination, label: Multi-agency coordination, media: [voice], safety_relevant: false}
++  - {id: incident-command, label: Incident command, media: [voice], safety_relevant: true}
+ 
+ call_types:
+   - id: private
+@@ -177,6 +179,36 @@ call_types:
+       preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
+       timers_ms: {T2: 3500, T20: 100, T8: 1000, T3: 3000}
+ 
++  - id: incident-command-group
++    label: Incident command call
++    # Chosen by its target group, as coordination-group is (PRF-OP-01): a
++    # prearranged call to a group whose network profile entry says
++    # `call_type: incident-command-group`. (VP1-ANL-001 re-run.)
++    mc_signature: {session_type: prearranged}
++    group_selected: true
++    no_answer_ms: 32000           # = 64*T1, the limit before it was declared (SIP-OP-15)
++    group_over_limit: truncate        # TS 24.379 6.3.5.5
++    media: [voice]
++    session_model: on-demand
++    urgency: heightened
++    application: incident-command
++    auto_answer: false
++    # R1 carries out no acknowledged call (no required members, no TNG1):
++    # declared false so the data says what the platform does, until the
++    # procedure exists (PLT-RAIL-008, R3; PLT-VP-R1 RES-OP-13, owner ruling
++    # 2026-09-29).
++    acknowledgement_required: false
++    recording_required: true
++    max_participants: 30
++    initiator_roles: []
++    floor:
++      initial_grant_to_initiator: true
++      queueing_enabled: true
++      override_allowed: true
++      max_queue_depth: 3
++      preemption_at_full_queue: deny      # FC-OP-07, a recorded deviation
++      timers_ms: {T2: 2500, T20: 100, T8: 1000, T3: 3000}
++
+ identity:
+   domains: ["mcptt.example"]
+   functional: []          # generic MCX: directory lookup only
+@@ -200,6 +232,14 @@ priority:
+         preemption_vulnerability: false
+         floor_priority: 200
+         label: imminent-peril
++    - match: {call_type: "*", application: "*", urgency: heightened}
++      decision:
++        level: 60
++        scope: public-safety
++        preemption_capability: false
++        preemption_vulnerability: true
++        floor_priority: 175
++        label: heightened
+     - match: {call_type: "*", application: "*", urgency: elevated}
+       decision:
+         level: 50
+-- 
+2.43.0
+
