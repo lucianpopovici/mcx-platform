@@ -117,6 +117,7 @@ def test_subtype_values_match_the_specification_table():
     )] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15]
 
 
+@pytest.mark.vp("VP1-REL-003")
 def test_acknowledgement_bit_is_separate_from_the_message_type():
     """Five-bit subtype: bit 4 is acknowledgement-required, type is the low four."""
     acked = bytes([0x80 | rtcp.ACK_REQUIRED | int(MsgType.IDLE)]) + GOOD[1:]
@@ -301,7 +302,7 @@ def policy(**kw):
 PRIO = {A: 100, B: 100, C: 100, D: 100}
 
 
-def make(users=(A, B, C), start=True, pol=None, priority=None):
+def make(users=(A, B, C), start=True, pol=None, priority=None, codec=FLOOR_CODEC):
     clock = Clock()
     floor = fl.FloorControl(pol or policy(), clock=clock)
     ios = {}
@@ -311,7 +312,7 @@ def make(users=(A, B, C), start=True, pol=None, priority=None):
         return ios[uri]
 
     prio = priority if priority is not None else PRIO
-    ms = MediaSession("cid", floor, PT, clock, factory, lambda u: prio[u], FLOOR_CODEC)
+    ms = MediaSession("cid", floor, PT, clock, factory, lambda u: prio[u], codec)
     for u in users:
         ms.add(u)
         rtp_addr, floor_addr = remote(u)
@@ -442,6 +443,29 @@ def test_malformed_and_spoofed_floor_messages_change_nothing():
     ms.on_floor(B, remote(B)[1], FLOOR_CODEC.encode(rtcp.message(MsgType.RELEASE, 1)))
     assert ms.counters["floor_malformed"] == 1
     assert ms.counters["floor_dropped_source"] == 1
+    assert floor.holder == A and floor.queue == () and all(not io.floor for io in ios.values())
+
+
+@pytest.mark.vp("VP1-REL-005")
+def test_vp1_rel_005_a_newer_message_is_counted_as_wrong_release_not_malformed():
+    """A Rel-17 media session handed a Rel-19 Floor Revoke Request by a
+    participant: counted floor_wrong_release, not floor_malformed, and acted
+    on not at all. A malformed packet and a subtype no release defines (Floor
+    Request with the acknowledgement flag, PLT-CONF-AUDIT CA-28) are the
+    other counter, and do not touch the first."""
+    rel17 = rtcp.Codec(Release.REL_17)
+    ms, ios, _, floor = make(codec=rel17)
+    clear(ios)
+    before = dict(ms.counters)
+    wire = rtcp.Codec(Release.REL_19).encode(rtcp.message(MsgType.REVOKE_REQUEST, 99))
+    ms.on_floor(B, remote(B)[1], wire)
+    changed = {k: v - before[k] for k, v in ms.counters.items() if v != before[k]}
+    assert changed == {"floor_in": 1, "floor_wrong_release": 1}
+    assert floor.holder == A and all(not io.floor for io in ios.values())
+    request = rel17.encode(rtcp.message(MsgType.REQUEST, 99))
+    for bad in (b"\x80\xcc\x00", bytes([request[0] | rtcp.ACK_REQUIRED]) + request[1:]):
+        ms.on_floor(B, remote(B)[1], bad)
+    assert (ms.counters["floor_wrong_release"], ms.counters["floor_malformed"]) == (1, 2)
     assert floor.holder == A and floor.queue == () and all(not io.floor for io in ios.values())
 
 
@@ -884,6 +908,23 @@ def test_comparator_catches_deviations(corrupt, code):
     bad[i] = (bad[i][0], bad[i][1], corrupt(bad[i][2]))
     codes = {d.code for d in trace_compare.compare(bad)}
     assert codes & {"encoding", "sequence", "missing-field"}, codes
+
+
+def test_comparator_refuses_the_acknowledgement_flag_where_the_table_has_none():
+    """PLT-CONF-AUDIT CA-28, read independently of core/rtcp.py: the flag is
+    allowed on the eight 'x....' types and refused on the other six."""
+    good = FLOOR_CODEC.encode(rtcp.message(MsgType.IDLE, 1, rtcp.f_sequence(1)))
+    allowed = []
+    for t in range(16):
+        if t in (12, 13):
+            continue
+        flagged = bytes([0x80 | 0x10 | t]) + good[1:]
+        try:
+            trace_compare.parse(flagged)
+            allowed.append(t)
+        except ValueError as exc:
+            assert "has no acknowledgement flag" in str(exc), (t, exc)
+    assert allowed == [1, 2, 3, 4, 5, 9, 11, 14]
 
 
 def test_comparator_flags_direction_missing_fields_and_flow_errors():

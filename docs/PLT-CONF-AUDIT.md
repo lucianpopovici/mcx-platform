@@ -1,8 +1,8 @@
 # Specification conformance audit — R1
 
 **Document:** PLT-CONF-AUDIT
-**Version:** 2.11
-**Date:** 2026-10-26
+**Version:** 2.12
+**Date:** 2026-10-28
 **Scope:** every protocol constant in the codebase that was written from
 recollection rather than read from a specification.
 
@@ -1684,6 +1684,36 @@ now must-match with default 0.
 | EVS `hf-only`, `evs-mode-switch`, `cmr`, default 0; fixed by offer/answer | TS 26.445 A.3.1, A.3.3.1 | `codec.MUST_MATCH["EVS"]` |
 | EVS rtpmap clock rate 16000 | TS 26.445 A.3.2 | profiles (`EVS/16000`) |
 
+### 4.41 CA-28 — a subtype no release defines was being read
+
+Found while making VP1-REL-003 exhaustive. The subtype is five bits; bit 4 is
+"acknowledgement required" and the message type is the low four (table
+8.2.2.1-1). Eight types are listed as `x....` and may carry the flag; the
+other six -- Floor Request `00000`, Floor Revoke `00110`, Floor Revoke Request
+`00111`, Floor Queue Position Request `01000`, Floor Ack `01010` and Floor
+Release Multi Talker `01111` -- have a literal 0 there. With the flag set
+they are subtypes the table never defines. `core/rtcp.py` said so in a
+comment and listed the eight as `ACK_CAPABLE`, but `decode` never consulted
+it: it masked the flag off and read `10000` as a Floor Request.
+
+The table was read in all seven versions in `docs/3GPP/TS124.380` (V13.14.0
+to V19.2.0). The `x` and `0` entries are the same in every one, including
+subtype 14, which is `x1110` both as Floor Queued Cancel (Rel-17) and as
+Queued Floor Requests (Rel-18 on).
+
+| Constant or rule | Source | Where |
+|---|---|---|
+| A type whose entry is `0....` cannot carry the acknowledgement flag; with it, the packet is malformed (no release defines it), not the wrong release | TS 24.380 table 8.2.2.1-1, V13.14.0-V19.2.0 | `rtcp.decode`, `rtcp.ACK_CAPABLE`; independently, `tools/trace_compare.py` (`MAY_ASK_ACK`), which had the same gap |
+
+The behaviour change: a peer that wrongly sets the flag on a Floor Request
+is now dropped and counted `floor_malformed`, where it was served. That is
+the decoder's strict policy (a subtype outside the table is not guessed at);
+it is an interoperability risk with such a peer, and the counter is how it
+would be seen.
+
+Answering a flagged message with a Floor Ack is a different matter, and
+remains PLT-VP-R1 FC-OP-11.
+
 ## 5. NOT verified — the work that remains
 
 CA-01 through CA-06 and CA-11 through CA-13 are closed. What is left,
@@ -1697,6 +1727,7 @@ ordered by consequence:
 | CA-11 | Release baseline | 3A above | **Closed.** The release is a deployment parameter (`MCX_RELEASE`). |
 | CA-12 | Release dependence of the TS 24.379 layer | TS 24.379, all seven releases | **Closed.** See 4.20. Warning code 179 is Rel-17+; everything else the platform emits is stable from Rel-13. |
 | CA-05 | Timer defaults `DEFAULT_TIMERS_MS` (T2, T8, T20; T1 and T3 added by CA-21) | TS 24.380 clause 11.1, table 11.1.3-1 | **Closed, and correct.** See 4.11. |
+| CA-28 | The acknowledgement flag in the five-bit subtype | TS 24.380 table 8.2.2.1-1, V13.14.0-V19.2.0 | **Closed.** See 4.41. The decoder read a flagged Floor Request (and five others) as the unflagged message; it now refuses them as malformed. |
 | CA-27 | Voice codec constants: static payload types, AMR/AMR-WB layout parameters, EVS parameters, payload type direction | RFC 3551, RFC 4867 8.3.1, RFC 3264 5.1/6.1/8.3.2, RFC 3550 5.1, TS 26.179 4.1-4.2 (V13.2.0, V19.0.0), TS 26.445 A.3 | **Closed.** See 4.40. The EVS parameters were read from TS 26.445 annex A after the fact; one (`cmr`) had been missed (MED-OP-04). |
 | CA-26 | Ad hoc refusal rendering: warnings 150, 185 and 186, and the 3B/3C bodies | TS 24.379 17.4.2.2 steps 3A-5, 6.3.3.1.13.11-12, 6.3.3.1.25, table 4.4.2-2 (V18.13.0 and V20.0.0 agree) | **Closed.** The texts follow the table. Step 4 writes 185 as "user is not authorised"; the table's "user not authorised" is used, as for 187. The bodies are schema-valid at Rel-18 and Rel-20. The step order is honoured: 3A, then 3B/3C, then 4, then 5. 186 is used only where it is true, for a system with no ad hoc call type. |
 | CA-25 | The order of authorisation and target determination in §8.1 | TS 24.379 17.4.2.2 steps 1–12 (V20.0.0) for ad hoc calls; 10.1.1.4.2 for prearranged groups | **Closed, with one deliberate deviation and one gap.** For ad hoc calls the order is now the specification's: the caller is authorised (steps 4 and 5), then the list is checked (step 6), then the participants are determined (step 12). Deviation: for prearranged groups the specification looks the group up first (404, warning 163) and authorises after it (403, warning 119). The platform authorises first for every call type (PLT-ICD-001 §5.0). The former gap, warning 100 where 185, 186 or the step 3B body are specified, is closed by CA-26. The specification also puts steps 1–2 (500 for lack of resources, 488 for media) before authorisation. The platform checks both after authorisation, and only an authorised caller reaches them. |
@@ -1835,6 +1866,7 @@ reading a specification and noticing something the code had no opinion about
 
 | Version | Date | Change |
 |---|---|---|
+| 2.12 | 2026-10-28 | CA-28 (4.41): the decoder accepted the acknowledgement flag on the six types table 8.2.2.1-1 gives a literal 0 there; refused as malformed. Found by VP1-REL-003 made exhaustive. |
 | 2.11 | 2026-10-26 | CA-19 addendum (4.34): the `etcs-ipcon` bearer rule kept ARP pre-emption vulnerability false after CA-19 made its priority vulnerable; corrected under PLT-ICD-001 ICD-OP-14. |
 | 2.10 | 2026-09-26 | CA-27: TS 26.179 checked against docs/3GPP (V13.2.0, V19.0.0); citations stand; 4.2.1 recorded against G.711/G.722 calls to MCPTT clients. |
 | 2.9 | 2026-09-26 | CA-27: the EVS parameters read from TS 26.445 annex A; `cmr` had been missed and is now must-match. |

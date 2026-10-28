@@ -31,6 +31,10 @@ TYPES = {0: "request", 1: "granted", 2: "taken", 3: "deny", 4: "release",
          8: "queue-position-request", 9: "queue-position-info", 10: "ack",
          11: "unicast-media-flow-control", 14: "queued-floor-requests",
          15: "release-multi-talker"}
+# Subtypes whose table 8.2.2.1-1 entry begins 'x' (bit 4, acknowledgement
+# required, may be set); the rest have a literal 0 there, the same in every
+# release V13.14.0-V19.2.0 (PLT-CONF-AUDIT CA-28).
+MAY_ASK_ACK = {1, 2, 3, 4, 5, 9, 11, 14}
 FROM_CLIENT = {"request", "release", "queue-position-request", "ack"}
 FROM_SERVER = {"granted", "deny", "idle", "taken", "revoke",
                "queue-position-info"}
@@ -130,6 +134,8 @@ def parse(data: bytes):
     name = TYPES.get(b0 & 0x0F)
     if name is None:
         raise ValueError(f"subtype {b0 & 0x0F}")
+    if b0 & 0x10 and b0 & 0x0F not in MAY_ASK_ACK:
+        raise ValueError(f"subtype {b0 & 0x1F:05b}: {name} has no acknowledgement flag")
     fields: Dict[str, bytes] = {}
     i = 12
     while i < len(data):

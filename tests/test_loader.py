@@ -26,6 +26,7 @@ from core.errors import (  # noqa: E402
     StartupRefused,
 )
 from core.hooks import (  # noqa: E402
+    Admission,
     LocationContext,
     MediaKind,
     PriorityDecision,
@@ -754,47 +755,138 @@ def request_for(call_type, target="grp:alpha", initiator="sip:a@mcptt.example",
                           call_type=call_type, media=media, **kw)
 
 
-def test_vp1_hook_020_priority_decision_complete(mcx):
-    policy = mcx.hooks.priority_policy
-    empty = Resolution(kind=ResolutionKind.GROUP, members=("sip:a@mcptt.example",),
-                       group_id="grp:alpha")
-    for ct in mcx.profile.call_types:
-        d = policy.evaluate(request_for(ct.id), empty)
-        assert d.scope in {s.id for s in mcx.profile.preemption_scopes}
-        assert d.level >= 0 and d.floor_priority >= 0
-        assert d.label
+_EVERY_PROFILE = ("mcx", "frmcs", "utility")
 
 
-def test_vp1_hook_021_priority_totality(mcx, frmcs):
-    for lp in (mcx, frmcs):
-        res = Resolution(kind=ResolutionKind.USER, members=("x",))
-        for ct in lp.profile.call_types:
-            assert lp.hooks.priority_policy.evaluate(request_for(ct.id), res)
+@pytest.fixture(scope="module")
+def every_profile():
+    return {name: loader.load(PROFILES / name) for name in _EVERY_PROFILE}
 
 
-def test_vp1_hook_022_cross_scope_comparison_is_zero(mcx, frmcs):
-    """The central invariant: no pre-emption across scopes, ever."""
+def _decision_space(lp):
+    """Every call type the profile declares, at its own urgency and
+    application and at each one a request may state instead: the requests
+    the priority table can be asked about."""
+    p = lp.profile
     res = Resolution(kind=ResolutionKind.USER, members=("x",))
-    a = mcx.hooks.priority_policy.evaluate(request_for("emergency-group"), res)
-    b = frmcs.hooks.priority_policy.evaluate(request_for("rec-broadcast"), res)
-    assert a.scope != b.scope
-    assert mcx.hooks.priority_policy.compare(a, b) == 0
-    assert mcx.hooks.priority_policy.compare(b, a) == 0
+    for ct in p.call_types:
+        for urgency in (None,) + tuple(u.id for u in p.urgencies):
+            for application in (None,) + tuple(a.id for a in p.applications):
+                request = request_for(ct.id, urgency=urgency, application=application)
+                yield request, lp.hooks.priority_policy.evaluate(request, res)
 
 
-def test_vp1_hook_023_comparison_properties(mcx):
-    """Antisymmetry, transitivity within a scope, reflexive equality."""
-    policy = mcx.hooks.priority_policy
-    res = Resolution(kind=ResolutionKind.USER, members=("x",))
-    decisions = [policy.evaluate(request_for(ct.id), res)
-                 for ct in mcx.profile.call_types]
-    for a in decisions:
-        assert policy.compare(a, a) == 0
-        for b in decisions:
-            assert _sign(policy.compare(a, b)) == -_sign(policy.compare(b, a))
-            for c in decisions:
-                if policy.compare(a, b) > 0 and policy.compare(b, c) > 0:
-                    assert policy.compare(a, c) > 0
+def _rule_decisions(lp):
+    return [PriorityDecision(level=r.decision.level, scope=r.decision.scope,
+                             preemption_capability=r.decision.preemption_capability,
+                             preemption_vulnerability=r.decision.preemption_vulnerability,
+                             floor_priority=r.decision.floor_priority, label=r.decision.label)
+            for r in lp.profile.priority.rules]
+
+
+# The rules each profile's decision space reaches, by label. frmcs's last rule
+# (`operational`, the catch-all) is not reached by any shipped call type: since
+# FRMCS-OP-02 every application has a rule of its own above it, and it stays
+# as the table's floor for totality (PLT-PRF-005).
+_REACHED = {
+    "mcx": {"emergency", "imminent-peril", "elevated", "normal-private", "normal"},
+    "frmcs": {"railway-emergency", "etcs-data", "ato-data", "shunting", "voice-controller"},
+    "utility": {"switching", "telemetry", "routine"},
+}
+
+
+@pytest.mark.vp("VP1-HOOK-021")
+def test_vp1_hook_020_priority_decision_complete(every_profile):
+    """Every decision of every profile, over its whole decision space, carries
+    an int level and floor priority (not negative), both pre-emption flags as
+    booleans, a declared scope and a non-empty label, and is exactly one of the
+    decisions the profile's table declares."""
+    for name, lp in every_profile.items():
+        scopes = {s.id for s in lp.profile.preemption_scopes}
+        declared = _rule_decisions(lp)
+        reached = set()
+        for request, d in _decision_space(lp):
+            assert type(d) is PriorityDecision, (name, request)
+            assert type(d.level) is int and d.level >= 0
+            assert type(d.floor_priority) is int and d.floor_priority >= 0
+            assert type(d.preemption_capability) is bool
+            assert type(d.preemption_vulnerability) is bool
+            assert d.scope in scopes
+            assert type(d.label) is str and d.label
+            assert d in declared, (name, request, d)
+            reached.add(d.label)
+        assert reached == _REACHED[name], name
+
+
+def test_vp1_hook_021_priority_totality(every_profile):
+    """No evaluation over any profile's decision space fails to decide: every
+    call type, crossed with every urgency and application, and the count of
+    evaluations is the full product."""
+    for lp in every_profile.values():
+        assert all(isinstance(d, PriorityDecision) for _, d in _decision_space(lp))
+    # call types x (urgencies + its own) x (applications + its own)
+    assert {name: sum(1 for _ in _decision_space(lp))
+            for name, lp in every_profile.items()} == {
+        "mcx": 6 * 5 * 2, "frmcs": 4 * 4 * 6, "utility": 3 * 4 * 4}
+
+
+def _decision_pool(every_profile):
+    """Every decision any shipped table declares, plus synthesised ones: the
+    extremes of the level, every pair of pre-emption flags, in each shipped
+    scope and in one no profile declares."""
+    pool = [d for lp in every_profile.values() for d in _rule_decisions(lp)]
+    scopes = sorted({d.scope for d in pool}) + ["no-profile-scope"]
+    for scope in scopes:
+        for level in (0, 50, 2**31 - 1):
+            for cap in (False, True):
+                for vul in (False, True):
+                    pool.append(PriorityDecision(
+                        level=level, scope=scope, preemption_capability=cap,
+                        preemption_vulnerability=vul, floor_priority=level % 256,
+                        label=f"synth-{scope}-{level}-{cap:d}{vul:d}"))
+    return pool
+
+
+def test_vp1_hook_022_cross_scope_comparison_is_zero(every_profile):
+    """The central invariant: no pre-emption across scopes, ever. Every pair of
+    decisions with differing scopes, both ways round, through every profile's
+    compare."""
+    pool = _decision_pool(every_profile)
+    pairs = [(a, b) for a in pool for b in pool if a.scope != b.scope]
+    # 14 declared (5 + 6 + 3) and 48 synthesised (4 scopes x 3 levels x 4 flag
+    # pairs): 62, of which 17, 18, 15 and 12 share a scope.
+    assert (len(pool), len(pairs)) == (62, 62 * 62 - (17**2 + 18**2 + 15**2 + 12**2))
+    for lp in every_profile.values():
+        compare = lp.hooks.priority_policy.compare
+        assert [x for x in pairs if compare(*x) != 0 or compare(x[1], x[0]) != 0] == []
+
+
+def test_vp1_hook_023_comparison_properties(every_profile):
+    """Exhaustive over the decision pool (every declared decision of every
+    profile plus synthesised extremes and flag combinations, in four scopes,
+    mixed-scope triples included), through every profile's compare:
+    reflexive equality, antisymmetry, and transitivity of 'above' and of
+    'level with' within a scope."""
+    pool = _decision_pool(every_profile)
+    for lp in every_profile.values():
+        compare = lp.hooks.priority_policy.compare
+        sign = {(i, j): _sign(compare(a, b))
+                for i, a in enumerate(pool) for j, b in enumerate(pool)}
+        n = len(pool)
+        for i in range(n):
+            assert sign[i, i] == 0
+            for j in range(n):
+                assert sign[i, j] == -sign[j, i]
+        for i in range(n):
+            for j in range(n):
+                if sign[i, j] == 0 and pool[i].scope != pool[j].scope:
+                    continue
+                for k in range(n):
+                    if sign[i, j] > 0 and sign[j, k] > 0:
+                        assert sign[i, k] > 0, (pool[i], pool[j], pool[k])
+                    if sign[i, j] == 0 and sign[j, k] == 0 and \
+                            pool[i].scope == pool[j].scope == pool[k].scope:
+                        assert sign[i, k] == 0, (pool[i], pool[j], pool[k])
 
 
 def _sign(n):
@@ -809,26 +901,88 @@ def test_vp1_hook_024_determinism(mcx):
         assert policy.evaluate(request_for("private"), res) == first
 
 
-def test_vp1_hook_030_admission_refuses_by_return_value(mcx):
-    """Since ICD 0.13 an undeclared call type is refused by authorise
-    (§5.0), before any lookup; still a return value, not an exception."""
-    verdict = mcx.hooks.session_policy.authorise(request_for("no-such-call-type"))
-    assert verdict.permitted is False
-    assert verdict.reason_code == "call-type-not-permitted"
+# Every refusal condition of the in-tree TableSessionPolicy, in each shipped
+# profile it can arise in: (profile, method, call type, request attributes,
+# code). mcx declares no initiator roles, so it cannot refuse not-authorised;
+# frmcs reserves capacity for every urgency its call types have, so only its
+# global limit refuses at admit.
+_REFUSALS = [
+    ("mcx", "authorise", "no-such-call-type", {}, "call-type-not-permitted"),
+    ("frmcs", "authorise", "no-such-call-type", {}, "call-type-not-permitted"),
+    ("utility", "authorise", "no-such-call-type", {}, "call-type-not-permitted"),
+    ("frmcs", "authorise", "rec-broadcast", {}, "not-authorised"),
+    ("frmcs", "authorise", "shunting-group", {"initiator.roles": "train-driver"},
+     "not-authorised"),
+    ("utility", "authorise", "switching-order", {"initiator.roles": "field-crew"},
+     "not-authorised"),
+    ("mcx", "admit", "emergency-group", {"core.active_sessions": "2000"},
+     "capacity-exhausted"),
+    ("frmcs", "admit", "rec-broadcast", {"core.active_sessions": "5000"},
+     "capacity-exhausted"),
+    ("utility", "admit", "switching-order", {"core.active_sessions": "800"},
+     "capacity-exhausted"),
+    # The headroom reserved for other urgencies (mcx: 200 emergency + 100
+    # imminent-peril; utility: 100 safety-critical + 50 fault).
+    ("mcx", "admit", "private", {"core.active_sessions": "1700"}, "capacity-exhausted"),
+    ("mcx", "admit", "private", {"core.active_sessions": "1750",
+                                 "core.active_sessions.emergency": "50"},
+     "capacity-exhausted"),
+    ("utility", "admit", "crew-call", {"core.active_sessions": "650"}, "capacity-exhausted"),
+]
+# One below each capacity refusal, admitted: the refusal is the condition's.
+_ADMITTED = [
+    ("mcx", "emergency-group", {"core.active_sessions": "1999"}),
+    ("frmcs", "rec-broadcast", {"core.active_sessions": "4999"}),
+    ("utility", "switching-order", {"core.active_sessions": "799"}),
+    ("mcx", "private", {"core.active_sessions": "1699"}),
+    ("mcx", "private", {"core.active_sessions": "1749", "core.active_sessions.emergency": "50"}),
+    ("utility", "crew-call", {"core.active_sessions": "649"}),
+]
 
 
-def test_vp1_hook_031_reason_codes_declared(mcx):
-    declared = set(mcx.profile.admission.reject_reason_codes)
-    res = Resolution(kind=ResolutionKind.USER, members=("sip:a@mcptt.example",))
-    priority = mcx.hooks.priority_policy.evaluate(request_for("private"), res)
-    policy = mcx.hooks.session_policy
-    for ct in ("no-such-call-type", "private"):
-        verdict = policy.authorise(request_for(ct))
-        if not verdict.permitted:
-            assert verdict.reason_code in declared
-    busy = request_for("private", attributes={"core.active_sessions": "2000"})
-    verdict = policy.admit(busy, res, priority)
-    assert not verdict.permitted and verdict.reason_code in declared
+def _ask(lp, method, call_type, attributes):
+    request = request_for(call_type, attributes=attributes)
+    policy = lp.hooks.session_policy
+    if method == "authorise":
+        return policy.authorise(request)
+    res = Resolution(kind=ResolutionKind.USER, members=("sip:a@x.example",))
+    return policy.admit(request, res, lp.hooks.priority_policy.evaluate(request, res))
+
+
+@pytest.mark.parametrize("profile,method,call_type,attributes,code", _REFUSALS,
+                         ids=[f"{r[0]}-{r[1]}-{r[2]}-{r[4]}-{i}"
+                              for i, r in enumerate(_REFUSALS)])
+def test_vp1_hook_030_admission_refuses_by_return_value(every_profile, profile, method,
+                                                       call_type, attributes, code):
+    """Every refusal condition arrives as a returned Admission(permitted=False)
+    with its code; nothing is raised for a business decision."""
+    verdict = _ask(every_profile[profile], method, call_type, attributes)
+    assert isinstance(verdict, Admission)
+    assert (verdict.permitted, verdict.reason_code) == (False, code)
+
+
+@pytest.mark.parametrize("profile,call_type,attributes", _ADMITTED,
+                         ids=[f"{r[0]}-{r[1]}-{i}" for i, r in enumerate(_ADMITTED)])
+def test_vp1_hook_030_one_below_each_capacity_refusal_is_admitted(every_profile, profile,
+                                                                  call_type, attributes):
+    verdict = _ask(every_profile[profile], "admit", call_type, attributes)
+    assert (verdict.permitted, verdict.reason_code) == (True, "")
+
+
+def test_vp1_hook_031_reason_codes_declared(every_profile):
+    """Every code any refusal path returns is in that profile's declared
+    reject_reason_codes, and the paths together return exactly these."""
+    returned = {}
+    for profile, method, call_type, attributes, _ in _REFUSALS:
+        verdict = _ask(every_profile[profile], method, call_type, attributes)
+        declared = every_profile[profile].profile.admission.reject_reason_codes
+        assert verdict.reason_code in declared, (profile, verdict.reason_code)
+        returned.setdefault(profile, set()).add(verdict.reason_code)
+    assert returned == {
+        "mcx": {"call-type-not-permitted", "capacity-exhausted"},
+        "frmcs": {"call-type-not-permitted", "not-authorised", "capacity-exhausted"},
+        "utility": {"call-type-not-permitted", "not-authorised", "capacity-exhausted"},
+    }
 
 
 def test_admission_leaves_the_participant_limit_to_the_session_decision(mcx):
@@ -842,6 +996,7 @@ def test_admission_leaves_the_participant_limit_to_the_session_decision(mcx):
     assert mcx.hooks.session_policy.decide(request_for("private"), res).max_participants == 2
 
 
+@pytest.mark.vp("VP1-HOOK-030")
 def test_admission_enforces_capacity(mcx):
     res = Resolution(kind=ResolutionKind.USER, members=("sip:a@mcptt.example",))
     priority = mcx.hooks.priority_policy.evaluate(request_for("private"), res)
@@ -1042,6 +1197,38 @@ def test_vp1_hook_013_resolved_from_recorded(frmcs):
     res = r.resolve(target, request_for("driver-controller", target=target))
     assert res.resolved_from == target
     assert res.members == ("sip:driver1@frmcs.example",)
+
+
+def test_vp1_hook_013_resolved_from_is_in_the_audit_record():
+    """A controller calls the driver of train T1 by its functional address:
+    the session's resolution, the resolver's recorded return value and the
+    session-admitted audit record all carry the reference it came from."""
+    from core.audit import Auditor, MemorySink, RecordType
+    from core.session import Platform, SessionManager
+    # Its own profile: the module's `frmcs` is shared, and this binds roles.
+    frmcs = loader.load(PROFILES / "frmcs")
+    r = frmcs.hooks.identity_resolver
+    controller, driver = "sip:c1@frmcs.example", "sip:driver1@frmcs.example"
+    for u in (controller, driver):
+        r.register_user(u)
+    r.bind("track-controller", controller,
+           LocationContext(attributes={"track_section": "S1"}))
+    r.bind("train-driver", driver, LocationContext(attributes={"train_id": "T1"}))
+    sink = MemorySink()
+    mgr = SessionManager(frmcs, Auditor(sink, "t", clock=lambda: 0),
+                         platform=Platform(), clock=lambda: 0)
+    target = "sip:T1.train-driver@frmcs.example"
+    session, _, refusal = mgr.establish(request_for(
+        "driver-controller", target=target, initiator=controller))
+    assert refusal is None, refusal
+    assert session.resolution.resolved_from == target
+    assert session.members == (driver,)
+    [resolve] = [x for x in sink.of_type(RecordType.HOOK_INVOCATION)
+                 if (x.detail["interface"], x.detail["method"]) == ("IF-IDR", "resolve")]
+    assert resolve.detail["returned"]["resolved_from"] == target
+    [admitted] = sink.of_type(RecordType.SESSION_ADMITTED)
+    assert admitted.detail["resolved_from"] == target
+    assert admitted.correlation_id == "r1"
 
 
 def test_vp1_hook_015_resolution_failure_codes_distinct(frmcs):

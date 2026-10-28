@@ -163,6 +163,34 @@ def test_vp1_hook_032_refusal_is_audited(manager, sink):
     assert sink.of_type(RecordType.SESSION_ESTABLISHED) == []
 
 
+def test_vp1_hook_032_a_refusal_at_admit_establishes_nothing(mcx, sink):
+    """PLT-HOK-033 is the admit path (ICD §5.1 INV-1): admission refuses (no
+    capacity left), so no invitation, nothing active, no session to find, one
+    session-refused record with the code, nothing established, and no hook
+    after admit is consulted."""
+    resolver = mcx.hooks.identity_resolver
+    for i in range(2):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    mgr = SessionManager(mcx, Auditor(sink, mcx.profile.identifier(), clock=Clock()),
+                         platform=Platform(active_sessions=lambda: 2000))
+    session, signals, refusal = mgr.establish(
+        req(call_type="private", target="sip:u1@mcptt.example", rid="adm"))
+    assert session is None
+    assert refusal.reason_code == "capacity-exhausted"
+    assert types(signals) == [SignalType.RESPONSE_REJECT]
+    assert mgr.active == () and mgr.session("adm") is None
+    [refused] = sink.of_type(RecordType.SESSION_REFUSED)
+    assert (refused.correlation_id, refused.detail["reason_code"]) == ("adm",
+                                                                       "capacity-exhausted")
+    assert sink.of_type(RecordType.SESSION_ESTABLISHED) == []
+    assert sink.of_type(RecordType.SESSION_ADMITTED) == []
+    calls = sink.of_type(RecordType.HOOK_INVOCATION)
+    assert [(r.detail["interface"], r.detail["method"]) for r in calls] == \
+        _SEQUENCE_8_1[:5]
+    assert calls[-1].detail["returned"] == {"permitted": False,
+                                            "reason_code": "capacity-exhausted"}
+
+
 def test_participant_limit_refuses_before_establishment(manager):
     """A private call resolves to a 4-member group: over its limit of 2."""
     session, signals, refusal = manager.establish(
@@ -226,6 +254,7 @@ def test_capacity_supplied_to_admission_hook(mcx, sink):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.vp("VP1-HOOK-003")
 def test_invocation_order_matches_icd_section_8_1(manager, sink):
     """A local session never consults the interworking hook."""
     manager.establish(req())
@@ -293,6 +322,74 @@ def test_vp1_hook_001_hook_exception_fails_session(mcx, sink):
     assert SignalType.INVITE not in types(signals)
     failed = sink.of_type(RecordType.SESSION_FAILED)
     assert failed[0].detail["interface"] == "IF-PRI"
+
+
+_SEQUENCE_8_1 = [
+    ("IF-IDR", "identities_of"), ("IF-SES", "authorise"), ("IF-IDR", "resolve"),
+    ("IF-PRI", "evaluate"), ("IF-SES", "admit"), ("IF-SES", "decide"),
+    ("IF-SES", "floor_policy"), ("IF-BER", "select")]
+# The interworking call sits right after the target is resolved (§8.1).
+_SEQUENCE_8_1_EXTERNAL = _SEQUENCE_8_1[:3] + [("IF-IWF", "route")] + _SEQUENCE_8_1[3:]
+_FIELD = {"IF-IDR": "identity_resolver", "IF-PRI": "priority_policy",
+          "IF-SES": "session_policy", "IF-BER": "bearer_selector",
+          "IF-IWF": "interworking_gateway"}
+
+
+class _RaisingAt:
+    """A hook that delegates everything to the real one but raises at one
+    method: a profile's hook failing mid-sequence."""
+
+    def __init__(self, real, method):
+        self._real, self._method = real, method
+
+    def __getattr__(self, name):
+        if name == self._method:
+            def boom(*a, **kw):
+                raise RuntimeError(f"boom in {name}")
+            return boom
+        return getattr(self._real, name)
+
+
+def _hook_failing_at(mcx, sink, interface, method):
+    import dataclasses
+    resolver = mcx.hooks.identity_resolver
+    for i in range(3):
+        resolver.register_user(f"sip:u{i}@mcptt.example")
+    field = _FIELD[interface]
+    hooks = dataclasses.replace(
+        mcx.hooks, **{field: _RaisingAt(getattr(mcx.hooks, field), method)})
+    lp = loader.LoadedProfile(profile=mcx.profile, hooks=hooks, source=mcx.source)
+    return SessionManager(lp, Auditor(sink, mcx.profile.identifier(), clock=Clock()))
+
+
+@pytest.mark.vp("VP1-HOOK-003")
+@pytest.mark.parametrize("interface,method", _SEQUENCE_8_1_EXTERNAL,
+                         ids=[f"{i}.{m}" for i, m in _SEQUENCE_8_1_EXTERNAL])
+def test_vp1_hook_001_an_exception_at_every_hook_fails_the_session(mcx, sink, interface,
+                                                                    method):
+    """VP1-HOOK-001 at each interface and method of the §8.1 sequence (the
+    interworking one reached through an external target): hook-error, no
+    session, no invitation, nothing active, nothing established, and the
+    failure names the interface that raised. Nothing after it is invoked."""
+    mgr = _hook_failing_at(mcx, sink, interface, method)
+    session, signals, refusal = mgr.establish(
+        req(call_type="private", target="tetra:1234", rid="x"))
+    assert session is None
+    assert refusal.reason_code == "hook-error"
+    assert SignalType.INVITE not in types(signals)
+    assert mgr.active == ()
+    assert sink.of_type(RecordType.SESSION_ESTABLISHED) == []
+    [failed] = sink.of_type(RecordType.SESSION_FAILED)
+    assert (failed.detail["interface"], failed.detail["reason_code"]) == (interface,
+                                                                          "hook-error")
+    # VP1-HOOK-003, failure path: the trail stops at the failing invocation,
+    # which is recorded with outcome 'error' and the exception's type.
+    calls = sink.of_type(RecordType.HOOK_INVOCATION)
+    at = _SEQUENCE_8_1_EXTERNAL.index((interface, method))
+    assert [(r.detail["interface"], r.detail["method"]) for r in calls] == \
+        _SEQUENCE_8_1_EXTERNAL[:at + 1]
+    assert [r.detail["outcome"] for r in calls] == ["ok"] * at + ["error"]
+    assert calls[-1].detail["error"] == "RuntimeError"
 
 
 def test_vp1_hook_002_contract_violation_is_distinguished(mcx, sink):
@@ -1086,14 +1183,24 @@ def test_an_inconsistent_session_decision_is_a_contract_violation(mcx, sink, cha
 
 
 def test_vp1_hook_003_every_invocation_audited(manager, sink):
+    """One record per invocation, in the §8.1 order, each with its own
+    interface and method, a non-negative elapsed time and outcome ok."""
     manager.establish(req())
     records = sink.of_type(RecordType.HOOK_INVOCATION)
-    assert len(records) == 8
+    assert [(r.detail["interface"], r.detail["method"]) for r in records] == _SEQUENCE_8_1
     for r in records:
-        assert r.detail["interface"].startswith("IF-")
-        assert "elapsed_ms" in r.detail
+        assert type(r.detail["elapsed_ms"]) is float and r.detail["elapsed_ms"] >= 0
         assert r.detail["outcome"] == "ok"
+        assert r.detail["budget_overrun"] is False
         assert r.correlation_id == "s1"
+
+
+def test_vp1_hook_003_every_invocation_audited_with_interworking(manager, sink):
+    manager.establish(req(call_type="private", target="tetra:1234", rid="ext"))
+    records = [r for r in sink.for_session("ext") if r.type is RecordType.HOOK_INVOCATION]
+    assert [(r.detail["interface"], r.detail["method"]) for r in records] == \
+        _SEQUENCE_8_1_EXTERNAL
+    assert [r.detail["outcome"] for r in records] == ["ok"] * 9
 
 
 def _returned_by(sink, interface, method):

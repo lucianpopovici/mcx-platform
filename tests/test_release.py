@@ -320,3 +320,227 @@ def test_session_types_and_indications_by_release():
             assert supports_mc_indicator(Release(release), ind) is True
         assert supports_mc_indicator(Release(release), "adhoc-emergency-ind") is (release >= 18)
         assert supports_session_type(Release(release), "conference") is False
+
+
+# -- VP1-REL-003..007, exhaustively (review of 2026-09-28) -----------------------
+
+# Spelled out from TS 24.380 table 8.2.2.1-1, table 8.2.3.1-2 and clause
+# 8.2.10.2 of V13.14.0 through V19.2.0, not read from core/release.py.
+FIRST_RELEASE_OF_TYPE = {0: 13, 1: 13, 2: 13, 3: 13, 4: 13, 5: 13, 6: 13, 7: 19,
+                         8: 13, 9: 13, 10: 13, 11: 17, 14: 17, 15: 15}
+# Types whose subtype is 'x....' in the table (may carry the acknowledgement
+# flag, bit 4); the same in every release.
+ACK_CAPABLE_TYPES = {1, 2, 3, 4, 5, 9, 11, 14}
+FIRST_RELEASE_OF_FIELD = {**{f: 13 for f in range(15)}, **{f: 15 for f in range(15, 21)},
+                          **{f: 17 for f in range(21, 25)}, 25: 19}
+FIRST_RELEASE_OF_REVOKE_CAUSE = {1: 13, 2: 13, 3: 13, 4: 13, 6: 13, 7: 19, 255: 13}
+
+
+def _expected_subtype(release, five_bits):
+    """'ok', 'release' (well-formed but outside this release) or 'malformed'
+    (a subtype no release defines)."""
+    mtype, ack = five_bits & 0x0F, bool(five_bits & 0x10)
+    if mtype not in FIRST_RELEASE_OF_TYPE or (ack and mtype not in ACK_CAPABLE_TYPES):
+        return "malformed"
+    return "ok" if release >= FIRST_RELEASE_OF_TYPE[mtype] else "release"
+
+
+def _outcome(fn):
+    try:
+        fn()
+    except rtcp.ReleaseRefused:
+        return "release"
+    except rtcp.RtcpError:
+        return "malformed"
+    return "ok"
+
+
+@pytest.mark.vp("VP1-REL-003")
+@pytest.mark.parametrize("release", RELEASES)
+def test_vp1_rel_003_every_five_bit_subtype_is_read_or_refused(release):
+    """All 32 values of the five-bit subtype, on the wire: a type the release
+    has is read; a type a later release has is refused as wrong release; 12,
+    13 and the flag on a type whose entry is '0....' (no release defines
+    them) are refused as malformed."""
+    codec = rtcp.Codec(Release(release))
+    template = bytearray(codec.encode(rtcp.message(rtcp.MsgType.REQUEST, 1)))
+    got = {}
+    for v in range(32):
+        wire = bytes([0x80 | v]) + bytes(template[1:])
+        got[v] = _outcome(lambda: codec.decode(wire))
+    assert got == {v: _expected_subtype(release, v) for v in range(32)}
+    # Pinned for one release so the expectation function is checked too.
+    if release == 17:
+        assert [v for v in range(32) if got[v] == "ok"] == [
+            0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 14, 15, 17, 18, 19, 20, 21, 25, 27, 30]
+        assert [v for v in range(32) if got[v] == "release"] == [7]
+
+
+@pytest.mark.vp("VP1-REL-003")
+@pytest.mark.parametrize("release", RELEASES)
+def test_vp1_rel_003_every_type_field_and_revoke_cause_encodes_or_is_refused(release):
+    """Emission: every assigned message type, every field id 0-255 and every
+    revoke cause 0-255 (and the largest), each encodes exactly when the
+    release defines it and is otherwise refused (ReleaseRefused). The
+    unassigned types 12 and 13 cannot be built at all."""
+    codec = rtcp.Codec(Release(release))
+    types = {int(t): _outcome(lambda t=t: codec.encode(rtcp.message(t, 1)))
+             for t in rtcp.MsgType}
+    assert types == {t: ("ok" if release >= first else "release")
+                     for t, first in FIRST_RELEASE_OF_TYPE.items()}
+    for unassigned in (12, 13):
+        with pytest.raises(ValueError):
+            rtcp.MsgType(unassigned)
+    fields = {f: _outcome(lambda f=f: codec.encode(
+        rtcp.message(rtcp.MsgType.GRANTED, 1, (f, b"\x00\x00")))) for f in range(256)}
+    assert fields == {f: ("ok" if release >= FIRST_RELEASE_OF_FIELD.get(f, 99) else "release")
+                      for f in range(256)}
+    causes = {c: _outcome(lambda c=c: codec.encode(
+        rtcp.message(rtcp.MsgType.REVOKE, 1, rtcp.f_reject(c)))) for c in (*range(256), 65535)}
+    assert causes == {c: ("ok" if release >= FIRST_RELEASE_OF_REVOKE_CAUSE.get(c, 99)
+                          else "release") for c in (*range(256), 65535)}
+
+
+@pytest.mark.vp("VP1-REL-003")
+@pytest.mark.parametrize("release", RELEASES)
+def test_vp1_rel_003_a_field_no_release_defines_is_malformed_on_the_wire(release):
+    """Received, an id beyond the table (26-255) is malformed; an id a later
+    release defines is the wrong release."""
+    codec = rtcp.Codec(Release(release))
+    base = codec.encode(rtcp.message(rtcp.MsgType.REQUEST, 1))
+
+    def with_field(fid):
+        body = bytes([fid, 2, 0, 0])
+        return bytes([base[0], base[1]]) + (len(base + body) // 4 - 1).to_bytes(2, "big") \
+            + base[4:] + body
+    got = {f: _outcome(lambda f=f: codec.decode(with_field(f))) for f in range(15, 256)}
+    for f in range(15, 256):
+        first = FIRST_RELEASE_OF_FIELD.get(f)
+        if first is None:
+            assert got[f] == "malformed", f
+        elif release < first:
+            assert got[f] == "release", f
+
+
+@pytest.mark.vp("VP1-REL-004")
+def test_vp1_rel_004_one_packet_read_at_each_release():
+    """The same subtype-14 bytes, decoded by each release's codec: Floor
+    Queued Cancel at Rel-17, Queued Floor Requests at Rel-18, 19 and 20, and
+    refused as the wrong release before Rel-17. The bytes do not differ: the
+    Rel-17 and Rel-18 encoders produce the same packet."""
+    wire = rtcp.Codec(Release.REL_18).encode(rtcp.message(rtcp.MsgType(14), 7))
+    assert rtcp.Codec(Release.REL_17).encode(rtcp.message(rtcp.MsgType(14), 7)) == wire
+    reported = {}
+    for release in RELEASES:
+        codec = rtcp.Codec(Release(release))
+        try:
+            reported[release] = codec.name_of(codec.decode(wire))
+        except rtcp.ReleaseRefused:
+            reported[release] = "refused"
+    assert reported == {13: "refused", 14: "refused", 15: "refused", 16: "refused",
+                        17: "Floor Queued Cancel", 18: "Queued Floor Requests",
+                        19: "Queued Floor Requests", 20: "Queued Floor Requests"}
+
+
+# -- VP1-REL-006: the release in every record of a real call --------------------
+
+from tests.test_sip_transport import (  # noqa: E402,F401  (fixtures)
+    LOCAL, SDP, U, Flow, answer, clock, invite, msg, pki, register, sip_env)
+
+
+@pytest.mark.vp("VP1-REL-006")
+@pytest.mark.parametrize("release", ["17", "19"])
+def test_vp1_rel_006_every_stored_record_of_a_call_carries_the_release(tmp_path, pki, clock,
+                                                                        release):
+    """A private call answered, acknowledged and released, and a refused
+    call, through the SIP core into the durable store: every record read back
+    carries name/version/16-hex hash of the profile, the configured release,
+    the network's triple and the environment."""
+    import re
+    from core import loader
+    from service.runtime import build_runtime
+    from service.sip_core import SipCore
+    from core.session import Platform
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_RELEASE=release), clock, platform=Platform())
+    core = SipCore(rt, LOCAL, clock)
+    try:
+        flows = {u: Flow(u) for u in U}
+        for u, f in flows.items():
+            register(core, u, f)
+        core.on_bytes(invite("c1", U[0], U[1], "private"), flows[U[0]])
+        (leg,) = flows[U[1]].requests("INVITE")
+        core.on_bytes(answer(leg, 200, SDP), flows[U[1]])
+        core.on_bytes(msg("ACK", LOCAL, "c1", 1, U[0], U[1], branch="z9hG4bKack"),
+                      flows[U[0]])
+        core.on_bytes(msg("BYE", LOCAL, "c1", 2, U[0], U[1], to_tag="mcx"), flows[U[0]])
+        core.on_bytes(invite("c2", U[0], U[1], "no-such-call-type"), flows[U[0]])
+        records = rt.store.audit_records()
+    finally:
+        core.close()
+        rt.close()
+    profile_hash = loader.load(ROOT / "profiles" / "mcx").profile.content_hash[:16]
+    pattern = re.compile(rf"mcx/[^/+]+/{profile_hash}\+Rel-{release}"
+                         rf"\+test-net/1/[0-9a-f]{{16}}\+test")
+    assert records and all(pattern.fullmatch(r["profile"]) for r in records), \
+        {r["profile"] for r in records}
+    kinds = {r["type"] for r in records}
+    assert {"hook-invocation", "session-admitted", "session-established",
+            "session-released", "session-refused"} <= kinds, kinds
+
+
+# -- VP1-REL-007: every release-bound warning code, at every release -------------
+
+# First release of each code the platform emits, from TS 24.379 table 4.4.2-2
+# (V13.19.0 to V20.0.0), spelled out.
+FIRST_RELEASE_OF_WARNING = {100: 13, 116: 13, 122: 13, 141: 13, 145: 13, 179: 17,
+                            185: 18, 186: 18, 187: 18, 189: 18, 201: 20}
+
+
+@pytest.mark.vp("VP1-REL-007")
+@pytest.mark.parametrize("release", RELEASES)
+def test_vp1_rel_007_every_warning_text_is_gated_at_every_release(release):
+    """Every refusal with a TS 24.379 code: from its first release the
+    Warning carries the code and phrase; before it, the phrase alone. The
+    status is the same at every release and a 4xx/5xx, and nothing raises."""
+    from core.sip import WARNING_TEXTS, Adapter, DialogContext
+    assert {code for code, _ in WARNING_TEXTS.values()} <= set(FIRST_RELEASE_OF_WARNING)
+    ctx = DialogContext(call_id="c1", local_uri="sip:ps.mcptt.example")
+    adapter = Adapter("sip:ps.mcptt.example", Release(release))
+    newest = Adapter("sip:ps.mcptt.example", Release.REL_20)
+    for reason, (code, text) in WARNING_TEXTS.items():
+        r = adapter.reject(reason, ctx)
+        expected = f"{code} {text}" if release >= FIRST_RELEASE_OF_WARNING[code] else text
+        assert r.headers.get("Warning") == f'399 ps.mcptt.example "{expected}"', reason
+        assert r.status is newest.reject(reason, ctx).status
+        assert 400 <= r.status.code < 600
+
+
+def _adhoc_invite():
+    from core.sip import Headers, Request
+    from tests import mcpttinfo_fixture as mcf
+    return Request("INVITE", "sip:ps.mcptt.example", Headers([
+        ("Content-Type", mcf.CONTENT_TYPE)]), body=mcf.multipart(SDP, mcf.adhoc_xml()))
+
+
+@pytest.mark.vp("VP1-REL-007")
+@pytest.mark.parametrize("release", RELEASES)
+def test_vp1_rel_007_the_ad_hoc_codes_at_every_release(release):
+    """185 and 186 (Rel-18) answer an ad hoc INVITE step 0 refused. Before
+    Rel-18 there are no ad hoc calls to refuse as such (the session type does
+    not exist), so the same INVITE is answered with the Rel-13 code 100 and
+    its own phrase: never a code the release lacks, and never a raise."""
+    from core.sip import Adapter, DialogContext
+    ctx = DialogContext(call_id="c1", local_uri="sip:ps.mcptt.example")
+    adapter = Adapter("sip:ps.mcptt.example", Release(release))   # no ad hoc call types
+    got = {reason: adapter.reject(reason, ctx, invite=_adhoc_invite(), authorisation=True)
+           for reason in ("not-authorised", "call-type-not-permitted")}
+    if release >= 18:
+        expected = {"not-authorised": "185 user not authorised to initiate the adhoc group call",
+                    "call-type-not-permitted": "186 the MCPTT system do not support adhoc "
+                                               "group call"}
+    else:
+        expected = {"not-authorised": "100 function not allowed due to user authorisation",
+                    "call-type-not-permitted": "100 function not allowed due to local policy"}
+    assert {k: r.headers.get("Warning") for k, r in got.items()} == {
+        k: f'399 ps.mcptt.example "{v}"' for k, v in expected.items()}
+    assert [r.status.code for r in got.values()] == [403, 403]
