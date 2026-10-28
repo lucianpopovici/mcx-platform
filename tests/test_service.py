@@ -947,9 +947,34 @@ def test_the_ad_hoc_list_cap_is_at_most_1000(env, value):
         build_runtime({**env, "MCX_ADHOC_LIST_MAX": value}, _clock())
     assert str(exc.value) == (
         f"MCX_ADHOC_LIST_MAX={value.strip().lstrip('0')} is more than 1000: each listed entry is "
-        "resolved while every other call waits (about 25 us a user entry), so a list is "
+        "resolved while every other call waits (about 40 us a user entry), so a list is "
         "at most 1000 entries; a larger ad hoc call goes by criteria "
         "(PLT-ICD-001 ICD-ADH-001)")
+
+
+@pytest.mark.parametrize("value,expected", [(None, "users"), ("users", "users"),
+                                            (" Users-And-Groups ", "users-and-groups")])
+def test_the_ad_hoc_list_entries_default_to_users(env, value, expected):
+    """ADHOC-OP-06 (owner decision 2026-10-28): optional, default users."""
+    e = dict(env) if value is None else {**env, "MCX_ADHOC_LIST_ENTRIES": value}
+    rt = build_runtime(e, _clock())
+    try:
+        assert rt.config.adhoc_list_entries == expected
+        assert rt.manager._adhoc_list_groups is (expected == "users-and-groups")
+        snap = rt.health.snapshot()
+        assert snap["settings"]["MCX_ADHOC_LIST_ENTRIES"] == expected
+        assert ("MCX_ADHOC_LIST_ENTRIES" in [d["setting"] for d in snap["deviations"]]) \
+            is (expected == "users-and-groups")
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize("value", ["groups", "user", "users,groups"])
+def test_the_ad_hoc_list_entries_take_two_values(env, value):
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime({**env, "MCX_ADHOC_LIST_ENTRIES": value}, _clock())
+    assert str(exc.value) == (f"MCX_ADHOC_LIST_ENTRIES={value!r} must be 'users' or "
+                              "'users-and-groups'")
 
 
 def test_a_cap_of_thousands_of_digits_is_refused_not_a_fault(env):

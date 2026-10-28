@@ -3988,7 +3988,7 @@ REQUEST_ENRICHERS = frozenset({"_located", "_with_roles"})
 REQUEST_ORIGINS: Dict[Tuple[str, str], str] = {
     ("core/session.py", "SessionManager.receive_inbound"): "map_inbound"}
 # The resolver methods that receive the request.
-RESOLVER_REQUEST_METHODS = frozenset({"resolve", "determine_participants"})
+RESOLVER_REQUEST_METHODS = frozenset({"resolve", "kind_of", "determine_participants"})
 
 
 def _resolver_method(node) -> bool:
@@ -4116,7 +4116,8 @@ def check_resolver_receives_context(root: Path) -> List[str]:
     """VP1-BND-014 / PLT-HOK-011 — the whole request reaches the resolver.
 
     Over every core module, each call of the resolver methods that receive
-    the request (`RESOLVER_REQUEST_METHODS`: resolve, determine_participants),
+    the request (`RESOLVER_REQUEST_METHODS`: resolve, kind_of,
+    determine_participants),
     direct or through the invoker, passes as the request the enclosing
     function's own `request` parameter; that function rebinds or alters
     `request` only through the core's adding helpers (`REQUEST_ENRICHERS`:

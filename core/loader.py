@@ -39,7 +39,7 @@ PROFILE_FILENAME = "profile.yaml"
 HOOK_INTERFACES: Mapping[str, Tuple[type, Tuple[str, ...]]] = {
     "identity_resolver": (hook_ifaces.IdentityResolver,
                           ("resolve", "bind", "unbind", "identities_of",
-                           "determine_participants")),
+                           "kind_of", "determine_participants")),
     "priority_policy": (hook_ifaces.PriorityPolicy, ("evaluate", "compare")),
     "session_policy": (hook_ifaces.SessionPolicy,
                        ("authorise", "admit", "decide", "floor_policy")),

@@ -1335,6 +1335,10 @@ class SipCore:
         session = self.rt.manager.session(call.cid)
         if session is not None and session.truncated_from is not None:
             h.add("Warning", self.adapter.too_many_participants())
+        # ADHOC-OP-06: the groups an ad hoc list named, left out when only
+        # users may be listed, are not dropped unannounced.
+        if session is not None and session.omitted_groups:
+            h.add("Warning", self.adapter.omitted_groups(session.omitted_groups))
         return h
 
     @staticmethod

@@ -55,7 +55,7 @@ count, and the values are the same on every Python version.
 ## Commands
 
 ```bash
-python3 -m pytest tests/ -q                   # must stay green (3205 tests)
+python3 -m pytest tests/ -q                   # must stay green (3227 tests)
 python3 tools/check_boundary.py --root .      # must stay 21/21
 python3 tools/vp_results.py [--interop k.json a.json]   # R1 results register -> docs/PLT-VP-R1-RESULTS.md
 # run it -- every one of these is required and none has a default
@@ -201,7 +201,9 @@ TS 24.379 has only from Rel-18. `MCX_STRICT_RELEASE` (required, no default)
 decides what happens then: `true` refuses to start, `false` starts and warns
 in the log and the health document (REL-OP-02). Ad hoc calls that list their
 participants are capped by `MCX_ADHOC_LIST_MAX` (required, no default, at
-most 1 000; ADHOC-OP-04), checked before any entry is resolved. Every process also names
+most 1 000; ADHOC-OP-04), checked before any entry is resolved; a listed
+group is left out with a warning, or with `MCX_ADHOC_LIST_ENTRIES=users-and-groups`
+stands for its members, all counted against the cap (ADHOC-OP-06). Every process also names
 a network profile, `MCX_NETWORK_FILE` (required, no default; NET-OP-01): the
 PLMNs, the map from reported cells to locations, and the trusted SIP cores
 with a CA of their own (ICD-OP-10). Its `name/version/hash` joins the profile

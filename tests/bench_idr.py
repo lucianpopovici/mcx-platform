@@ -165,7 +165,7 @@ def cases(scale: float = 1.0) -> List[Case]:
 
     def adhoc_step() -> float:
         started = time.perf_counter()
-        resolution, refusal = step_mgr._adhoc_members(_invoker(), step_request)
+        resolution, refusal, _ = step_mgr._adhoc_members(_invoker(), step_request)
         assert refusal is None and len(resolution.members) == listed
         return (time.perf_counter() - started) * 1000
     out.append((f"core step: ad hoc call listing {listed} participants", adhoc_step, False))

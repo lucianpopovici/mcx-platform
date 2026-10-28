@@ -131,6 +131,10 @@ class Session:
     # Set when the group had more members than the session decision allows
     # (TS 24.379 6.3.5.5): how many it had. `members` are those that take part.
     truncated_from: Optional[int] = None
+    # The entries of an ad hoc caller's list left out because they name a
+    # group, when only users may be listed (PLT-VP-R1 ADHOC-OP-06): the host
+    # tells the caller.
+    omitted_groups: Tuple[str, ...] = ()
 
 
 # RES-OP-14: what a floor transition the audit store cannot take does.
@@ -185,6 +189,7 @@ class SessionManager:
                  functions: Optional[Mapping[str, str]] = None,
                  defer_floor_start: bool = False,
                  adhoc_list_max: Optional[int] = None,
+                 adhoc_list_groups: bool = False,
                  cells: Optional[Mapping[str, Mapping[str, str]]] = None,
                  floor_unrecorded: str = "deny",
                  foreign_initiator: str = "refuse",
@@ -215,6 +220,11 @@ class SessionManager:
         # MCX_ADHOC_LIST_MAX, required there). None only for a manager built
         # by hand, and then the call type's limit alone applies.
         self._adhoc_list_max = adhoc_list_max
+        # ADHOC-OP-06 (owner decision 2026-10-28, the host's
+        # MCX_ADHOC_LIST_ENTRIES): False, a listed group is left out without
+        # being resolved, and recorded for the caller to be told; True, it
+        # stands for its members, every one of whom counts against the cap.
+        self._adhoc_list_groups = adhoc_list_groups
         # Serving cell -> location attributes: deployment data, supplied by
         # the host (the network profile; PLT-ICD-001 2.8, PRF-OP-03).
         self._cells = dict(cells or {})
@@ -510,8 +520,9 @@ class SessionManager:
 
             # 1 — IF-IDR. An ad hoc group call names no group; its members
             # come from the caller's list or criteria (§3.5).
+            omitted_groups: Tuple[str, ...] = ()
             if request.adhoc:
-                resolution, refusal = self._adhoc_members(invoker, request)
+                resolution, refusal, omitted_groups = self._adhoc_members(invoker, request)
                 if refusal is not None:
                     return self._refuse(cid, request, *refusal)
             else:
@@ -695,6 +706,7 @@ class SessionManager:
             correlation_id=cid, request=request, resolution=resolution,
             priority=priority, decision=decision, bearer=bearer,
             members=tuple(resolution.members), truncated_from=truncated_from,
+            omitted_groups=omitted_groups,
         )
 
         if floor_policy is not None:
@@ -761,6 +773,8 @@ class SessionManager:
                                priority=priority.label, scope=priority.scope,
                                members=len(resolution.members),
                                resolved_from=resolution.resolved_from,
+                               **({"omitted_groups": list(omitted_groups)}
+                                  if omitted_groups else {}),
                                **self._functions)
             self._auditor.emit(RecordType.SESSION_ESTABLISHED, cid,
                                members=tuple(resolution.members),
@@ -1302,8 +1316,11 @@ class SessionManager:
         return f"sip:adhoc-{digest}@{self._profile.identity.domains[0]}"
 
     def _adhoc_members(self, invoker: Invoker, request: SessionRequest
-                       ) -> Tuple[Optional[Resolution], Optional[Tuple[str, str]]]:
-        """(resolution, None), or (None, (reason_code, detail)) to refuse.
+                       ) -> Tuple[Optional[Resolution], Optional[Tuple[str, str]],
+                                  Tuple[str, ...]]:
+        """(resolution, None, omitted groups), or (None, (reason_code, detail),
+        ()) to refuse. The omitted groups are the listed entries left out for
+        naming a group while only users may be listed (ADHOC-OP-06).
 
         In the order of 17.4.2.2 (Rel-18 numbering):
           step 6   a list longer than the limit: 189. The limits are the call
@@ -1330,63 +1347,124 @@ class SessionManager:
         determines the participants, and `decide` needs them (PLT-ICD-001
         §5.2, "Checked and applied by the core").
         """
+        # The caller, compared as SIP compares URIs (RFC 3261 19.1.4), is
+        # never a participant it invites (review of ADHOC-OP-06).
+        caller = identity.canonical(request.initiator)
         listed = tuple(u for u in dict.fromkeys(request.participants)
-                       if u != request.initiator)
+                       if identity.canonical(u) != caller)
         criteria = request.participant_criteria
         call_type = self._profile.call_type(request.call_type)
         limit = call_type.max_participants if call_type else None
         if limit is not None and len(listed) > limit:
             return None, (ADHOC_TOO_MANY_PARTICIPANTS,
-                          f"{len(listed)} participants listed, limit {limit}")
+                          f"{len(listed)} participants listed, limit {limit}"), ()
         # The deployment's cap, checked before any entry is resolved: every
         # entry costs a hook call and an audit record (PLT-VP-R1
         # ADHOC-OP-04). The caller has been authorised by now (ICD-OP-09).
         cap = self._adhoc_list_max
         if cap is not None and len(listed) > cap:
             return None, (ADHOC_TOO_MANY_PARTICIPANTS,
-                          f"{len(listed)} participants listed, deployment limit {cap}")
+                          f"{len(listed)} participants listed, deployment limit {cap}"), ()
         if listed and criteria is not None:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
-                          "both a participant list and criteria were given")
+                          "both a participant list and criteria were given"), ()
         if request.adhoc_alert_group:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
-                          "no ad hoc emergency alert group is kept by this platform")
+                          "no ad hoc emergency alert group is kept by this platform"), ()
         if not listed and criteria is None:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
-                          "no participant list and no criteria")
+                          "no participant list and no criteria"), ()
         group_id = self.adhoc_group_id(request.request_id)
         if listed:
             # An ordered set: a list searched per entry was quadratic in the
             # listed participants (review of ICD-OP-01).
             members: Dict[str, None] = {}
+            omitted: List[str] = []
+            # Every listed user and every member of every listed group, the
+            # caller excepted, counted before repeats are removed, so a group
+            # overlapping the others still adds its weight (owner decision
+            # 2026-10-28: "count all users and users from each group"; review
+            # of ADHOC-OP-06: counted after removal, 1 000 groups of the same
+            # 999 users were all resolved, 1 s under the lock).
+            counted = 0
+            skipped = (UNKNOWN_TARGET, NOT_AUTHORISED, NO_BINDING, NO_LOCATION_BINDING)
             for entry in listed:
+                # ADHOC-OP-06: what the entry is, before any group is resolved
+                # over its members (PLT-ICD-001 section 3.6).
+                try:
+                    kind = invoker.call("IF-IDR", "kind_of",
+                                        self._hooks.identity_resolver.kind_of,
+                                        entry, request, post=self._check_kind)
+                except HookFailure as failure:
+                    if failure.reason_code in skipped:
+                        continue          # yields no user this profile can invite
+                    raise
+                if kind not in (ResolutionKind.USER, ResolutionKind.GROUP):
+                    continue              # a foreign system's: no user to invite
+                if kind is ResolutionKind.GROUP and not self._adhoc_list_groups:
+                    omitted.append(entry)  # users only: left out, and said so
+                    continue
                 try:
                     one = invoker.call("IF-IDR", "resolve",
                                        self._hooks.identity_resolver.resolve,
                                        entry, request,
                                        post=self._check_resolution)
                 except HookFailure as failure:
-                    if failure.reason_code in (UNKNOWN_TARGET, NOT_AUTHORISED,
-                                               NO_BINDING, NO_LOCATION_BINDING):
-                        continue          # yields no user this profile can invite
+                    if failure.reason_code in skipped:
+                        continue
                     raise
                 if one.kind is ResolutionKind.USER:
-                    members.setdefault(one.members[0])
+                    if identity.canonical(one.members[0]) != caller:
+                        members.setdefault(one.members[0])
+                        counted += 1
+                elif one.kind is ResolutionKind.GROUP:
+                    if not self._adhoc_list_groups:
+                        # kind_of called it a user: a group all the same, left
+                        # out and said so, and its weight counted, so a
+                        # resolver that says so of every group still cannot
+                        # have the core resolve more than the cap (review).
+                        omitted.append(entry)
+                        counted += len(one.members)
+                    else:
+                        # Its members stand for it, the caller excepted, as in
+                        # any group call it is in.
+                        for m in one.members:
+                            if identity.canonical(m) != caller:
+                                members.setdefault(m)
+                                counted += 1
+                # Against the cap as they come: refused as soon as it is
+                # passed, before another group is resolved. The work is then
+                # at most the cap's worth of users and members, plus the one
+                # group that passes it (ADHOC-OP-06).
+                if cap is not None and counted > cap:
+                    return None, (ADHOC_TOO_MANY_PARTICIPANTS,
+                                  f"the listed users and the members of the listed "
+                                  f"groups pass the deployment limit {cap}"), ()
             if not members:
                 return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
-                              "no listed participant is a user of this profile")
+                              "no listed participant is a user of this profile"
+                              + (f" ({len(omitted)} listed group(s) left out: only "
+                                 "users may be listed)" if omitted else "")), ()
             return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
-                              group_id=group_id, resolved_from="adhoc:list"), None
+                              group_id=group_id, resolved_from="adhoc:list"), None, \
+                tuple(omitted)
         found = invoker.call("IF-IDR", "determine_participants",
                              self._hooks.identity_resolver.determine_participants,
                              criteria, request, post=self._check_participants)
-        members = [m for m in found.members if m != request.initiator]
+        members = [m for m in found.members if identity.canonical(m) != caller]
         if not members:
             return None, (ADHOC_PARTICIPANTS_UNDETERMINED,
-                          "the criteria matched only the caller")
+                          "the criteria matched only the caller"), ()
         return Resolution(kind=ResolutionKind.GROUP, members=tuple(members),
                           group_id=group_id,
-                          resolved_from=found.resolved_from or "adhoc:criteria"), None
+                          resolved_from=found.resolved_from or "adhoc:criteria"), None, ()
+
+    @staticmethod
+    def _check_kind(kind: ResolutionKind) -> None:
+        """§3.6 POST-1: one of the resolution kinds."""
+        if not isinstance(kind, ResolutionKind):
+            raise HookContractViolation(
+                f"kind_of returned {kind!r}, not a resolution kind")
 
     def _check_participants(self, resolution: Resolution) -> None:
         """§3.5 POST: a GROUP resolution with at least one member, no

@@ -97,7 +97,7 @@ def test_a_listed_ad_hoc_call_is_linear_and_keeps_first_order():
                              call_type="rec-broadcast", media=(MediaKind.VOICE,),
                              participants=listed)
     started = time.perf_counter()
-    resolution, refusal = mgr._adhoc_members(Invoker(Auditor(MemorySink(), "t"), "t"),
+    resolution, refusal, _ = mgr._adhoc_members(Invoker(Auditor(MemorySink(), "t"), "t"),
                                             request)
     elapsed = (time.perf_counter() - started) * 1000
     assert refusal is None
@@ -125,7 +125,7 @@ def test_a_role_and_its_holder_listed_together_are_invited_once():
                              call_type="rec-broadcast", media=(MediaKind.VOICE,),
                              participants=("sip:T2.train-driver@frmcs.example", users[1],
                                            users[2]))
-    resolution, refusal = mgr._adhoc_members(Invoker(Auditor(MemorySink(), "t"), "t"),
+    resolution, refusal, _ = mgr._adhoc_members(Invoker(Auditor(MemorySink(), "t"), "t"),
                                             request)
     assert refusal is None
     assert resolution.members == (users[2], users[1])

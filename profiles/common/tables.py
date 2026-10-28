@@ -428,6 +428,29 @@ class DirectoryResolver:
                               group_id=None, resolved_from=None)
         raise ResolutionFailure(UNKNOWN_TARGET, f"{target!r} is not known")
 
+    def kind_of(self, target: TargetRef, request: SessionRequest) -> ResolutionKind:
+        """What `resolve` would return, without the members (PLT-ICD-001
+        section 3.6), in the order `resolve` looks: a partner system, a
+        foreign one, a provisioned group (one with no members is unknown, as
+        `resolve` has it), then a user. A registered user is answered without
+        asking the external group source; anything else the source may hold
+        is known only by reading it, so that one is resolved."""
+        if not target:
+            raise ResolutionFailure(UNKNOWN_TARGET, "empty target")
+        if self._is_partner(target):
+            return ResolutionKind.PARTNER
+        if self._is_external(target):
+            return ResolutionKind.EXTERNAL
+        if target in self._groups:
+            if not self._groups[target]:
+                raise ResolutionFailure(UNKNOWN_TARGET, f"group {target!r} has no members")
+            return ResolutionKind.GROUP
+        if target in self._users:
+            return ResolutionKind.USER
+        if self.group_source is not None:
+            return self.resolve(target, request).kind
+        raise ResolutionFailure(UNKNOWN_TARGET, f"{target!r} is not known")
+
     def bind(self, identity: str, service_id: MCServiceId,
              location: Optional[LocationContext]) -> None:
         raise ResolutionFailure(
@@ -531,6 +554,23 @@ class FunctionalResolver(DirectoryResolver):
             group_id=identity if kind is ResolutionKind.GROUP else None,
             resolved_from=target,  # PLT-HOK-014
         )
+
+    def kind_of(self, target: TargetRef, request: SessionRequest) -> ResolutionKind:
+        """A functional identity is what it resolves to (`resolves_to`),
+        held or not: who holds it is `resolve`'s to say."""
+        keyed = keyed_identity(target, self._keyed(), self._profile.identity.domains)
+        identity = keyed[0] if keyed else target
+        declared = self._profile.functional_identity(identity)
+        if declared is None:
+            return super().kind_of(target, request)
+        if declared.identification_key and not keyed:
+            raise ResolutionFailure(
+                UNKNOWN_TARGET,
+                f"functional identity {identity!r} is held per "
+                f"{declared.identification_key}; call "
+                f"sip:<{declared.identification_key}>.{identity}@<domain>")
+        return ResolutionKind.GROUP if declared.resolves_to == "group" \
+            else ResolutionKind.USER
 
     def determine_participants(self, criteria: str,
                                request: SessionRequest) -> Resolution:

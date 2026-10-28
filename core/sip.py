@@ -1124,6 +1124,19 @@ class Adapter:
         code, text = TOO_MANY_PARTICIPANTS
         return f'{WARNING_CODE_MISC} {self._host} "{code} {text}"'
 
+    def omitted_groups(self, entries: Sequence[str]) -> str:
+        """The Warning header value of the 200 OK to an ad hoc call whose list
+        named groups when only users may be listed (PLT-VP-R1 ADHOC-OP-06,
+        MCX_ADHOC_LIST_ENTRIES=users): a plain RFC 3261 warn-text, as TS
+        24.379 has no code for it (LOCAL_WARNING_TEXTS), naming the first."""
+        # A quoted-string (RFC 3261 25.1): no control character, and " and \
+        # escaped; the entry is the caller's text.
+        first = re.sub(r"[\x00-\x1f\x7f]", "?", entries[0][:128])
+        first = first.replace("\\", "\\\\").replace('"', '\\"')
+        more = f" and {len(entries) - 1} more" if len(entries) > 1 else ""
+        return (f'{WARNING_CODE_MISC} {self._host} "listed group left out, only users '
+                f'may be listed: {first}{more}"')
+
     def reject_invalid_combination(self, context: DialogContext) -> Response:
         code, text = INVALID_COMBINATION
         headers = self._common(context)
