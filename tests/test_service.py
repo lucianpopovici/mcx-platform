@@ -939,7 +939,42 @@ def test_the_ad_hoc_list_cap_must_be_stated_as_a_positive_integer(env, value):
     assert "MCX_ADHOC_LIST_MAX" in str(exc.value)
 
 
-@pytest.mark.parametrize("value", ["1", "250", " 7 "])
+@pytest.mark.parametrize("value", ["1001", "5000", "0001001", " 1001 "])
+def test_the_ad_hoc_list_cap_is_at_most_1000(env, value):
+    """Owner decision 2026-10-28 (review of ICD-OP-01): every listed entry is
+    resolved under the one SIP, media and timer lock, about 25 us each."""
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime({**env, "MCX_ADHOC_LIST_MAX": value}, _clock())
+    assert str(exc.value) == (
+        f"MCX_ADHOC_LIST_MAX={value.strip().lstrip('0')} is more than 1000: each listed entry is "
+        "resolved while every other call waits (about 25 us a user entry), so a list is "
+        "at most 1000 entries; a larger ad hoc call goes by criteria "
+        "(PLT-ICD-001 ICD-ADH-001)")
+
+
+def test_a_cap_of_thousands_of_digits_is_refused_not_a_fault(env):
+    """Review: int() raises ValueError past 4 300 digits; the value is
+    compared as digits first, and shown cut."""
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime({**env, "MCX_ADHOC_LIST_MAX": "9" * 5000}, _clock())
+    assert str(exc.value).startswith(
+        "MCX_ADHOC_LIST_MAX=999999999999... (5000 characters) is more than 1000: ")
+    # Leading zeros are not what is wrong with a value, so they are not shown.
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime({**env, "MCX_ADHOC_LIST_MAX": "0" * 20 + "1001"}, _clock())
+    assert str(exc.value).startswith("MCX_ADHOC_LIST_MAX=1001 is more than 1000: ")
+    with pytest.raises(StartupRefused) as exc:
+        build_runtime({**env, "MCX_ADHOC_LIST_MAX": "x" * 5000}, _clock())
+    assert str(exc.value) == ("MCX_ADHOC_LIST_MAX='xxxxxxxxxxxx... (5000 characters)' "
+                              "must be a whole number of at least 1")
+    rt = build_runtime({**env, "MCX_ADHOC_LIST_MAX": "0" * 5000 + "7"}, _clock())
+    try:
+        assert rt.config.adhoc_list_max == 7
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize("value", ["1", "250", " 7 ", "1000", "01000"])
 def test_the_stated_ad_hoc_list_cap_reaches_the_session_layer(env, value):
     rt = build_runtime({**env, "MCX_ADHOC_LIST_MAX": value}, _clock())
     assert rt.config.adhoc_list_max == int(value)
