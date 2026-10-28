@@ -174,6 +174,7 @@ class Runtime:
     recovered: int = 0
     # RES-OP-05: the checked HTTPS context, or None for MCX_HTTP_TLS=off.
     http_context: Optional[ssl.SSLContext] = None
+    sip_context: Optional[ssl.SSLContext] = None
 
     # -- session operations, with persistence -----------------------------
 
@@ -268,7 +269,8 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
     settings: dict = {"MCX_HTTP_TLS": "off" if config.http_tls is None else "on",
                       "MCX_FLOOR_UNRECORDED": config.floor_unrecorded,
                       "MCX_FOREIGN_INITIATOR": config.foreign_initiator,
-                      "MCX_ARP_VULNERABILITY_CHECK": config.arp_both_flags}
+                      "MCX_ARP_VULNERABILITY_CHECK": config.arp_both_flags,
+                      "MCX_ADHOC_LIST_ENTRIES": config.adhoc_list_entries}
     if config.http_tls is not None:
         settings["MCX_HTTP_CLIENT_AUTH"] = config.http_tls.client_auth
     deviations: list = []
@@ -289,6 +291,15 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
                             "the priority decision), for the vulnerability flag",
             "consequence": "a bearer decision may make a call immune to pre-emption at "
                            "the network that its priority decision leaves open to it"})
+    if config.adhoc_list_entries == "users-and-groups":
+        deviations.append({
+            "setting": "MCX_ADHOC_LIST_ENTRIES", "value": "users-and-groups",
+            "ref": "ADHOC-OP-06",
+            "departs_from": "TS 24.379 17.4.2.2 step 12 i (the listed participants "
+                            "are users)",
+            "consequence": "an ad hoc caller's list may name groups, each standing "
+                           "for its members, who are invited; the members of every "
+                           "listed group count against MCX_ADHOC_LIST_MAX"})
     if config.floor_unrecorded == "allow":
         deviations.append({
             "setting": "MCX_FLOOR_UNRECORDED", "value": "allow", "ref": "RES-OP-14",
@@ -462,6 +473,36 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     # cannot be loaded refuses startup before anything is opened, and the
     # listener uses the material that was checked.
     http_context = make_http_context(config.http_tls) if config.http_tls else None
+    # And the SIP one, for the same reason (review of VP1-LOAD-031): a SIP
+    # certificate that cannot be loaded used to fail the start only after the
+    # store had been written and the HTTP port bound.
+    sip_context = None
+    if config.sip is not None:
+        from .sip_tls import make_context as make_sip_context
+        sip_context = make_sip_context(config.sip, network.core_ca)
+
+    # VP1-LOAD-031: every refusal that depends on the profile, the release
+    # or the network profile is made here, before the store is opened or any
+    # component built, so a refused start leaves no trace in the store.
+    # PLT-ICD-001 2.6: which call types no conformant client can request, and
+    # why, rather than leave an operator to discover it from refusals.
+    undeclared, blocked = mcinfo.reachability(loaded.profile.call_types,
+                                              config.release)
+    # REL-OP-02: MCX_STRICT_RELEASE decides whether that is fatal.
+    if blocked and config.strict_release:
+        raise StartupRefused(
+            f"MCX_STRICT_RELEASE=true and profile {loaded.profile.identifier()} "
+            f"declares call types {config.release} cannot carry: "
+            + "; ".join(f"{cid} ({why})" for cid, why in blocked)
+            + ". Raise MCX_RELEASE, or set MCX_STRICT_RELEASE=false to start "
+            "without them")
+    groups = GroupDirectory(network.groups, network.users)
+    register = getattr(loaded.hooks.identity_resolver, "register_group", None)
+    register_user = getattr(loaded.hooks.identity_resolver, "register_user", None)
+    if (register is None or register_user is None) and groups.all():
+        raise StartupRefused(
+            "groups are configured but the profile's identity resolver has no "
+            "provisioning surface to receive them")
 
     own_store = store is None
     store = store or SqliteStore(config.data_dir)
@@ -480,6 +521,8 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                  clock=clock, functions=role_functions(config),
                                  defer_floor_start=config.sip is not None,
                                  adhoc_list_max=config.adhoc_list_max,
+                                 adhoc_list_groups=config.adhoc_list_entries
+                                 == "users-and-groups",
                                  cells=network.cells,
                                  floor_unrecorded=config.floor_unrecorded,
                                  foreign_initiator=config.foreign_initiator,
@@ -487,21 +530,15 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
                                      config.arp_both_flags],
                                  functional_aliases=network.functional_aliases)
 
-        groups = GroupDirectory(network.groups, network.users)
         # Provision the resolver from the same source the documents are served
         # from, so the two cannot disagree. register_group is not part of IF-IDR;
-        # a resolver without it simply has no provisioning surface.
-        register = getattr(loaded.hooks.identity_resolver, "register_group", None)
-        register_user = getattr(loaded.hooks.identity_resolver, "register_user", None)
+        # a resolver without it simply has no provisioning surface (refused
+        # above, before the store, when groups are configured).
         if register is not None and register_user is not None:
             for u in groups.users():
                 register_user(u)
             for g in groups.all():
                 register(g.id, g.members)
-        elif groups.all():
-            raise StartupRefused(
-                "groups are configured but the profile's identity resolver has no "
-                "provisioning surface to receive them")
 
         # SVC-OP-06: the functional identity holders kept across a restart,
         # bound again where the network profile in force still allows them.
@@ -514,18 +551,6 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
         health.set_holdings(lambda: [dataclasses.asdict(h)
                                      for h in manager.functional.holdings()])
 
-        # PLT-ICD-001 2.6: say which call types no conformant client can request,
-        # and why, rather than leave an operator to discover it from refusals.
-        undeclared, blocked = mcinfo.reachability(loaded.profile.call_types,
-                                                  config.release)
-        # REL-OP-02: MCX_STRICT_RELEASE decides whether that is fatal.
-        if blocked and config.strict_release:
-            raise StartupRefused(
-                f"MCX_STRICT_RELEASE=true and profile {loaded.profile.identifier()} "
-                f"declares call types {config.release} cannot carry: "
-                + "; ".join(f"{cid} ({why})" for cid, why in blocked)
-                + ". Raise MCX_RELEASE, or set MCX_STRICT_RELEASE=false to start "
-                "without them")
         # PRF-OP-01: a group-selected call type is reached through the groups
         # that name it; one that no group names is reachable by no client.
         by_group = {cid: [g.id for g in network.groups if g.call_type == cid]
@@ -623,4 +648,5 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
     return Runtime(config=config, loaded=loaded, network=network,
                    store=store, auditor=auditor,
                    manager=manager, groups=groups, health=health, clock=clock,
-                   recovered=recovered, http_context=http_context)
+                   recovered=recovered, http_context=http_context,
+                   sip_context=sip_context)

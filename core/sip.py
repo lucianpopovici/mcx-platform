@@ -244,7 +244,8 @@ ALLOW = "INVITE, ACK, BYE, CANCEL, UPDATE, REGISTER, OPTIONS"
 def allow(release: Release) -> str:
     """The Allow header for this release: PUBLISH from Rel-15, where TS 24.379
     clause 9A gives it a use (functional alias management, SVC-OP-06)."""
-    return ALLOW + (", PUBLISH" if supports_procedure(release, "functional-alias") else "")
+    return ALLOW + (", PUBLISH, SUBSCRIBE"
+                    if supports_procedure(release, "functional-alias") else "")
 
 # Content types carried on MC signalling.
 CT_MC_INFO = "application/vnd.3gpp.mcptt-info+xml"
@@ -277,6 +278,7 @@ class Status(Enum):
     BAD_REQUEST = (400, "Bad Request")
     FORBIDDEN = (403, "Forbidden")
     NOT_FOUND = (404, "Not Found")
+    NOT_ACCEPTABLE = (406, "Not Acceptable")
     REQUEST_TIMEOUT = (408, "Request Timeout")
     INTERVAL_TOO_BRIEF = (423, "Interval Too Brief")
     SESSION_INTERVAL_TOO_SMALL = (422, "Session Interval Too Small")
@@ -622,7 +624,8 @@ class ReceivedResponse:
 
 _COMPACT = {"v": "Via", "f": "From", "t": "To", "i": "Call-ID", "m": "Contact",
             "c": "Content-Type", "l": "Content-Length", "k": "Supported",
-            "x": "Session-Expires"}                    # RFC 4028 section 4
+            "x": "Session-Expires",                    # RFC 4028 section 4
+            "o": "Event", "u": "Allow-Events"}         # RFC 6665 8.2.1
 _REQUEST_LINE = re.compile(r"^([A-Za-z]+) (\S+) SIP/2\.0$")
 # [0-9], not \d: \d takes any script's digits, which int() reads (SIP-OP-19).
 _STATUS_LINE = re.compile(r"^SIP/2\.0 ([0-9]{3})(?: (.*))?$")
@@ -1121,6 +1124,19 @@ class Adapter:
         code, text = TOO_MANY_PARTICIPANTS
         return f'{WARNING_CODE_MISC} {self._host} "{code} {text}"'
 
+    def omitted_groups(self, entries: Sequence[str]) -> str:
+        """The Warning header value of the 200 OK to an ad hoc call whose list
+        named groups when only users may be listed (PLT-VP-R1 ADHOC-OP-06,
+        MCX_ADHOC_LIST_ENTRIES=users): a plain RFC 3261 warn-text, as TS
+        24.379 has no code for it (LOCAL_WARNING_TEXTS), naming the first."""
+        # A quoted-string (RFC 3261 25.1): no control character, and " and \
+        # escaped; the entry is the caller's text.
+        first = re.sub(r"[\x00-\x1f\x7f]", "?", entries[0][:128])
+        first = first.replace("\\", "\\\\").replace('"', '\\"')
+        more = f" and {len(entries) - 1} more" if len(entries) > 1 else ""
+        return (f'{WARNING_CODE_MISC} {self._host} "listed group left out, only users '
+                f'may be listed: {first}{more}"')
+
     def reject_invalid_combination(self, context: DialogContext) -> Response:
         code, text = INVALID_COMBINATION
         headers = self._common(context)
@@ -1471,6 +1487,77 @@ def parse_publish(message: Request, read_location: bool = True) -> AliasPublish:
         originating=canonical_uri(originating),
         change=change, expires=expires,
         location=_location(content_type, message.body) if read_location else None)
+
+
+@dataclass(frozen=True)
+class AliasSubscribe:
+    """A subscription to functional alias status as the initial SIP SUBSCRIBE
+    carries it (TS 24.379 9A.2.1.3): the user whose status it asks for
+    (<mcptt-request-uri>), who sent it (P-Asserted-Identity or From), the
+    Expires it asks (None when absent), and whether its Accept admits
+    application/pidf+xml (an absent Accept does: RFC 3856 6.7)."""
+    served: str
+    originating: str
+    expires: Optional[int]
+    accepts_pidf: bool
+
+
+def subscribe_expires(message: Request) -> Optional[int]:
+    """The Expires of a SUBSCRIBE: None when absent; ASCII digits only
+    (SIP-OP-19), at most 4294967295 (RFC 3261 20.19), else SipError."""
+    values = message.headers.get_all("Expires")
+    if not values:
+        return None
+    raw = values[0].strip()
+    if len(values) != 1 or not (raw.isascii() and raw.isdigit()) or \
+            int(raw) > FUNCTIONAL_ALIAS_EXPIRES:
+        raise SipError(f"Expires {clip(raw)} is not one delta-seconds value up to "
+                       f"{FUNCTIONAL_ALIAS_EXPIRES}")
+    return int(raw)
+
+
+def accepts_pidf(message: Request) -> bool:
+    """Whether the request's Accept admits application/pidf+xml: absent, or
+    naming it, application/* or */* with a q above 0 (RFC 3261 20.1, RFC
+    3856 6.7)."""
+    values = message.headers.get_all("Accept")
+    if not values:
+        return True
+    ranges = set()
+    for value in values:
+        for v in value.split(","):
+            kind, *params = [x.strip().lower() for x in v.split(";")]
+            q = next((x.partition("=")[2].strip() for x in params
+                      if x.partition("=")[0].strip() == "q"), "1")
+            if not re.fullmatch(r"0(?:\.0{0,3})?", q):       # q=0: not acceptable
+                ranges.add(kind)
+    return bool(ranges & {mcinfo.CT_PIDF, "application/*", "*/*"})
+
+
+def parse_subscribe(message: Request) -> AliasSubscribe:
+    """An initial functional alias status SUBSCRIBE (Rel-15 on). One whose
+    MCPTT info does not name the served user, or does not ask for
+    functional-alias-status-determination, raises SipError."""
+    if message.method != "SUBSCRIBE":
+        raise SipError(f"expected SUBSCRIBE, found {message.method}")
+    content_type = message.headers.get("Content-Type") or ""
+    try:
+        raw = mcinfo.mcinfo_of(content_type, message.body)
+        info = mcinfo.parse(raw) if raw is not None else mcinfo.McInfo()
+    except mcinfo.McInfoError as exc:
+        raise SipError(f"functional alias status subscription: {exc}") from None
+    if info.request_type != mcinfo.FA_STATUS_DETERMINATION:
+        raise SipError("the subscription does not ask for "
+                       f"{mcinfo.FA_STATUS_DETERMINATION} (<request-type>)")
+    if not info.request_uri:
+        raise SipError("functional alias status subscription names no user "
+                       "(<mcptt-request-uri>)")
+    originating = _asserted_identity(message.headers.get_all("P-Asserted-Identity")) \
+        or _uri(message.headers.get("From") or "")
+    return AliasSubscribe(
+        served=canonical_uri(_uri(info.request_uri)),
+        originating=canonical_uri(originating),
+        expires=subscribe_expires(message), accepts_pidf=accepts_pidf(message))
 
 
 def _location(content_type: str, body: str) -> Optional["LocationContext"]:

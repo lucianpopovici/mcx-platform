@@ -20,6 +20,7 @@ from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import Encoding
 
+from core.errors import StartupRefused
 from core.sip import SipError, canonical_uri, split_frame
 
 from .config import SipConfig
@@ -38,11 +39,23 @@ TICK_S = 0.1
 
 def make_context(cfg: SipConfig,
                  core_ca: Optional[x509.Certificate] = None) -> ssl.SSLContext:
+    """The server context, or StartupRefused naming the file that failed. It
+    is built by build_runtime, before the store is opened and anything bound
+    (review of VP1-LOAD-031), as the HTTPS one is (RES-OP-05)."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(str(cfg.cert), str(cfg.key))
+    try:
+        ctx.load_cert_chain(str(cfg.cert), str(cfg.key))
+    except (ssl.SSLError, OSError) as exc:
+        raise StartupRefused(
+            f"MCX_SIP_TLS_CERT/MCX_SIP_TLS_KEY ({cfg.cert}, {cfg.key}) cannot be "
+            f"loaded: {exc}") from exc
     if cfg.ca is not None:
-        ctx.load_verify_locations(str(cfg.ca))
+        try:
+            ctx.load_verify_locations(str(cfg.ca))
+        except (ssl.SSLError, OSError) as exc:
+            raise StartupRefused(
+                f"MCX_SIP_TLS_CA ({cfg.ca}) cannot be loaded: {exc}") from exc
     if core_ca is not None:
         # The cores' own anchor (ICD-OP-10), from the network profile: the
         # certificate that was checked and hashed, not the file re-read. A
@@ -119,7 +132,10 @@ class TlsListener:
         self.lock = lock or core.lock
         network = core.rt.network
         self._core_ca = network.core_ca
-        self._ctx = make_context(cfg, network.core_ca)
+        # The context build_runtime checked, when it is for this configuration.
+        checked = getattr(core.rt, "sip_context", None)
+        self._ctx = checked if checked is not None and cfg is core.rt.config.sip \
+            else make_context(cfg, network.core_ca)
         self._stop = threading.Event()
         self._srv: Optional[socket.socket] = None
         self._threads = []

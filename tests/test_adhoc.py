@@ -46,6 +46,12 @@ def list_max():
 
 
 @pytest.fixture
+def list_entries():
+    """MCX_ADHOC_LIST_ENTRIES: unset (the default, users) unless a test says."""
+    return None
+
+
+@pytest.fixture
 def cells():
     """The network profile's cell map for the frmcs runtime: empty unless a
     test says so."""
@@ -53,13 +59,16 @@ def cells():
 
 
 @pytest.fixture
-def rt(tmp_path, pki, clock, list_max, cells):
+def rt(tmp_path, pki, clock, list_max, cells, list_entries):
+    over = {"MCX_ADHOC_LIST_ENTRIES": list_entries} if list_entries else {}
     env = sip_env(tmp_path, pki, MCX_PROFILE="frmcs", MCX_RELEASE="19",
-                  MCX_ADHOC_LIST_MAX=list_max,
+                  MCX_ADHOC_LIST_MAX=list_max, **over,
                   MCX_NETWORK_FILE=str(network_yaml(
                       tmp_path, cells=cells, trusted_cores=["core-client.example"],
                       core_ca=pki / "core-ca.crt", fname="frmcs-network.yaml",
-                      groups=[{"id": "grp:yard", "members": list(F[1:3])}],
+                      groups=[{"id": "grp:yard", "members": list(F[1:3])},
+                              {"id": "grp:crew", "members": [F[0], F[4], F[5]]},
+                              {"id": "grp:pair", "members": list(F[1:3])}],
                       users=list(F))))
     r = build_runtime(env, clock, platform=Platform())
     resolver = r.loaded.hooks.identity_resolver
@@ -742,3 +751,270 @@ def test_the_ad_hoc_codes_are_for_authorisation_refusals_only(core, rt, world):
     resp = _send(core, world, "xlate", F[0], mcf.adhoc_xml(criteria="train-driver"))
     assert resp.code == 403 and "185" not in resp.headers.get("Warning")
     assert "100 function not allowed due to user authorisation" in resp.headers.get("Warning")
+
+
+# ============================================================ groups in the list (ADHOC-OP-06)
+
+
+def _spy_resolve(rt, monkeypatch):
+    resolver = rt.loaded.hooks.identity_resolver
+    seen = []
+    real = resolver.resolve
+
+    def resolve(target, request):
+        seen.append(target)
+        return real(target, request)
+    monkeypatch.setattr(resolver, "resolve", resolve)
+    return seen
+
+
+def _answer_all(core, world, cid_users):
+    for u in cid_users:
+        core.on_bytes(answer(world[u].requests("INVITE")[0], 200, SDP, tag=f"t{u[5]}"), world[u])
+    (ok,) = [m for m in world[F[0]].messages()
+             if isinstance(m, ReceivedResponse) and m.code == 200]
+    return ok
+
+
+def test_users_only_leaves_a_listed_group_out_unresolved_and_says_so(core, rt, world,
+                                                                     monkeypatch):
+    """MCX_ADHOC_LIST_ENTRIES unset (users, owner decision 2026-10-28): a
+    listed group is told apart by IF-IDR kind_of, never resolved over its
+    members, left out, and the caller is told in the 200's Warning."""
+    assert rt.health.snapshot()["settings"]["MCX_ADHOC_LIST_ENTRIES"] == "users"
+    seen = _spy_resolve(rt, monkeypatch)
+    core.on_bytes(adhoc_invite("ag1", mcf.adhoc_xml(),
+                               mcf.resource_list(["grp:yard", F[4], "grp:crew"])), world[F[0]])
+    assert "grp:yard" not in seen and "grp:crew" not in seen
+    assert [u for u in F[1:] if world[u].requests("INVITE")] == [F[4]]
+    ok = _answer_all(core, world, [F[4]])
+    assert ok.headers.get_all("Warning") == (
+        '399 mcptt.example "listed group left out, only users may be listed: '
+        'grp:yard and 1 more"',)
+    admitted = [r for r in rt.store.audit_records("ag1") if r["type"] == "session-admitted"]
+    assert admitted[0]["detail"]["omitted_groups"] == ["grp:yard", "grp:crew"]
+    assert rt.manager.session("ag1").omitted_groups == ("grp:yard", "grp:crew")
+
+
+def test_users_only_with_nothing_but_groups_is_refused_187_saying_why(core, world):
+    core.on_bytes(adhoc_invite("ag2", mcf.adhoc_xml(), mcf.resource_list(["grp:yard"])),
+                  world[F[0]])
+    code, warning = refusal(world[F[0]])
+    assert code == 403 and "187 " in warning
+
+
+def test_a_list_of_users_only_carries_no_warning(core, world):
+    core.on_bytes(adhoc_invite("ag3", mcf.adhoc_xml(), mcf.resource_list([F[1]])),
+                  world[F[0]])
+    ok = _answer_all(core, world, [F[1]])
+    assert ok.headers.get_all("Warning") == ()
+
+
+@pytest.mark.parametrize("list_entries", ["users-and-groups"])
+def test_users_and_groups_invites_each_groups_members(core, rt, world, list_entries):
+    """A listed group stands for its members, the caller excepted (F0 is in
+    grp:crew), each once, in the order listed; reported as a deviation."""
+    snap = rt.health.snapshot()
+    assert snap["settings"]["MCX_ADHOC_LIST_ENTRIES"] == "users-and-groups"
+    assert [d for d in snap["deviations"] if d["setting"] == "MCX_ADHOC_LIST_ENTRIES"] == [{
+        "setting": "MCX_ADHOC_LIST_ENTRIES", "value": "users-and-groups",
+        "ref": "ADHOC-OP-06",
+        "departs_from": "TS 24.379 17.4.2.2 step 12 i (the listed participants are users)",
+        "consequence": "an ad hoc caller's list may name groups, each standing for its "
+                       "members, who are invited; the members of every listed group "
+                       "count against MCX_ADHOC_LIST_MAX"}]
+    core.on_bytes(adhoc_invite("ag4", mcf.adhoc_xml(),
+                               mcf.resource_list([F[5], "grp:yard", "grp:crew"])), world[F[0]])
+    assert rt.manager.session("ag4").members == (F[5], F[1], F[2], F[4])
+    assert rt.manager.session("ag4").omitted_groups == ()
+    ok = _answer_all(core, world, [F[5], F[1], F[2], F[4]])
+    assert ok.headers.get_all("Warning") == ()
+
+
+@pytest.mark.parametrize("list_entries,list_max", [("users-and-groups", "3")])
+def test_users_and_groups_counts_every_member_against_the_cap(core, rt, world, monkeypatch,
+                                                              list_entries, list_max):
+    """Two entries, four people (F1, F2 of grp:yard; F4, F5 of grp:crew): past
+    the cap of 3, refused 189, and no group is resolved after the cap is
+    passed."""
+    seen = _spy_resolve(rt, monkeypatch)
+    core.on_bytes(adhoc_invite("ag5", mcf.adhoc_xml(),
+                               mcf.resource_list(["grp:yard", "grp:crew", "grp:yard2"])),
+                  world[F[0]])
+    code, warning = refusal(world[F[0]])
+    assert "189 " in warning
+    assert seen == ["grp:yard", "grp:crew"]
+    assert rt.manager.session("ag5") is None
+    refused = [r for r in rt.store.audit_records("ag5") if r["type"] == "session-refused"]
+    assert "pass the deployment limit 3" in refused[0]["detail"]["detail"]
+
+
+@pytest.mark.parametrize("list_entries,list_max", [("users-and-groups", "3")])
+def test_users_and_groups_at_the_cap_is_served(core, rt, world, list_entries, list_max):
+    core.on_bytes(adhoc_invite("ag6", mcf.adhoc_xml(),
+                               mcf.resource_list(["grp:yard", F[5]])), world[F[0]])
+    assert rt.manager.session("ag6").members == (F[1], F[2], F[5])
+
+
+def test_kind_of_tells_each_target_apart_without_members(rt):
+    from core.hooks import SessionRequest, MediaKind
+    from profiles.common.tables import ResolutionFailure
+    r = rt.loaded.hooks.identity_resolver
+    req = SessionRequest(request_id="k", initiator=F[0], target="", call_type="rec-broadcast",
+                         media=(MediaKind.VOICE,))
+    assert r.kind_of("grp:yard", req) is ResolutionKind.GROUP
+    assert r.kind_of(F[1], req) is ResolutionKind.USER
+    assert r.kind_of("sip:T1.train-driver@frmcs.example", req) is ResolutionKind.USER
+    assert r.kind_of("sip:T9.train-driver@frmcs.example", req) is ResolutionKind.USER
+    assert r.kind_of("rec-area", req) is ResolutionKind.GROUP
+    for target, code in (("train-driver", "unknown-target"), ("", "unknown-target"),
+                         ("sip:nobody@frmcs.example", "unknown-target")):
+        with pytest.raises(ResolutionFailure) as exc:
+            r.kind_of(target, req)
+        assert exc.value.reason_code == code
+
+
+def test_a_directory_tells_partner_foreign_group_and_user_apart_as_resolve_does():
+    from core import loader
+    from core.hooks import SessionRequest, MediaKind
+    from profiles.common.tables import BackingStoreUnavailable, ResolutionFailure
+    r = loader.load(ROOT / "profiles" / "mcx").hooks.identity_resolver
+    u = "sip:u1@mcptt.example"
+    r.register_user(u)
+    r.register_group("grp:a", [u])
+    req = SessionRequest(request_id="k", initiator=u, target="", call_type="private",
+                         media=(MediaKind.VOICE,))
+    assert [r.kind_of(t, req) for t in ("icx:rail:x", "tetra:123", "grp:a", u)] == [
+        ResolutionKind.PARTNER, ResolutionKind.EXTERNAL, ResolutionKind.GROUP,
+        ResolutionKind.USER]
+
+    asked = []
+
+    class Source:
+        def members(self, gid):
+            asked.append(gid)
+            if gid == "grp:down":
+                raise BackingStoreUnavailable("down")
+            return [u] if gid == "grp:ext" else None
+    r.group_source = Source()
+    assert r.kind_of("grp:ext", req) is ResolutionKind.GROUP
+    assert r.kind_of(u, req) is ResolutionKind.USER
+    # A registered user is answered without asking the source (review).
+    assert asked == ["grp:ext"]
+    r.register_group("grp:empty", [])
+    with pytest.raises(ResolutionFailure) as exc:
+        r.kind_of("grp:empty", req)       # as resolve has it
+    assert exc.value.reason_code == "unknown-target"
+    with pytest.raises(ResolutionFailure) as exc:
+        r.kind_of("grp:down", req)
+    assert exc.value.reason_code == "resolver-unavailable"
+
+
+def test_kind_of_returning_no_resolution_kind_is_a_contract_violation(rt, monkeypatch):
+    from core.audit import Auditor, MemorySink
+    from core.hooks import SessionRequest, MediaKind
+    from core.invoke import HookFailure, Invoker
+    monkeypatch.setattr(rt.loaded.hooks.identity_resolver, "kind_of", lambda t, r: "group")
+    req = SessionRequest(request_id="kv", initiator=F[0], target="", call_type="rec-broadcast",
+                         media=(MediaKind.VOICE,), participants=(F[1],))
+    with pytest.raises(HookFailure) as exc:
+        rt.manager._adhoc_members(Invoker(Auditor(MemorySink(), "t"), "t"), req)
+    assert (exc.value.interface, exc.value.method, exc.value.reason_code) == (
+        "IF-IDR", "kind_of", "hook-contract-violation")
+    assert "kind_of returned 'group', not a resolution kind" in exc.value.detail
+
+
+def test_the_omitted_group_warning_is_one_quoted_string():
+    """The entry is the caller's text: in the warn-text (RFC 3261 25.1) a
+    quote or backslash is escaped, a control character replaced, and the
+    entry cut at 128 characters."""
+    from core.release import Release
+    from core.sip import Adapter
+    a = Adapter(LOCAL, Release.REL_19, ())
+    assert a.omitted_groups(['grp:"x"\\y\r\nInjected: 1']) == (
+        '399 mcptt.example "listed group left out, only users may be listed: '
+        'grp:\\"x\\"\\\\y??Injected: 1"')
+    assert a.omitted_groups(["g" * 300, "h"]) == (
+        '399 mcptt.example "listed group left out, only users may be listed: '
+        + "g" * 128 + ' and 1 more"')
+
+
+def test_a_foreign_entry_is_not_resolved(core, rt, world, monkeypatch):
+    """kind_of says partner or foreign: no user to invite, so no resolve."""
+    seen = _spy_resolve(rt, monkeypatch)
+    real = rt.loaded.hooks.identity_resolver.kind_of
+    monkeypatch.setattr(rt.loaded.hooks.identity_resolver, "kind_of",
+                        lambda t, r: ResolutionKind.EXTERNAL if t == "tetra:9"
+                        else ResolutionKind.PARTNER if t == "icx:9" else real(t, r))
+    core.on_bytes(adhoc_invite("ag7", mcf.adhoc_xml(),
+                               mcf.resource_list(["tetra:9", "icx:9", F[1]])), world[F[0]])
+    assert seen == [F[1]]
+    assert rt.manager.session("ag7").members == (F[1],)
+
+
+def test_users_only_never_takes_a_groups_members_whatever_the_hook_says(core, rt, world,
+                                                                       monkeypatch):
+    """A resolver whose kind_of calls a group a user, and whose resolve then
+    returns the group: in users mode its members are still not invited."""
+    real = rt.loaded.hooks.identity_resolver.kind_of
+    monkeypatch.setattr(rt.loaded.hooks.identity_resolver, "kind_of",
+                        lambda t, r: ResolutionKind.USER if t == "grp:yard" else real(t, r))
+    core.on_bytes(adhoc_invite("ag8", mcf.adhoc_xml(),
+                               mcf.resource_list(["grp:yard", F[4]])), world[F[0]])
+    assert rt.manager.session("ag8").members == (F[4],)
+    # Left out all the same, and said so (review).
+    assert rt.manager.session("ag8").omitted_groups == ("grp:yard",)
+
+
+@pytest.mark.parametrize("list_entries,list_max", [("users-and-groups", "3")])
+def test_overlapping_groups_count_in_full(core, rt, world, monkeypatch, list_entries, list_max):
+    """Review of ADHOC-OP-06: grp:yard and grp:pair hold the same two users.
+    Counted after repeats were removed they were two, and every such group
+    was resolved; counted in full they are four, past the cap of 3."""
+    seen = _spy_resolve(rt, monkeypatch)
+    core.on_bytes(adhoc_invite("ag9", mcf.adhoc_xml(),
+                               mcf.resource_list(["grp:yard", "grp:pair", "grp:crew"])),
+                  world[F[0]])
+    code, warning = refusal(world[F[0]])
+    assert "189 " in warning
+    assert seen == ["grp:yard", "grp:pair"]
+
+
+def test_the_caller_spelled_otherwise_is_not_invited(core, rt, world):
+    """Review of ADHOC-OP-06: the caller compared as SIP compares URIs, in
+    the list as in a group."""
+    # The caller's roles are held by the spelling it calls with.
+    rt.loaded.hooks.identity_resolver.bind("shunting-team-leader", "sip:f0@FRMCS.example", YARD)
+    core.on_bytes(msg("INVITE", LOCAL, "ag10", 1, "sip:f0@FRMCS.example", LOCAL,
+                      body=mcf.adhoc_body(SDP, mcf.adhoc_xml(), mcf.resource_list([F[0], F[1]])),
+                      ctype=mcf.CONTENT_TYPE), world[F[0]])
+    assert rt.manager.session("ag10").request.initiator == "sip:f0@FRMCS.example"
+    assert rt.manager.session("ag10").members == (F[1],)
+
+
+@pytest.mark.parametrize("list_max", ["3"])
+def test_groups_a_resolver_calls_users_still_count_against_the_cap(core, rt, world, monkeypatch,
+                                                                  list_max):
+    """Review: a kind_of that says user of every group cannot have the core
+    resolve more than the cap's worth: each such group's members count."""
+    seen = _spy_resolve(rt, monkeypatch)
+    monkeypatch.setattr(rt.loaded.hooks.identity_resolver, "kind_of",
+                        lambda t, r: ResolutionKind.USER)
+    core.on_bytes(adhoc_invite("ag11", mcf.adhoc_xml(),
+                               mcf.resource_list(["grp:yard", "grp:crew", "grp:pair"])),
+                  world[F[0]])
+    code, warning = refusal(world[F[0]])
+    assert "189 " in warning
+    assert seen == ["grp:yard", "grp:crew"]
+
+
+def test_criteria_leave_out_the_caller_spelled_otherwise(core, rt, world):
+    """Review: the criteria path compares the caller as SIP compares URIs too."""
+    rt.loaded.hooks.identity_resolver.bind("train-driver", F[0],
+                                           LocationContext(attributes={"train_id": "T7"}))
+    rt.loaded.hooks.identity_resolver.bind("shunting-team-leader", "sip:f0@FRMCS.example", YARD)
+    core.on_bytes(msg("INVITE", LOCAL, "ag12", 1, "sip:f0@FRMCS.example", LOCAL,
+                      body=mcf.adhoc_body(SDP, mcf.adhoc_xml(criteria="train-driver")),
+                      ctype=mcf.CONTENT_TYPE), world[F[0]])
+    session = rt.manager.session("ag12")
+    assert session is not None and session.members == (F[3],)

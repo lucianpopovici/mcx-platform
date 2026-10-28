@@ -2275,7 +2275,8 @@ def test_bnd_014_needs_a_call_site(tmp_path):
     p = root / "core/session.py"
     p.write_text(p.read_text().replace("identity_resolver.resolve,", "identity_resolver.lookup,")
                  .replace("identity_resolver.determine_participants,",
-                          "identity_resolver.choose,"))
+                          "identity_resolver.choose,")
+                 .replace("identity_resolver.kind_of,", "identity_resolver.what,"))
     assert gate.check_resolver_receives_context(root) == [
         "core: no identity_resolver.resolve call site found"]
 
@@ -2393,12 +2394,13 @@ def test_bnd_013_reads_the_interface_definitions_too(tmp_path):
         "priority is IF-PRI's, not derived from a label or number"]
 
 
-_ADHOC = "                resolution, refusal = self._adhoc_members(invoker, request)\n"
+_ADHOC = ("                resolution, refusal, omitted_groups = "
+          "self._adhoc_members(invoker, request)\n")
 
 
 @pytest.mark.vp("VP1-BND-014")
 @pytest.mark.parametrize("files,patches,expected", [
-    ({}, {"core/session.py": (_ADHOC, "                resolution, refusal = self._adhoc_members("
+    ({}, {"core/session.py": (_ADHOC, "                resolution, refusal, omitted_groups = self._adhoc_members("
                                       "invoker, dataclasses.replace(request, location=None))\n")},
      ["core/session.py:{L:self._adhoc_members(invoker, dataclasses}: _adhoc_members reaches the "
       "resolver and is not given its caller's request"]),
@@ -2684,10 +2686,10 @@ _HELD = "the resolver is held in a name; call it where it is, so its request can
 @pytest.mark.vp("VP1-BND-014")
 @pytest.mark.parametrize("files,patches,expected", [
     ({}, {"core/session.py": (_ADHOC, "                _m = self._adhoc_members\n"
-                                      "                resolution, refusal = _m(invoker, request)\n")},
+                                      "                resolution, refusal, omitted_groups = _m(invoker, request)\n")},
      ["core/session.py:{L:_m = self._adhoc_members}: _adhoc_members is referred to other than "
       "by a call; its callers must be seen to pass the request"]),
-    ({}, {"core/session.py": (_ADHOC, "                resolution, refusal = getattr(self, "
+    ({}, {"core/session.py": (_ADHOC, "                resolution, refusal, omitted_groups = getattr(self, "
                                       "'_adhoc_members')(invoker, request)\n")},
      ["core/session.py:{L:getattr(self, '_adhoc_members')}: _adhoc_members is looked up by "
       "name; its callers must be seen to pass the request"]),

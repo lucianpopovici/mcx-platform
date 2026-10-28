@@ -351,6 +351,13 @@ class IdentityResolver(Protocol):
 
     def identities_of(self, service_id: MCServiceId) -> Sequence[str]: ...
 
+    def kind_of(self, target: TargetRef, request: SessionRequest) -> ResolutionKind:
+        """What `target` is -- a user, a group, or a foreign system's -- without
+        its members (PLT-ICD-001 section 3.6): what an ad hoc caller's list
+        entry is, before any group is resolved over its members. Raises as
+        `resolve` does for a target it does not know."""
+        ...
+
     def determine_participants(
         self, criteria: str, request: SessionRequest
     ) -> Resolution:

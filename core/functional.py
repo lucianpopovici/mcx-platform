@@ -53,6 +53,7 @@ from .errors import (
     FUNCTIONAL_ALIAS_TAKE_OVER_NOT_ALLOWED,
 )
 from .hooks import LocationContext, keyed_identity
+from .mcinfo import FA_ACTIVATED, FA_TAKE_OVER_POSSIBLE
 
 SINGLE = "single"
 # The slot of an identity that is not location-dependent.
@@ -125,6 +126,55 @@ class FunctionalAliases:
 
     def held_by(self, user: str) -> Tuple[Holding, ...]:
         return tuple(h for h in self.holdings() if h.holder == user)
+
+    def status_of(self, user: str) -> Tuple[Tuple[str, str], ...]:
+        """The functional alias status a subscription of `user` is told
+        (9A.2.2.2.5, FA-OP-01 item 1): (functional alias ID, status) pairs,
+        in identity order.
+
+        * "activated" for each alias the user holds;
+        * "take-over-possible" for each alias the user may hold and take
+          over that is held as many times as it may be held (9A.3.1.2
+          statusType; 24.379 clause 9A.2.1.3 item 1), unless the user holds
+          that alias already (it is then "activated").
+
+        The alias ID is the one a PUBLISH activates it with: the identity's
+        id, or for an identity keyed by an identification value
+        sip:<value>.<id>@<domain>, in the user's own domain when it is one
+        of the profile's and the profile's first otherwise. A location-
+        dependent identity is one alias whatever the location (9A.3.1 names
+        no location): "activated" once if the user holds it anywhere, and
+        never "take-over-possible", since whether an activation would take
+        it over depends on the user's location at the time (review)."""
+        domains = tuple(self._profile.identity.domains)
+        host = user.rpartition("@")[2].lower()
+        domain = next((d for d in domains if d.lower() == host), domains[0] if domains else host)
+
+        def alias_id(identity: str, slot: str) -> str:
+            declared = self._profile.functional_identity(identity)
+            if declared is not None and declared.identification_key and slot:
+                return f"sip:{slot}.{identity}@{domain}"
+            return identity
+
+        out: Dict[str, str] = {}
+        for h in self.held_by(user):
+            out.setdefault(alias_id(h.identity, h.slot), FA_ACTIVATED)
+        for (identity, slot), holders in sorted(self._held.items()):
+            declared = self._profile.functional_identity(identity)
+            policy = self._policy.get(identity)
+            if declared is None or declared.resolves_to != "user" or policy is None \
+                    or user not in policy.users or user not in policy.take_over:
+                continue
+            if declared.identification_key and not policy.allows(slot):
+                continue
+            if declared.location_dependent:
+                # Whether activating it takes it over depends on where the
+                # user is, which a subscription does not say (review).
+                continue
+            limit = 1 if declared.multiplicity == SINGLE else policy.max_holders
+            if limit is not None and len(holders) >= limit:
+                out.setdefault(alias_id(identity, slot), FA_TAKE_OVER_POSSIBLE)
+        return tuple(sorted(out.items()))
 
     # -- the procedure ------------------------------------------------------
 

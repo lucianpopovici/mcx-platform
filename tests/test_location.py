@@ -15,8 +15,8 @@ sys.path.insert(0, str(ROOT))
 from core import mcinfo  # noqa: E402
 from tests import mcpttinfo_fixture as mcf  # noqa: E402
 from tests.test_adhoc import (  # noqa: E402,F401  (fixtures)
-    F, LOCAL, SDP, Flow, adhoc_invite, clock, core, list_max, msg, pki, refusal, rt,
-    world)
+    F, LOCAL, SDP, Flow, adhoc_invite, clock, core, list_entries, list_max, msg, pki,
+    refusal, rt, world)
 from core.hooks import LocationContext  # noqa: E402
 
 lxml = pytest.importorskip("lxml.etree")

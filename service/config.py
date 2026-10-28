@@ -98,6 +98,20 @@ FOREIGN_INITIATOR_VALUES = ("refuse", "allow")
 # PLT-ICD-001 ICD-OP-14 (owner ruling 2026-10-26): whether a bearer decision's
 # ARP pre-emption vulnerability must agree with the priority decision's.
 ARP_BOTH_FLAGS_VALUES = {"true": True, "false": False}
+# The most MCX_ADHOC_LIST_MAX may say (owner decision 2026-10-28, from the
+# review of PLT-ICD-001 ICD-OP-01). A listed ad hoc call asks IF-IDR what each
+# entry is and resolves it (ADHOC-OP-06), under the one SIP, media and timer
+# lock: about 40 us a user entry, so 1 000 users take about 39 ms at the
+# median (24 ms before kind_of was asked as well). A listed group is never
+# resolved unless MCX_ADHOC_LIST_ENTRIES=users-and-groups, and then its members
+# count against this cap too. A larger ad hoc call goes by criteria.
+ADHOC_LIST_MAX_LIMIT = 1000
+# ADHOC-OP-06 (owner decision 2026-10-28), MCX_ADHOC_LIST_ENTRIES: what an ad
+# hoc caller's list may name. "users": users only, as TS 24.379 17.4.2.2 step
+# 12 i lists them; a listed group is left out unresolved, and the caller is
+# told. "users-and-groups": a listed group stands for its members, all of whom
+# count against MCX_ADHOC_LIST_MAX. Optional, default "users".
+ADHOC_LIST_ENTRIES_VALUES = ("users", "users-and-groups")
 
 
 def _choice(env: Mapping[str, str], key: str, values, what: str) -> str:
@@ -385,6 +399,8 @@ class Config:
     # VP-OP-05: MCX_ENV, which the network profile's environment must equal.
     environment: str = ""
     sip: Optional[SipConfig] = None
+    # ADHOC-OP-06: "users" or "users-and-groups". Optional, default "users".
+    adhoc_list_entries: str = "users"
     media: Optional[MediaConfig] = None
     # RES-OP-05, owner ruling 2026-10-16: None is MCX_HTTP_TLS=off.
     http_tls: Optional[HttpTlsConfig] = None
@@ -465,9 +481,21 @@ class Config:
                 "caller's participant list may hold (a positive integer); there "
                 "is no default, because an unbounded list is unbounded work "
                 "before any participant is resolved")
-        if not (raw_max.isascii() and raw_max.isdigit()) or int(raw_max) < 1:
+        def shown(value: str) -> str:
+            return value if len(value) <= 12 else f"{value[:12]}... ({len(value)} characters)"
+        if not (raw_max.isascii() and raw_max.isdigit()) or not raw_max.lstrip("0"):
             raise StartupRefused(
-                f"MCX_ADHOC_LIST_MAX={raw_max!r} must be a whole number of at least 1")
+                f"MCX_ADHOC_LIST_MAX={shown(raw_max)!r} must be a whole number of at least 1")
+        # Compared as digits first: int() refuses a string of more than 4 300
+        # digits with ValueError, a fault rather than a refusal (review).
+        significant = raw_max.lstrip("0")
+        if len(significant) > len(str(ADHOC_LIST_MAX_LIMIT)) or \
+                int(significant) > ADHOC_LIST_MAX_LIMIT:
+            raise StartupRefused(
+                f"MCX_ADHOC_LIST_MAX={shown(significant)} is more than {ADHOC_LIST_MAX_LIMIT}: each "
+                "listed entry is resolved while every other call waits (about 40 us "
+                f"a user entry), so a list is at most {ADHOC_LIST_MAX_LIMIT} entries; a "
+                "larger ad hoc call goes by criteria (PLT-ICD-001 ICD-ADH-001)")
 
         try:
             port = int(env.get("MCX_HTTP_PORT") or "8080")
@@ -502,6 +530,12 @@ class Config:
             env, "MCX_ARP_VULNERABILITY_CHECK", tuple(ARP_BOTH_FLAGS_VALUES),
             "state whether a bearer decision's ARP pre-emption vulnerability must "
             "agree with the priority decision's (PLT-ICD-001 ICD-OP-14)")
+        # Unlike most settings, this one has a default (owner decision
+        # 2026-10-28): "users", the standard's reading.
+        entries = (env.get("MCX_ADHOC_LIST_ENTRIES") or "users").strip().lower()
+        if entries not in ADHOC_LIST_ENTRIES_VALUES:
+            raise StartupRefused(f"MCX_ADHOC_LIST_ENTRIES={entries!r} must be 'users' "
+                                 "or 'users-and-groups'")
         http_tls = HttpTlsConfig.from_env(env)
         sip = SipConfig.from_env(env)
         return Config(
@@ -514,7 +548,8 @@ class Config:
             recorder=recorder,
             bearer=bearer,
             strict_release=STRICT_RELEASE_VALUES[strict],
-            adhoc_list_max=int(raw_max),
+            adhoc_list_max=int(raw_max.lstrip("0")),
+            adhoc_list_entries=entries,
             host=(env.get("MCX_HTTP_HOST") or "127.0.0.1").strip(),
             port=port,
             network=Path(network),
