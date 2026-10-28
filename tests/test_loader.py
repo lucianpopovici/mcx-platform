@@ -106,6 +106,66 @@ def test_vp1_load_040_profile_is_immutable(mcx_raw):
         p.urgencies.append(model.Declared("x", "x"))    # tuple
 
 
+def test_vp1_load_040_a_hook_cannot_change_the_loaded_profile():
+    """A priority policy that tries, while evaluating, to change the profile
+    it was given: each write is refused with the immutability error the model
+    raises, and every decision is the same afterwards as before."""
+    import dataclasses
+    import operator
+    from profiles.common.tables import TablePriorityPolicy
+    lp = loader.load(PROFILES / "mcx")
+    caught = []
+
+    class Meddling(TablePriorityPolicy):
+        def evaluate(self, request, resolution):
+            p = self._profile
+            for attempt in (lambda: setattr(p, "name", "other"),
+                            lambda: operator.setitem(p.call_types[0].floor.timers_ms, "T2", 1),
+                            lambda: p.urgencies.append(model.Declared("x", "x"))):
+                try:
+                    attempt()
+                except (dataclasses.FrozenInstanceError, TypeError, AttributeError) as exc:
+                    caught.append(type(exc).__name__)
+            return super().evaluate(request, resolution)
+
+    plain = TablePriorityPolicy(lp.profile)
+    meddler = Meddling(lp.profile)
+    res = Resolution(kind=ResolutionKind.GROUP, members=("sip:a@mcptt.example",),
+                     group_id="grp:a")
+
+    def decisions(policy):
+        out = {}
+        for ct in lp.profile.call_types:
+            req = request_for(ct.id)
+            out[ct.id] = (policy.evaluate(req, res),
+                          lp.hooks.session_policy.floor_policy(req, res),
+                          lp.hooks.bearer_selector.select(
+                              req, policy.evaluate(req, res),
+                              tuple(MediaKind(m) for m in ct.media)))
+        return out
+    before = decisions(plain)
+    meddled = decisions(meddler)
+    after = decisions(plain)
+    assert caught[:3] == ["FrozenInstanceError", "TypeError", "AttributeError"]
+    assert len(caught) == 3 * len(lp.profile.call_types) * 2
+    assert before == meddled == after
+    assert lp.profile.name == "mcx" and len(lp.profile.urgencies) == 4
+
+
+def test_vp1_load_041_the_loaded_hash_is_stable_and_sensitive(tmp_path):
+    """Through load(): the same package twice gives the same hash; the same
+    package with one value altered gives another."""
+    a = loader.load(PROFILES / "mcx").profile.content_hash
+    b = loader.load(PROFILES / "mcx").profile.content_hash
+    assert a == b and len(a) == 64
+    root = _package(tmp_path, lambda t: t.replace("max_participants: 50",
+                                                  "max_participants: 51", 1))
+    c = loader.load(root / "mcx").profile.content_hash
+    assert c != a
+    same = _package(tmp_path / "again", lambda t: t)
+    assert loader.load(same / "mcx").profile.content_hash == a
+
+
 def test_vp1_load_041_hash_stable_and_sensitive(mutate):
     a = mutate()
     b = mutate()
@@ -137,32 +197,51 @@ def test_vp1_load_010_unknown_top_level_key_rejected(mutate):
     expect_defects(raw, codes=["unknown-key"], path_contains="<root>.experimental")
 
 
+def _one_message(defects, path):
+    (d,) = [d for d in defects if d.path == path]
+    return d.message
+
+
 def test_vp1_load_011_undeclared_urgency_rejected(mutate):
+    """The diagnostic names both the call type (by id) and the urgency."""
     raw = mutate()
     raw["call_types"][0]["urgency"] = "catastrophic"
-    expect_defects(raw, codes=["unresolved-reference"],
-                   path_contains="call_types[0].urgency")
+    defects = expect_defects(raw, codes=["unresolved-reference"],
+                             path_contains="call_types[0].urgency")
+    assert _one_message(defects, "call_types[0].urgency") == (
+        "call type 'private': urgency 'catastrophic' is not declared (declared: elevated, "
+        "emergency, imminent-peril, normal)")
 
 
 def test_vp1_load_012_undeclared_scope_rejected(mutate):
+    """The diagnostic names the rule -- its place in the path and its label in
+    the message, a rule having no id -- and the scope."""
     raw = mutate()
     raw["priority"]["rules"][0]["decision"]["scope"] = "railway"
-    expect_defects(raw, codes=["unresolved-reference"],
-                   path_contains="priority.rules[0].decision.scope")
+    defects = expect_defects(raw, codes=["unresolved-reference"],
+                             path_contains="priority.rules[0].decision.scope")
+    assert _one_message(defects, "priority.rules[0].decision.scope") == (
+        "priority rule 'emergency': pre-emption scope 'railway' is not declared "
+        "(declared: public-safety)")
 
 
 def test_vp1_load_013_undeclared_application_rejected(mutate):
     raw = mutate()
     raw["call_types"][0]["application"] = "etcs"
-    expect_defects(raw, codes=["unresolved-reference"],
-                   path_contains="call_types[0].application")
+    defects = expect_defects(raw, codes=["unresolved-reference"],
+                             path_contains="call_types[0].application")
+    assert _one_message(defects, "call_types[0].application") == (
+        "call type 'private': application 'etcs' is not declared (declared: coordination)")
 
 
 def test_vp1_load_014_undeclared_initiator_role_rejected(mutate):
     raw = mutate()
     raw["call_types"][0]["initiator_roles"] = ["train-driver"]
-    expect_defects(raw, codes=["unresolved-reference"],
-                   path_contains="call_types[0].initiator_roles[0]")
+    defects = expect_defects(raw, codes=["unresolved-reference"],
+                             path_contains="call_types[0].initiator_roles[0]")
+    assert _one_message(defects, "call_types[0].initiator_roles[0]") == (
+        "call type 'private': functional identity 'train-driver' is not declared "
+        "(declared: <none declared>)")
 
 
 def test_vp1_load_015_priority_table_not_total(mutate):
@@ -182,7 +261,11 @@ def test_vp1_load_016_bearer_table_not_total(mutate):
         r for r in raw["bearer"]["rules"] if r["match"]["media"] != "data"
     ]
     defects = expect_defects(raw, codes=["not-total"], path_contains="bearer.rules")
-    assert any("data" in d.message for d in defects)
+    # Every uncovered combination is named: each call type declaring data.
+    with_data = [ct["id"] for ct in raw["call_types"] if "data" in ct["media"]]
+    assert with_data
+    assert sorted(d.message for d in defects if d.code == "not-total") == sorted(
+        f"no rule matches call type {ct!r} with media 'data'" for ct in with_data)
 
 
 def test_vp1_load_017_reserved_reason_code_rejected(mutate):
@@ -190,6 +273,57 @@ def test_vp1_load_017_reserved_reason_code_rejected(mutate):
     raw["admission"]["reject_reason_codes"].append("hook-timeout")
     expect_defects(raw, codes=["reserved-code"],
                    path_contains="admission.reject_reason_codes")
+
+
+class _UndeclaredCodePolicy:
+    """A session policy refusing with a code the profile does not declare."""
+
+    def __init__(self, inner, method):
+        self._inner, self._method = inner, method
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def authorise(self, request):
+        if self._method == "authorise":
+            from core.hooks import Admission
+            return Admission(permitted=False, reason_code="not-a-declared-code")
+        return self._inner.authorise(request)
+
+    def admit(self, request, resolution, priority):
+        if self._method == "admit":
+            from core.hooks import Admission
+            return Admission(permitted=False, reason_code="not-a-declared-code")
+        return self._inner.admit(request, resolution, priority)
+
+
+@pytest.mark.parametrize("method", ["authorise", "admit"])
+def test_vp1_load_017_an_undeclared_code_at_runtime_is_a_contract_violation(method):
+    """Not statically determinable (a policy is code): a refusal whose code
+    the profile does not declare fails the session hook-contract-violation,
+    at IF-SES authorise and admit alike, and no session is established."""
+    import dataclasses
+    from core.audit import Auditor, MemorySink
+    from core.session import Platform, SessionManager
+    lp = loader.load(PROFILES / "mcx")
+    lp = dataclasses.replace(lp, hooks=dataclasses.replace(
+        lp.hooks, session_policy=_UndeclaredCodePolicy(lp.hooks.session_policy, method)))
+    r = lp.hooks.identity_resolver
+    for i in range(3):
+        r.register_user(f"sip:u{i}@mcptt.example")
+    r.register_group("grp:a", [f"sip:u{i}@mcptt.example" for i in range(3)])
+    sink = MemorySink()
+    mgr = SessionManager(lp, Auditor(sink, lp.profile.identifier(), clock=lambda: 0),
+                         platform=Platform(), clock=lambda: 0)
+    session, _, refusal = mgr.establish(request_for("prearranged-group", target="grp:a",
+                                                    initiator="sip:u0@mcptt.example"))
+    assert session is None and mgr.session("r1") is None
+    assert refusal.reason_code == "hook-contract-violation"
+    assert "refused with reason code 'not-a-declared-code', which the profile does not " \
+           "declare" in refusal.detail
+    hooks = [dict(r.detail) for r in sink.records if r.type.value == "hook-invocation"
+             and dict(r.detail).get("method") == method]
+    assert hooks[-1]["outcome"] == "contract-violation"
 
 
 def test_vp1_load_018_unknown_floor_timer_rejected(mutate):
@@ -309,6 +443,58 @@ def test_vp1_load_022_no_default_hook_substituted(mutate, field):
                    path_contains=f"profile.hooks.{field}")
 
 
+@pytest.mark.parametrize("field", [
+    "identity_resolver", "priority_policy", "session_policy",
+    "bearer_selector", "interworking_gateway", "interconnection_gateway",
+])
+def test_vp1_load_022_each_hook_removed_refuses_start(tmp_path, field):
+    """Through the loader's whole path (read, validate, resolve): the profile
+    package with that hook's line removed does not start, the refusal names
+    profile.hooks.<field>, and nothing is returned to run."""
+    import re as _re
+    root = _package(tmp_path, lambda t: _re.sub(rf"(?m)^    {field}: .*\n", "", t, count=1))
+    assert f"    {field}: " not in (root / "mcx" / "profile.yaml").read_text()
+    with pytest.raises(StartupRefused) as exc:
+        loader.startup(["mcx"], root, env={})
+    assert f"profile.hooks.{field}" in str(exc.value)
+    assert "required key absent" in str(exc.value)
+
+
+class NoComparePolicy:
+    """Lacks `compare` altogether -- VP1-LOAD-021 as the plan writes it."""
+
+    def __init__(self, profile):
+        self.profile = profile
+
+    def evaluate(self, request, resolution):
+        raise NotImplementedError
+
+
+def _package(tmp_path, change):
+    """A copy of the mcx profile package with `change(text)` applied to its
+    profile.yaml, under tmp_path/profiles; returns the root."""
+    import shutil
+    root = tmp_path / "profiles"
+    for name in ("mcx", "common"):
+        shutil.copytree(PROFILES / name, root / name,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    p = root / "mcx" / "profile.yaml"
+    p.write_text(change(p.read_text(encoding="utf-8")), encoding="utf-8")
+    return root
+
+
+def test_vp1_load_021_a_hook_lacking_a_method_refuses_start(tmp_path):
+    """Started from a profile package whose priority policy has no `compare`:
+    the start is refused, naming the hook and the missing method."""
+    root = _package(tmp_path, lambda t: t.replace(
+        "profiles.mcx.hooks:TablePriorityPolicy", "tests.test_loader:NoComparePolicy"))
+    with pytest.raises(StartupRefused) as exc:
+        loader.startup(["mcx"], root, env={})
+    text = str(exc.value)
+    assert "priority_policy" in text and "compare" in text
+    assert "missing" in text
+
+
 class BadPolicy:
     """Wrong arity on `compare` — the failure PLT-PRF-013 exists to catch."""
 
@@ -420,6 +606,53 @@ def test_vp1_load_006_test_mode_loads_both():
     assert {lp.profile.name for lp in loaded} == {"mcx", "frmcs"}
 
 
+def test_vp1_load_006_both_profiles_are_independently_addressable():
+    """Test mode, two profiles: each loaded profile serves a call type only it
+    declares, through its own hooks (its own priority table: scope and label
+    differ), and refuses the other's. Test mode is a loader facility
+    (`startup_all`); the service runtime serves one profile."""
+    from core.audit import Auditor, MemorySink
+    from core.session import Platform, SessionManager
+    loaded = {lp.profile.name: lp for lp in loader.startup_all(
+        ["mcx", "frmcs"], PROFILES, env={"MCX_TEST_MODE": "1", "MCX_ENV": "test"})}
+    assert loaded["mcx"].hooks.identity_resolver is not loaded["frmcs"].hooks.identity_resolver
+    users = {"mcx": [f"sip:u{i}@mcptt.example" for i in range(3)],
+             "frmcs": [f"sip:f{i}@frmcs.example" for i in range(3)]}
+    managers = {}
+    for name, lp in loaded.items():
+        r = lp.hooks.identity_resolver
+        for u in users[name]:
+            r.register_user(u)
+        r.register_group("grp:m", users[name])
+        managers[name] = SessionManager(lp, Auditor(MemorySink(), "t", clock=lambda: 0),
+                                        platform=Platform(), clock=lambda: 0)
+    # The frmcs driver-controller call needs the caller to hold train-driver.
+    loaded["frmcs"].hooks.identity_resolver.bind(
+        "train-driver", users["frmcs"][0], LocationContext(attributes={"train_id": "T1"}))
+    s, _, refusal = managers["mcx"].establish(request_for(
+        "prearranged-group", target="grp:m", initiator=users["mcx"][0]))
+    assert refusal is None
+    assert (s.priority.scope, s.priority.label) == ("public-safety", "normal")
+    f, _, refusal = managers["frmcs"].establish(dataclasses_replace(request_for(
+        "driver-controller", target=users["frmcs"][1], initiator=users["frmcs"][0]), "f1"))
+    assert refusal is None, refusal
+    assert f.priority.scope == "railway"
+    assert f.members == (users["frmcs"][1],)
+    # Neither serves the other's call type.
+    _, _, refused = managers["mcx"].establish(dataclasses_replace(request_for(
+        "driver-controller", target=users["mcx"][1], initiator=users["mcx"][0]), "x1"))
+    assert refused.reason_code == "call-type-not-permitted"
+    _, _, refused = managers["frmcs"].establish(dataclasses_replace(request_for(
+        "prearranged-group", target="grp:m", initiator=users["frmcs"][0]), "x2"))
+    assert refused.reason_code == "call-type-not-permitted"
+    assert loaded["mcx"].profile.identifier() != loaded["frmcs"].profile.identifier()
+
+
+def dataclasses_replace(req, rid):
+    import dataclasses
+    return dataclasses.replace(req, request_id=rid)
+
+
 def test_vp1_load_030_invalid_profile_prevents_start(tmp_path):
     bad = tmp_path / "broken"
     bad.mkdir()
@@ -468,6 +701,27 @@ def test_safe_load_unique_is_safe_load_without_repeats():
         with pytest.raises(yaml.YAMLError) as exc:
             loader.safe_load_unique(text)
         assert says in str(exc.value), text
+
+
+def test_vp1_load_042_a_call_type_of_another_profile_is_refused():
+    """rec-broadcast, declared by frmcs, requested with mcx loaded: refused
+    as not permitted, no session in the manager, and the trail says refused."""
+    from core.audit import Auditor, MemorySink
+    from core.session import Platform, SessionManager
+    lp = loader.load(PROFILES / "mcx")
+    r = lp.hooks.identity_resolver
+    for i in range(3):
+        r.register_user(f"sip:u{i}@mcptt.example")
+    r.register_group("grp:a", [f"sip:u{i}@mcptt.example" for i in range(3)])
+    sink = MemorySink()
+    mgr = SessionManager(lp, Auditor(sink, lp.profile.identifier(), clock=lambda: 0),
+                         platform=Platform(), clock=lambda: 0)
+    session, signals, refusal = mgr.establish(request_for(
+        "rec-broadcast", target="grp:a", initiator="sip:u0@mcptt.example"))
+    assert session is None and mgr.session("r1") is None and not mgr.active
+    assert refusal.reason_code == "call-type-not-permitted"
+    types = [r.type.value for r in sink.records if r.correlation_id == "r1"]
+    assert "session-refused" in types and "session-established" not in types
 
 
 def test_vp1_load_042_call_type_set_is_profile_determined():

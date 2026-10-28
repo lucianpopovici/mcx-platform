@@ -412,6 +412,12 @@ class Config:
         environment = loader_environment(env)
         raw_profiles = env.get("MCX_PROFILE", "")
         names = [n.strip() for n in raw_profiles.split(",") if n.strip()]
+        if not names:
+            # PLT-GEN-003, named by its setting (VP1-LOAD-002): the loader's
+            # own refusal cannot know which setting was left out.
+            raise StartupRefused(
+                "MCX_PROFILE is not set: name the one profile this deployment "
+                "runs; the platform provides no default (no profile configured)")
 
         raw_release = (env.get("MCX_RELEASE") or "").strip()
         if not raw_release:

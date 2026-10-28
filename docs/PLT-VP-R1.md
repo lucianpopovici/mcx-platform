@@ -1,7 +1,7 @@
 # Release 1 — Verification Plan
 
 **Document:** PLT-VP-R1
-**Version:** 0.64 (draft)
+**Version:** 0.65 (draft)
 **Date:** 2026-09-19
 **Status:** Draft for review — not baselined
 **Verifies:** PLT-SRS v0.1, all 83 requirements marked R1
@@ -107,7 +107,7 @@ rejection is attributable to that one defect.
 | VP1-LOAD-003 | Named profile absent | Configure a profile name with no package | Refuses to start; diagnostic names the profile sought |
 | VP1-LOAD-004 | Two profiles configured | Configure both MCX and FRMCS, not in test mode | Refuses to start; diagnostic states that exactly one profile is permitted |
 | VP1-LOAD-005 | Test mode with production indicator | Set test mode and a production indicator together | Refuses to start; refusal attributable to the production indicator, not the profile |
-| VP1-LOAD-006 | Test mode legitimate | Set test mode, no production indicator, two profiles | Starts; both profiles loaded and independently addressable |
+| VP1-LOAD-006 | Test mode legitimate | Set test mode, no production indicator, two profiles | The loader starts both profiles, each independently addressable (each serves its own call types and refuses the other's). Test mode is the loader's and the test harness's facility, not a process mode (owner, 2026-10-28): the service process given two profiles refuses to start even in test mode, saying it runs exactly one, and opens no socket |
 | VP1-LOAD-010 | Unknown key rejected | Profile with one undeclared key | Rejected; diagnostic gives the key's path within the package |
 | VP1-LOAD-011 | Undeclared urgency reference | Call type naming an undeclared urgency | Rejected; diagnostic names both the call type and the urgency |
 | VP1-LOAD-012 | Undeclared scope reference | Priority rule naming an undeclared pre-emption scope | Rejected; diagnostic names the rule and the scope |
@@ -638,6 +638,7 @@ not by relaxing its pass criterion.
 |---|---|---|
 | 0.1 | 2026-09-19 | Initial draft |
 | 0.42 | 2026-10-17 | RES-OP-11 closed on the owner's ruling: `MCX_FOREIGN_INITIATOR=refuse|allow`, required; `refuse` answers a caller outside the declared domains 404 + 141 before any hook runs, `allow` is a reported deviation. |
+| 0.65 | 2026-10-28 | §3 (VP1-LOAD batch): VP1-LOAD-001, -002, -006, -011..-014, -016, -017, -021, -022, -030, -040..-042 strengthened and independently reviewed (pass). VP1-LOAD-006 amended (owner): test mode is the loader's and the test harness's facility, not a process mode; the service refuses two profiles even in test mode rather than serve the first unannounced. MCX_PROFILE unset or empty is now refused by name. |
 | 0.64 | 2026-10-28 | §8: VP1-ANL-001, -002 and -003 reviewed (pass) and signed by the owner, from PLT-ANL-R1 0.3 (both worked changes re-run on the current core). VP1-ANL-002's method amended (owner): a profile introduced into the finished core, not the FRMCS stub's history, which cannot show it. The PLT-VER-003 procedure amended (owner): the class in the commit message, checked by the independent review. |
 | 0.63 | 2026-10-28 | ADHOC-OP-04: the owner keeps `MCX_ADHOC_LIST_MAX` at most 1 000 now that a listed user entry costs two IF-IDR invocations (about 39 ms at the median for 1 000). |
 | 0.62 | 2026-10-28 | ADHOC-OP-06 decided (owner) and built: `MCX_ADHOC_LIST_ENTRIES=users|users-and-groups` (optional, default users); IF-IDR `kind_of` tells a listed group apart before it is resolved; users only leaves it out and warns the caller in the 200 OK; users and groups invites its members and counts them all against the cap (PLT-ICD-001 0.37). |

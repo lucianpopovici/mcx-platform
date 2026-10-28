@@ -449,6 +449,17 @@ def build_runtime(env: Mapping[str, str], clock: Callable[[], int],
             "the stub bearer reservation is refused when a production "
             "indicator is set: it grants a reservation the network never made")
 
+    # VP1-LOAD-006 (owner decision 2026-10-28): test mode is the loader's and
+    # the test harness's facility (loader.startup_all), not a process mode.
+    # The loader lets two profiles through in test mode; the service runs one,
+    # and says so rather than serve the first and drop the rest unannounced.
+    if len(config.profile_names) > 1:
+        raise StartupRefused(
+            f"MCX_PROFILE names {len(config.profile_names)} profiles "
+            f"({', '.join(config.profile_names)}): the service runs exactly one; "
+            "test mode (MCX_TEST_MODE) loads more than one only in the loader's test "
+            "harness (PLT-VP-R1 VP1-LOAD-006)")
+
     health = Health()
     health.set_profile(loaded)
     health.set_release(config.release)

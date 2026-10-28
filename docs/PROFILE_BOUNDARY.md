@@ -44,7 +44,9 @@ because the safety case needs to show which profile was running when.
 
 Loading more than one profile is refused unless `MCX_TEST_MODE=1`. That flag
 exists for the conformance harness and nothing else, and only the source tree
-carries more than one profile to load.
+carries more than one profile to load. It is the loader's facility, not a
+process mode: the service process runs exactly one profile and refuses two
+even in test mode (PLT-VP-R1 VP1-LOAD-006, owner decision 2026-10-28).
 
 Why per-profile images and not one image carrying everything: a delivery
 should contain only what its deployment uses. A public-safety operator does
