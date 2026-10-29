@@ -132,14 +132,17 @@ class _Checker:
         return value
 
     def ref(self, path: str, value: Optional[str], universe: Set[str],
-            what: str) -> None:
-        """Unresolved internal reference (PLT-PRF-004)."""
+            what: str, owner: str = "") -> None:
+        """Unresolved internal reference (PLT-PRF-004). `owner` names what
+        makes the reference -- "call type 'private'" -- so the diagnostic
+        names both, not only a position in a list (VP1-LOAD-011 to 014)."""
         if value is None:
             return
         if value not in universe:
             known = ", ".join(sorted(universe)) or "<none declared>"
             self.add(path, "unresolved-reference",
-                     f"{what} {value!r} is not declared (declared: {known})")
+                     (f"{owner}: " if owner else "")
+                     + f"{what} {value!r} is not declared (declared: {known})")
 
     def str_map(self, path: str, node: Mapping, key: str) -> Dict[str, str]:
         raw = node.get(key) or {}
@@ -471,8 +474,9 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
             continue
         seen.add(ident)
 
+        owner = f"call type {ident!r}"
         urgency = c.typed(p, item, "urgency", str, "")
-        c.ref(f"{p}.urgency", urgency, urgencies, "urgency")
+        c.ref(f"{p}.urgency", urgency, urgencies, "urgency", owner)
 
         application = item.get("application")
         if application is not None:
@@ -480,7 +484,8 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                 c.add(f"{p}.application", "bad-type", "expected a string")
                 application = None
             else:
-                c.ref(f"{p}.application", application, applications, "application")
+                c.ref(f"{p}.application", application, applications, "application",
+                      owner)
 
         raw_roles = item.get("initiator_roles")
         parsed_roles: List[str] = []
@@ -492,7 +497,8 @@ def _call_types(c: _Checker, node: Any, urgencies: Set[str],
                 if not isinstance(r, str):
                     c.add(f"{p}.initiator_roles[{j}]", "bad-type", "expected a string")
                     continue
-                c.ref(f"{p}.initiator_roles[{j}]", r, roles, "functional identity")
+                c.ref(f"{p}.initiator_roles[{j}]", r, roles, "functional identity",
+                      owner)
                 parsed_roles.append(r)
 
         maxp = item.get("max_participants")
@@ -751,7 +757,11 @@ def _priority_decision(c: _Checker, path: str, node: Any,
                       "preemption_vulnerability", "floor_priority", "label")):
         return None
     scope = c.typed(path, node, "scope", str, "")
-    c.ref(f"{path}.scope", scope, scopes, "pre-emption scope")
+    # A rule has no id; its decision's label is how it is known (the audit
+    # and the logs show it), and the path gives its place in the list.
+    label = node.get("label")
+    c.ref(f"{path}.scope", scope, scopes, "pre-emption scope",
+          f"priority rule {label!r}" if isinstance(label, str) else "")
     level = c.typed(path, node, "level", int, 0)
     floor_priority = c.typed(path, node, "floor_priority", int, 0)
     for name, value in (("level", level), ("floor_priority", floor_priority)):

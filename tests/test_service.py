@@ -7,6 +7,7 @@ Process-level cases start `python -m service` for real; the rest drive
 from __future__ import annotations
 
 import json
+import re
 import os
 import signal
 import socket
@@ -165,8 +166,9 @@ def test_no_profile_stated_no_process(env, value):
         env["MCX_PROFILE"] = value
     status, messages, listened = _refusal(env, free_port())
     assert status == 2 and not listened
-    assert messages == ["startup refused: no profile configured: exactly one profile must "
-                        "be named at deployment; the platform provides no default"]
+    assert messages == ["startup refused: MCX_PROFILE is not set: name the one profile this "
+                        "deployment runs; the platform provides no default (no profile "
+                        "configured)"]
 
 
 @pytest.mark.vp("VP1-BND-007")
@@ -183,8 +185,9 @@ def test_a_profiles_root_holding_one_profile_still_needs_it_named(env, tmp_path)
     status, messages, listened = _refusal({**env, "MCX_PROFILES_ROOT": str(root)},
                                           free_port())
     assert status == 2 and not listened
-    assert messages == ["startup refused: no profile configured: exactly one profile must "
-                        "be named at deployment; the platform provides no default"]
+    assert messages == ["startup refused: MCX_PROFILE is not set: name the one profile this "
+                        "deployment runs; the platform provides no default (no profile "
+                        "configured)"]
 
 
 @pytest.mark.vp("VP1-BND-023")
@@ -334,19 +337,29 @@ def test_vp1_load_005_test_mode_against_the_network_profile(env, file_env, plmns
         proc.stdout.close(); proc.stderr.close()
 
 
+_ONE_PROFILE = ("MCX_PROFILE names 2 profiles (mcx, frmcs): the service runs exactly one; "
+                "test mode (MCX_TEST_MODE) loads more than one only in the loader's test "
+                "harness (PLT-VP-R1 VP1-LOAD-006)")
+
+
 @pytest.mark.vp("VP1-LOAD-005")
-def test_vp1_load_005_test_mode_starts_on_a_test_network(env):
-    """The control: the same two profiles and test mode, on a test network
-    that says test, start."""
+@pytest.mark.vp("VP1-LOAD-006")
+def test_vp1_load_006_test_mode_on_a_test_network_is_still_one_profile_per_process(env):
+    """The control for VP1-LOAD-005: the same two profiles and test mode, on
+    a test network that says test, pass every production and network check;
+    the process then refuses because it runs one profile (owner decision
+    2026-10-28: test mode is the loader's and the test harness's facility,
+    not a process mode). No socket is opened and no store is created."""
     e = {**env, "MCX_PROFILE": "mcx,frmcs", "MCX_TEST_MODE": "1"}
-    port = free_port()
-    proc = spawn(e, port)
-    try:
-        wait_ready(port, proc)
-        health = json.loads(get(port, "/healthz")[1])
-        assert (health["environment"], health["network"]["environment"]) == ("test", "test")
-    finally:
-        stop(proc)
+    status, lines, listened, answered = _watch(e, free_port())
+    assert status == 2
+    # The loader loaded both (test mode is its facility); the process then
+    # refused, and never logged ready.
+    assert [l.split(" version=")[0] for l in lines[:-1]] == [
+        "profile loaded: name=mcx", "profile loaded: name=frmcs"]
+    assert lines[-1] == f"startup refused: {_ONE_PROFILE}"
+    assert (listened, answered) == (False, False)
+    assert not Path(env["MCX_DATA_DIR"]).exists()
 
 
 @pytest.mark.vp("VP1-SIG-007")
@@ -1133,3 +1146,92 @@ def test_the_sip_listener_uses_the_context_build_runtime_checked(tmp_path, pki):
         core.close()
     finally:
         rt.close()
+
+
+
+# -- VP1-LOAD, through the process itself ---------------------------------------
+
+def _watch(env, port, timeout=20):
+    """Run the process to its end, polling all the while; return its exit
+    status, the messages it logged, whether anything ever accepted a
+    connection on `port`, and whether /readyz ever answered."""
+    proc = spawn(env, port)
+    listened = answered = False
+    end = time.time() + timeout
+    try:
+        while proc.poll() is None and time.time() < end:
+            with socket.socket() as s:
+                s.settimeout(0.2)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    listened = True
+            try:
+                get(port, "/readyz")
+                answered = True
+            except OSError:
+                pass
+            time.sleep(0.02)
+        status = proc.wait(timeout=5)
+        lines = [json.loads(l)["message"] for l in proc.stderr.read().decode().splitlines()
+                 if l.startswith("{")]
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close(); proc.stderr.close()
+    with socket.socket() as s:
+        listened = listened or s.connect_ex(("127.0.0.1", port)) == 0
+    return status, lines, listened, answered
+
+
+def test_vp1_load_001_the_process_reaches_ready_and_logs_the_profile(env):
+    """Started on the MCX profile, the process is ready (/readyz 200) and has
+    logged the profile's name, version and 64-hex content hash at start."""
+    from core import loader
+    lp = loader.load(ROOT / "profiles" / "mcx")
+    port = free_port()
+    proc = spawn(env, port)
+    try:
+        wait_ready(port, proc)
+        status, body, _ = get(port, "/readyz")
+        assert (status, json.loads(body)) == (200, {"ready": True})
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=10) == 0
+        lines = [json.loads(l)["message"] for l in proc.stderr.read().decode().splitlines()
+                 if l.startswith("{")]
+    finally:
+        stop(proc)
+    loaded = [l for l in lines if l.startswith("profile loaded: name=")]
+    assert len(loaded) == 1
+    assert re.fullmatch(r"profile loaded: name=mcx version=(\S+) hash=([0-9a-f]{64}) "
+                        r"source=\S+", loaded[0])
+    assert f"version={lp.profile.version} hash={lp.profile.content_hash} " in loaded[0]
+    assert any(l.startswith(f"ready: profile={lp.profile.identifier()}") for l in lines)
+
+
+@pytest.mark.parametrize("value", [None, "", " , "])
+def test_vp1_load_002_no_profile_means_no_process_and_no_socket(env, value):
+    """Refuses to start; the diagnostic names MCX_PROFILE; nothing ever
+    listens, polled while the process runs and after."""
+    e = {k: v for k, v in env.items() if k != "MCX_PROFILE"}
+    if value is not None:
+        e["MCX_PROFILE"] = value
+    status, messages, listened, answered = _watch(e, free_port())
+    assert (status, listened, answered) == (2, False, False)
+    assert messages == ["startup refused: MCX_PROFILE is not set: name the one profile this "
+                        "deployment runs; the platform provides no default (no profile "
+                        "configured)"]
+
+
+def test_vp1_load_030_a_rejected_profile_means_no_process_and_no_socket(env, tmp_path):
+    """A profile validation rejects: exit status non-zero (2), no listening
+    socket and no readiness at any point, the defect in the diagnostic."""
+    import shutil
+    root = tmp_path / "profiles"
+    shutil.copytree(ROOT / "profiles", root, ignore=shutil.ignore_patterns("__pycache__"))
+    p = root / "mcx" / "profile.yaml"
+    p.write_text(p.read_text(encoding="utf-8").replace(
+        "  - id: private\n", "  - id: private\n    colour: blue\n", 1), encoding="utf-8")
+    status, messages, listened, answered = _watch({**env, "MCX_PROFILES_ROOT": str(root)},
+                                                  free_port())
+    assert (status, listened, answered) == (2, False, False)
+    assert len(messages) == 1 and messages[0].startswith("startup refused: profile 'mcx' is invalid.")
+    assert "call_types[0].colour" in messages[0]

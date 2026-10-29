@@ -395,6 +395,14 @@ def decode(data: bytes, release: Release) -> FloorMessage:
         mtype = MsgType(b0 & TYPE_MASK)
     except ValueError:
         raise RtcpError(f"unknown message type {b0 & TYPE_MASK}") from None
+    # A type whose table 8.2.2.1-1 entry has a literal 0 in bit 4 cannot carry
+    # the acknowledgement flag: with it, the five bits are a subtype no release
+    # defines (Floor Request 10000, say). Malformed, not a wrong release; the
+    # table's 'x' and '0' entries are the same in every release, Rel-13 to 19
+    # (PLT-CONF-AUDIT CA-28).
+    if b0 & ACK_REQUIRED and mtype not in ACK_CAPABLE:
+        raise RtcpError(f"subtype {b0 & 0x1F:05b}: {mtype.name} cannot carry the "
+                        "acknowledgement flag; table 8.2.2.1-1 defines no such subtype")
     if not rel.supports_subtype(release, int(mtype)):
         introduced = rel.SUBTYPE_INTRODUCED.get(int(mtype))
         raise ReleaseRefused(
