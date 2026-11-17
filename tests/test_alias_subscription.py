@@ -536,6 +536,32 @@ def test_a_notify_goes_to_the_registered_connection_once_its_own_closed(tmp_path
         rt.close()
 
 
+@pytest.mark.vp("VP1-SIG-002")
+def test_no_notify_goes_to_a_connection_whose_registration_has_expired(started):
+    """Review of VP1-SIG-002: a subscription that has lost its own connection
+    is told on the subscriber's registered connection -- but only while the
+    registration is in date. Expired, that connection may still be open; it
+    is no longer the user's (RFC 3261 10.3), and nothing is sent there until
+    the user registers again."""
+    rt, core = started
+    # ENG[1] may take over (the fixture), so a change by ENG[0] concerns it.
+    sub_flow, reg, f0 = Flow(ENG[1]), Flow(ENG[1]), Flow(ENG[0])
+    core.on_bytes(msg("REGISTER", "sip:utility.example", "r0", 1, ENG[1], ENG[1],
+                      extra=[f"Contact: <{ENG[0]}>", "Expires: 60"]), reg)
+    core.on_bytes(subscribe(ENG[1]), sub_flow)
+    core.on_flow_closed(sub_flow)               # the subscription's own connection
+    assert core.alias_subs[(f"sub-{ENG[1]}", "st", "")].flow is None
+    reg.sent.clear()
+    core.clock.now += 61_000                    # the registration on `reg` runs out
+    assert not core.registrations.is_registered(ENG[1])
+    core.on_bytes(publish(ENG[0], ["control-engineer"], call_id="a"), f0)
+    assert reg.requests("NOTIFY") == []         # open, but no longer the user's
+    core.on_bytes(msg("REGISTER", "sip:utility.example", "r0", 2, ENG[1], ENG[1],
+                      extra=[f"Contact: <{ENG[0]}>", "Expires: 60"]), reg)
+    [notify] = reg.requests("NOTIFY")
+    assert statuses(notify)[2] == [("control-engineer", "take-over-possible")]
+
+
 def test_another_users_dialog_identifiers_change_nothing(started):
     rt, core = started
     f0, f1 = Flow(ENG[0]), Flow(ENG[1])

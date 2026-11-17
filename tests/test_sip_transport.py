@@ -7,13 +7,17 @@ None of this is run against a third-party SIP core: VP1-SIG-001 stays open.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import ipaddress
 import json
+import os
 import re
+import signal
 import socket
 import ssl
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -702,6 +706,154 @@ def test_the_floor_control_stream_is_not_data_media(core, world, rt):
     assert "+g.3gpp.mcdata" not in accept
 
 
+# ============================================================ VP1-SIG-002
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_vp1_sig_002_registration_state_per_service_id_through_the_core(core, rt, clock):
+    """Third-party registration through the SIP core: per MC service ID,
+    replaced by a re-registration (new contact, new expiry), gone at its own
+    expiry while the other ID is untouched, and observably so: the expired
+    user can no longer be called."""
+    regs = core.registrations
+    a, b = Flow(U[0]), Flow(U[1])
+    t0 = clock.now
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r1", 1, U[0], U[0],
+                      extra=["Contact: <sip:u0@192.0.2.10:5061>;expires=600"]), a)
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r2", 1, U[1], U[1],
+                      extra=[f"Contact: <{U[1]}>;expires=3600"]), b)
+    assert (a.codes(), b.codes()) == ([200], [200])
+    assert regs.registered_ids() == tuple(sorted((U[0], U[1])))
+    assert (regs.get(U[0]).contact, regs.get(U[0]).expires_at_ms) == (
+        "sip:u0@192.0.2.10:5061", t0 + 600_000)
+    assert regs.get(U[1]).expires_at_ms == t0 + 3_600_000
+
+    # u0 re-registers: a new contact and a SHORTER expiry replace the old.
+    clock.now = t0 + 100_000
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r1", 2, U[0], U[0],
+                      extra=["Contact: <sip:u0@192.0.2.11:5061>", "Expires: 120"]), a)
+    assert a.codes() == [200, 200]
+    assert (regs.get(U[0]).contact, regs.get(U[0]).expires_at_ms) == (
+        "sip:u0@192.0.2.11:5061", t0 + 220_000)
+    assert regs.get(U[1]).expires_at_ms == t0 + 3_600_000        # untouched
+
+    # Past u0's new expiry (and before its old one): u0 is gone, u1 is not.
+    clock.now = t0 + 220_000
+    assert regs.get(U[0]) is None and not regs.is_registered(U[0])
+    assert regs.registered_ids() == (U[1],)
+    assert regs.get(U[1]).contact == U[1]
+    caller = Flow(U[1])
+    core.on_bytes(invite("after-expiry", U[1], U[0], "private"), caller)
+    assert caller.codes() == [100, 480]
+    assert rt.manager.session("after-expiry") is None
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_vp1_sig_002_one_core_connection_two_users_one_expires(core, rt, clock):
+    """The third-party case: a trusted SIP core registers two users on its one
+    connection. When one registration runs out the connection stays open (it
+    carries the other); the expired user gets 480 and the other is still
+    called on it."""
+    trunk = Flow("core", uris=(), dns=("core-client.example",), core=True)
+    t0 = clock.now
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "t1", 1, U[1], U[1],
+                      extra=[f"Contact: <{U[1]}>", "Expires: 60"]), trunk)
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "t2", 1, U[2], U[2],
+                      extra=[f"Contact: <{U[2]}>", "Expires: 3600"]), trunk)
+    assert trunk.codes() == [200, 200]
+    clock.now = t0 + 61_000
+    assert core.registrations.registered_ids() == (U[2],)
+    caller = Flow(U[0])
+    register(core, U[0], caller)
+    caller.sent.clear()
+    trunk.sent.clear()
+    core.on_bytes(invite("to-expired", U[0], U[1], "private"), caller)
+    assert caller.codes() == [100, 480] and trunk.requests("INVITE") == []
+    core.on_bytes(invite("to-live", U[0], U[2], "private"), caller)
+    [leg] = trunk.requests("INVITE")
+    assert leg.uri == U[2]
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_vp1_sig_002_expires_zero_removes_only_that_id(core):
+    regs = core.registrations
+    flows = {u: Flow(u) for u in U[:2]}
+    for u, f in flows.items():
+        register(core, u, f)
+    register(core, U[0], flows[U[0]], n=2, expires=0)
+    assert regs.registered_ids() == (U[1],)
+
+
+# ============================================================ VP1-SIG-004
+#
+# TS 24.379 states none of these codes itself: clause 5.3 makes the MCPTT
+# server an AS acting as a routing B2BUA "as defined in 3GPP TS 24.229",
+# which is RFC 3261's. The codes are RFC 3261's: 400 for a request that cannot
+# be understood (21.4.1), 481 for a request naming no dialog (12.2.2), and
+# 482 for a merged request -- the same From tag, Call-ID and CSeq in a new
+# transaction (8.2.2.2).
+
+
+def _without(raw, line):
+    assert line in raw
+    return raw.replace(line, b"")
+
+
+_MALFORMED = {
+    "no-cseq": lambda: _without(invite("m1", U[0], U[1], "private"), b"CSeq: 1 INVITE\r\n"),
+    "no-call-id": lambda: _without(invite("m2", U[0], U[1], "private"), b"Call-ID: m2\r\n"),
+    "no-from": lambda: _without(invite("m3", U[0], U[1], "private"), b"From: <%s>;tag=ft\r\n"
+                                % U[0].encode()),
+    "cseq-without-method": lambda: invite("m4", U[0], U[1], "private").replace(
+        b"CSeq: 1 INVITE", b"CSeq: 1"),
+    "two-call-ids": lambda: invite("m5", U[0], U[1], "private").replace(
+        b"Call-ID: m5\r\n", b"Call-ID: m5\r\nCall-ID: m6\r\n"),
+    "body-without-content-type": lambda: _without(
+        invite("m7", U[0], U[1], "private"), b"Content-Type: " + mcf.CONTENT_TYPE.encode()
+        + b"\r\n"),
+}
+
+
+@pytest.mark.vp("VP1-SIG-004")
+@pytest.mark.parametrize("variant", list(_MALFORMED))
+def test_vp1_sig_004_each_malformed_request_is_400_through_the_core(core, rt, world, variant):
+    world[U[0]].sent.clear()
+    core.on_bytes(_MALFORMED[variant](), world[U[0]])
+    assert world[U[0]].codes() == [400]
+    assert world[U[1]].requests() == [] and rt.store.sessions() == []
+
+
+@pytest.mark.vp("VP1-SIG-004")
+def test_vp1_sig_004_a_replay_in_a_new_transaction_is_482_through_the_core(core, rt, world):
+    """The same INVITE again (From tag, Call-ID, CSeq) under a new branch: a
+    new transaction, so the transaction layer does not absorb it; the guard
+    answers 482 and the session manager sees one request."""
+    core.on_bytes(invite("rp", U[0], U[1], "private"), world[U[0]])
+    core.on_bytes(invite("rp", U[0], U[1], "private", branch="z9hG4bKreplayed"), world[U[0]])
+    assert world[U[0]].codes() == [100, 482]
+    assert len(world[U[1]].requests("INVITE")) == 1
+    admitted = [r for r in rt.store.audit_records("rp") if r["type"] == "session-admitted"]
+    assert len(admitted) == 1
+
+
+@pytest.mark.vp("VP1-SIG-004")
+@pytest.mark.parametrize("method", ["BYE", "UPDATE", "INFO"])
+def test_vp1_sig_004_an_unknown_session_request_is_481_through_the_core(core, world, method):
+    core.on_bytes(msg(method, LOCAL, "no-such-call", 2, U[0], U[1], to_tag="mcx"),
+                  world[U[0]])
+    assert world[U[0]].codes() == [481]
+
+
+@pytest.mark.vp("VP1-SIG-004")
+def test_vp1_sig_004_an_unknown_session_ack_gets_no_response_and_changes_nothing(core, rt,
+                                                                                 world):
+    """An ACK is never answered (RFC 3261 17.2.3 / 12.2.2): for no dialog it
+    is dropped."""
+    core.on_bytes(msg("ACK", LOCAL, "no-such-call", 1, U[0], U[1], to_tag="mcx",
+                      branch="z9hG4bKack0"), world[U[0]])
+    assert world[U[0]].sent == [] and rt.store.sessions() == []
+
+
 # ============================================================ VP1-SIG-005
 
 
@@ -752,6 +904,87 @@ def test_vp1_sig_005_callee_timeout_leaves_no_session_state(core, rt, world, clo
     assert_no_session_state(core, rt, "f4")
 
 
+def _callee_answers(code):
+    def provoke(core, world):
+        core.on_bytes(invite("x", U[0], U[1], "private"), world[U[0]])
+        (req,) = world[U[1]].requests("INVITE")
+        core.on_bytes(answer(req, code), world[U[1]])
+    return provoke
+
+
+def _sdp_without_profile_codec():
+    return SDP.replace("RTP/AVP 0", "RTP/AVP 18").replace("a=rtpmap:0 PCMU/8000",
+                                                          "a=rtpmap:18 G729/8000")
+
+
+def _every_member_declines(core, world):
+    core.on_bytes(invite("x", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
+    for u in U[1:]:
+        (req,) = world[u].requests("INVITE")
+        core.on_bytes(answer(req, 486), world[u])
+
+
+def _hook_fault(core, world):
+    from profiles.common.tables import TablePriorityPolicy
+
+    def boom(self, request, resolution):
+        raise RuntimeError("priority hook fault")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(TablePriorityPolicy, "evaluate", boom)
+        core.on_bytes(invite("x", U[0], U[1], "private"), world[U[0]])
+
+
+# Every final failure the core sends an initiator, with what provokes it and
+# the last audit record it leaves (None: nothing reached the session manager).
+_FAILURES = {
+    "cancelled-487": (lambda core, world: (
+        core.on_bytes(invite("x", U[0], U[1], "private"), world[U[0]]),
+        core.on_bytes(msg("CANCEL", LOCAL, "x", 1, U[0], LOCAL, branch="z9hG4bKx1INVITE"),
+                      world[U[0]])), [100, 200, 487], "session-failed"),
+    "no-profile-codec-488": (lambda core, world: core.on_bytes(
+        msg("INVITE", LOCAL, "x", 1, U[0], LOCAL,
+            body=mcf.body_for("private", U[1], _sdp_without_profile_codec()),
+            ctype=mcf.CONTENT_TYPE), world[U[0]]), [100, 488], "session-failed"),
+    "session-expires-too-small-422": (lambda core, world: core.on_bytes(
+        invite("x", U[0], U[1], "private", extra=["Session-Expires: 30", "Supported: timer"]),
+        world[U[0]]), [422], None),
+    "unknown-target-404": (lambda core, world: core.on_bytes(
+        invite("x", U[0], "sip:nobody@mcptt.example", "private"), world[U[0]]),
+        [100, 404], "session-failed"),
+    "call-type-not-permitted-403": (lambda core, world: core.on_bytes(
+        invite("x", U[0], U[1], "no-such-call-type"), world[U[0]]),
+        [100, 403], "session-refused"),
+    "malformed-400": (lambda core, world: core.on_bytes(
+        invite("x", U[0], U[1], "private").replace(b"CSeq: 1 INVITE\r\n", b""), world[U[0]]),
+        [400], None),
+    "hook-fault-500": (_hook_fault, [100, 500], "session-failed"),
+    "callee-404": (_callee_answers(404), [100, 404], "session-failed"),
+    "callee-486": (_callee_answers(486), [100, 486], "session-failed"),
+    "callee-488": (_callee_answers(488), [100, 488], "session-failed"),
+    "callee-500": (_callee_answers(500), [100, 500], "session-failed"),
+    # A 6xx has no entry of its own in the relay table: the initiator is told
+    # the callee is unavailable (480).
+    "callee-603": (_callee_answers(603), [100, 480], "session-failed"),
+    "every-group-member-declines": (_every_member_declines, [100, 486], "session-failed"),
+}
+
+
+@pytest.mark.vp("VP1-OAM-003")
+@pytest.mark.vp("VP1-SIG-005")
+@pytest.mark.parametrize("case", list(_FAILURES))
+def test_vp1_sig_005_every_final_failure_leaves_no_session_state(core, rt, world, case):
+    """Each final failure response the core can send an initiator, inspected
+    directly where session state lives (the store, the session manager, the
+    core's calls and dialogs). The audit trail is all that remains."""
+    provoke, codes, last_record = _FAILURES[case]
+    provoke(core, world)
+    assert world[U[0]].codes() == codes
+    assert_no_session_state(core, rt, "x")
+    trail = [r["type"] for r in rt.store.audit_records("x")]
+    assert (trail[-1] if trail else None) == last_record, trail
+
+
+@pytest.mark.vp("VP1-SIG-005")
 def test_group_call_survives_one_decline_and_fails_only_when_all_do(core, rt, world):
     core.on_bytes(invite("g1", U[0], "grp:alpha", "prearranged-group"), world[U[0]])
     reqs = {u: world[u].requests("INVITE")[0] for u in U[1:]}
@@ -826,14 +1059,21 @@ def test_callee_bye_releases_and_byes_the_initiator(core, rt, world):
 # ============================================================ VP1-CC-001 (partial)
 
 
+@pytest.mark.vp("VP1-CC-001")
 def test_vp1_cc_001_audit_names_the_controlling_function(core, rt, world):
+    """A call through the combined deployment: its admission and its
+    establishment are each recorded once, and each names the function that
+    controlled it and the one that served its participants."""
     _answered_call(core, world)
-    for rec in rt.store.audit_records("k1"):
-        if rec["type"] in ("session-admitted", "session-established"):
-            assert rec["detail"]["controlling_function"] == LOCAL
-            assert rec["detail"]["participating_function"] == LOCAL
+    named = [(r["type"], r["detail"].get("controlling_function"),
+              r["detail"].get("participating_function"))
+             for r in rt.store.audit_records("k1")
+             if r["type"] in ("session-admitted", "session-established")]
+    assert named == [("session-admitted", LOCAL, LOCAL),
+                     ("session-established", LOCAL, LOCAL)]
 
 
+@pytest.mark.vp("VP1-CC-001")
 def test_vp1_cc_001_roles_are_declared_and_separately_named(tmp_path, pki, clock):
     rt = build_runtime(sip_env(tmp_path, pki, MCX_SIP_ROLES="controlling"),
                        clock, platform=Platform())
@@ -843,17 +1083,29 @@ def test_vp1_cc_001_roles_are_declared_and_separately_named(tmp_path, pki, clock
         s, _, _ = rt.establish(SessionRequest(
             request_id="r1", initiator=U[0], target="grp:alpha",
             call_type="prearranged-group", media=(MediaKind.VOICE,)))
-        d = [r for r in rt.store.audit_records("r1")
-             if r["type"] == "session-established"][0]["detail"]
-        assert d["controlling_function"] == LOCAL
-        assert "participating_function" not in d       # role not hosted here
+        named = [(r["type"], r["detail"].get("controlling_function"),
+                  "participating_function" in r["detail"])
+                 for r in rt.store.audit_records("r1")
+                 if r["type"] in ("session-admitted", "session-established")]
+        # The controlling role alone: named, and the participating one not,
+        # as it is not hosted here.
+        assert named == [("session-admitted", LOCAL, False),
+                         ("session-established", LOCAL, False)]
     finally:
         rt.close()
 
 
+@pytest.mark.vp("VP1-CC-001")
 def test_participating_only_is_refused_not_faked(tmp_path, pki, clock):
     with pytest.raises(StartupRefused, match="SIP-OP-03"):
         build_runtime(sip_env(tmp_path, pki, MCX_SIP_ROLES="participating"), clock)
+
+
+@pytest.mark.vp("VP1-CC-001")
+def test_an_unknown_role_is_refused_by_name(tmp_path, pki, clock):
+    with pytest.raises(StartupRefused) as refused:
+        build_runtime(sip_env(tmp_path, pki, MCX_SIP_ROLES="controlling,bogus"), clock)
+    assert str(refused.value) == "MCX_SIP_ROLES has unknown role(s) ['bogus']"
 
 
 # ============================================================ VP1-HOOK-014
@@ -915,6 +1167,7 @@ def test_vp1_hook_014_reaches_the_wire_as_503_and_leaves_no_session(core, rt, wo
 # ============================================================ config refusals
 
 
+@pytest.mark.vp("VP1-CC-001")
 @pytest.mark.parametrize("drop", ["MCX_SIP_URI", "MCX_SIP_TLS_CERT", "MCX_SIP_TLS_KEY",
                                   "MCX_SIP_TLS_CA", "MCX_SIP_CLIENT_AUTH",
                                   "MCX_SIP_ROLES"])
@@ -1793,6 +2046,7 @@ def test_scheme_and_host_ignore_case_the_user_part_does_not(core):
     assert g.codes() == [403]
 
 
+@pytest.mark.vp("VP1-SIG-002")
 def test_a_trusted_core_may_assert_any_identity(core, world):
     """RFC 3325: a peer the core CA issued, carrying a DNS name the network
     profile lists in sip.trusted_cores, authenticated its users itself."""
@@ -2255,3 +2509,240 @@ def test_a_prearranged_call_to_a_choosing_group_is_its_call_type(tmp_path, pki, 
     finally:
         c.close()
         r.close()
+
+
+# ============================================================ VP1-SIG-006, the whole process
+
+
+def _listening(pid):
+    """Every socket the process listens on, from /proc: [(proto, port)]. TCP
+    in state LISTEN (0A); every UDP socket, connected or not, since a
+    connected one still receives (review: a filter on 'no peer' would hide a
+    media socket the day the plane calls connect())."""
+    inodes = set()
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            link = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError:
+            continue
+        if link.startswith("socket:["):
+            inodes.add(link[8:-1])
+    found = []
+    for proto in ("tcp", "tcp6", "udp", "udp6"):
+        try:
+            rows = open(f"/proc/{pid}/net/{proto}").read().splitlines()[1:]
+        except FileNotFoundError:
+            continue
+        for row in rows:
+            f = row.split()
+            local, remote, state, inode = f[1], f[2], f[3], f[9]
+            if inode not in inodes:
+                continue
+            if proto.startswith("tcp") and state != "0A":
+                continue
+            found.append((proto.rstrip("6"), int(local.split(":")[1], 16)))
+    return sorted(set(found))
+
+
+def _tls(port, pki, cert):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(str(pki / "ca.crt"))
+    ctx.check_hostname = False
+    if cert:
+        ctx.load_cert_chain(str(pki / f"{cert}.crt"), str(pki / f"{cert}.key"))
+    s = ctx.wrap_socket(socket.create_connection(("127.0.0.1", port), 5),
+                        server_hostname="localhost")
+    s.settimeout(5)
+    return s
+
+
+def _plaintext_answer(port, payload):
+    with socket.create_connection(("127.0.0.1", port), 5) as s:
+        s.settimeout(5)
+        s.sendall(payload)
+        try:
+            return s.recv(4096)
+        except (ConnectionResetError, socket.timeout):
+            return b""
+
+
+@contextlib.contextmanager
+def _tls_process(tmp_path, pki, **over):
+    """The real process (python -m service), SIP over TLS and HTTPS, both
+    requiring a client certificate from the users' CA; ready when /readyz
+    answers 200 over mutual TLS. Yields (proc, sip_port, http_port, env)."""
+    import subprocess
+    from tests.test_service import free_port
+    sip_port, http_port = free_port(), free_port()
+    env = sip_env(tmp_path, pki, MCX_SIP_LISTEN=f"127.0.0.1:{sip_port}",
+                  MCX_HTTP_PORT=str(http_port), MCX_HTTP_TLS="on",
+                  MCX_HTTP_TLS_CERT=str(pki / "server.crt"),
+                  MCX_HTTP_TLS_KEY=str(pki / "server.key"),
+                  MCX_HTTP_TLS_CA=str(pki / "ca.crt"), MCX_HTTP_CLIENT_AUTH="required",
+                  **over)
+    full = {k: v for k, v in os.environ.items()
+            if k not in ("MCX_ENV", "MCX_PRODUCTION", "MCX_TEST_MODE")}
+    # The logs go to a file, not a pipe nobody reads while the process runs:
+    # a full pipe would block the process mid-test.
+    log_path = tmp_path / "process.log"
+    log = open(log_path, "wb")
+    proc = subprocess.Popen([sys.executable, "-m", "service"], cwd=ROOT,
+                            env={**full, **env}, stdout=log, stderr=log)
+    proc.log_path = log_path
+    try:
+        end, last = time.time() + 45, None
+        while True:
+            assert proc.poll() is None, log_path.read_text()
+            try:
+                if _https_get(http_port, pki, "/readyz")[0] == 200:
+                    break
+            except OSError as exc:
+                last = exc
+            assert time.time() < end, f"never became ready: {last!r}"
+            time.sleep(0.1)
+        yield proc, sip_port, http_port, env
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+        log.close()
+
+
+def _https_get(port, pki, path):
+    """(status, body) of a GET over mutual TLS, u0's certificate."""
+    s = _tls(port, pki, "u0")
+    try:
+        s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+        data = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        s.close()
+    head, _, body = data.partition(b"\r\n\r\n")
+    return int(head.split(b" ")[1]), body
+
+
+@pytest.mark.vp("VP1-SIG-006")
+def test_vp1_sig_006_every_listening_socket_of_the_process_refuses_plaintext(tmp_path, pki):
+    """The real process, SIP over TLS and HTTPS both requiring a client
+    certificate. Its listening sockets are read from /proc, not from its
+    configuration: exactly the SIP and HTTP ports, both TCP, and nothing on
+    UDP while no call is up (media is per call, plain RTP until SRTP in R2,
+    PLT-MED-004). On each: plaintext gets not a byte back; TLS without a
+    certificate fails; TLS with an untrusted one fails; mutual TLS works (u0's
+    certificate, from the users' CA both listeners trust)."""
+    get = b"GET /readyz HTTP/1.1\r\nHost: x\r\n\r\n"
+    with _tls_process(tmp_path, pki) as (proc, sip_port, http_port, _):
+        assert _listening(proc.pid) == sorted([("tcp", sip_port), ("tcp", http_port)])
+        probes = {sip_port: msg("OPTIONS", "sip:x", "o1", 1, U[0], U[0]), http_port: get}
+        for port, payload in probes.items():
+            assert _plaintext_answer(port, payload) == b"", port
+            for cert in (None, "rogue"):
+                with pytest.raises((ssl.SSLError, OSError, EOFError)):
+                    s = _tls(port, pki, cert)
+                    s.sendall(payload)
+                    if not s.recv(4096):
+                        raise EOFError
+            s = _tls(port, pki, "u0")
+            s.sendall(payload)
+            first = s.recv(4096).split(b"\r\n")[0]
+            s.close()
+            assert first in (b"SIP/2.0 200 OK", b"HTTP/1.0 200 OK", b"HTTP/1.1 200 OK"), \
+                (port, first)
+
+
+@pytest.mark.vp("VP1-OAM-001")
+def test_vp1_oam_001_log_health_and_every_record_name_the_same_triples(tmp_path, pki):
+    """The real process: its startup log, its health document and every
+    audit record it stored for a call (refused here: no recorder, so the
+    process's fail-closed platform refuses a group call that records) name
+    the same profile name, version and hash, the release, and the network's
+    name, version and hash. The profile's hash is checked against loading
+    the package independently, not against what the process says."""
+    import json as _json
+    from core import loader
+    from service.store import SqliteStore
+    lp = loader.load(ROOT / "profiles" / "mcx")
+    name, version, digest = lp.profile.name, lp.profile.version, lp.profile.content_hash
+    with _tls_process(tmp_path, pki) as (proc, sip_port, http_port, env):
+        w = Wire(sip_port, pki, cert="u0")
+        w.send(msg("REGISTER", "sip:mcptt.example", "o-reg", 1, U[0], U[0],
+                   extra=[f"Contact: <{U[0]}>;expires=600"]))
+        assert w.recv().code == 200
+        w.send(msg("INVITE", LOCAL, "oam1", 1, U[0], LOCAL,
+                   body=mcf.body_for("prearranged-group", "grp:alpha", SDP),
+                   ctype=mcf.CONTENT_TYPE))
+        codes = [w.recv().code, w.recv().code]
+        w.close()
+        assert codes == [100, 503]
+        status, body = _https_get(http_port, pki, "/healthz")
+        assert status == 200
+        health = _json.loads(body)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+        lines = [_json.loads(l)["message"] for l in proc.log_path.read_text().splitlines()
+                 if l.startswith("{")]
+    net = health["network"]
+    assert (health["profile"]["name"], health["profile"]["version"],
+            health["profile"]["hash"]) == (name, version, digest)
+    assert health["release"] == "Rel-19"
+    assert (net["name"], net["version"]) == ("test-net", "1") and len(net["hash"]) == 64
+    profile_id = f"{name}/{version}/{digest[:16]}"
+    network_id = f"test-net/1/{net['hash'][:16]}"
+    assert health["profile"]["identifier"] == profile_id and net["identifier"] == network_id
+    assert f"profile loaded: name={name} version={version} hash={digest} " \
+           f"source={ROOT / 'profiles' / 'mcx'}" in lines
+    assert f"profile loaded: {profile_id} (3GPP Rel-19) on network {network_id}, " \
+           f"environment test" in lines
+    store = SqliteStore(Path(env["MCX_DATA_DIR"]))
+    try:
+        records = store.audit_records()
+    finally:
+        store.close()
+    assert {r["type"] for r in records if r["correlation_id"] == "oam1"} >= {
+        "hook-invocation", "session-refused"}
+    assert {r["profile"] for r in records} == {f"{profile_id}+Rel-19+{network_id}+test"}
+
+
+@pytest.mark.vp("VP1-SIG-006")
+def test_vp1_sig_006_during_a_call_the_only_new_sockets_are_its_media_ports(tmp_path, pki):
+    """The deviation recorded for R1 (SEC-OP-01, owner 2026-11-17): a call's
+    RTP and floor-control UDP are plain until SRTP/SRTCP (PLT-MED-004, R2).
+    So during a call the process may listen on more than the two TLS ports,
+    but only on the UDP relay ports it offered that call in its SDP; the two
+    TCP listeners are unchanged."""
+    with _tls_process(tmp_path, pki, MCX_RECORDER="stub",
+                      MCX_BEARER="stub") as (proc, sip_port, http_port, _):
+        # Two connections from the trusted SIP core, which registers each user
+        # on its own connection (third-party registration).
+        caller, callee = Wire(sip_port, pki, cert="client"), Wire(sip_port, pki, cert="client")
+        try:
+            for w, u in ((caller, U[0]), (callee, U[1])):
+                w.send(msg("REGISTER", "sip:mcptt.example", f"reg-{u}", 1, u, u,
+                           extra=[f"Contact: <{u}>;expires=600"]))
+                assert w.recv().code == 200
+            caller.send(msg("INVITE", LOCAL, "sock1", 1, U[0], LOCAL,
+                            body=mcf.body_for("private", U[1], SDP), ctype=mcf.CONTENT_TYPE))
+            assert caller.recv().code == 100
+            leg = callee.recv()
+            assert leg.method == "INVITE"
+            callee.send(answer(leg, 200, SDP))
+            ok = caller.recv()
+            assert ok.code == 200
+            offered = set()
+            for body in (mcf.sdp_of(leg), ok.body):
+                offered |= {int(m) for m in re.findall(r"^m=\S+ (\d+) ", body, re.M)}
+            assert offered and 0 not in offered
+            listening = _listening(proc.pid)
+            assert [x for x in listening if x[0] == "tcp"] == sorted(
+                [("tcp", sip_port), ("tcp", http_port)])
+            # Exactly the ports offered: each party's RTP (m=audio) and floor
+            # control (m=application) relay port, and no other UDP socket.
+            udp = {port for proto, port in listening if proto == "udp"}
+            assert len(offered) == 4 and udp == offered, (offered, udp)
+        finally:
+            caller.close()
+            callee.close()

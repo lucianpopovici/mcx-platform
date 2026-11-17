@@ -1291,38 +1291,38 @@ VP1-FC-010:
     reached state, and asserts the table is covered. Add the full product over participant roles (holder,
     queued, other, none) and every timer name.'
 VP1-FC-011:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_floor.py::test_vp1_fc_011_invariant_is_enforced_not_assumed
-  - tests/test_floor.py::test_vp1_fc_011_single_holder_under_concurrent_requests
-  gap: 'Requests are sequential, run once, and every request has the same priority. There is no concurrency
-    or repetition, and no override or pre-emption path, although that path is where two talkers could
-    arise (a pre-emptor granted during the revoked holder''s T3 grace). The assertions check fc.holder
-    (a scalar, so two holders cannot be represented) and ''no one held twice'', which is a different property.
-    The invariant test corrupts the machine into ''no holder'', not ''two holders''. Nothing checks the
-    observable side: at most one outstanding Granted/permission on the wire, or at most one endpoint whose
-    media is forwarded. To close: a randomised or repeated contention test with mixed priorities and override
-    enabled. It asserts, after every event, that at most one participant has been sent Granted without
-    a later Revoke/Idle/Taken naming someone else, and that during pending revoke no one else is granted
-    before T3 ends or the release.'
+    - tests/test_floor.py::test_vp1_fc_011_at_most_one_participant_holds_permission_on_the_wire
+    - tests/test_floor.py::test_vp1_fc_011_invariant_is_enforced_not_assumed
+    - tests/test_floor.py::test_vp1_fc_011_single_holder_under_concurrent_requests
+    - tests/test_media.py::test_vp1_fc_011_media_from_at_most_one_participant_is_forwarded
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. 2 000 randomised floor-machine runs
+    (mixed priorities, override on and off, queue depths, timer expiries, revokes, leavers),
+    permission tracked as the wire tells it: from Floor Granted until release, leaving, Floor
+    Idle, T1 for the holder (TS 24.380 6.3.4.4.3) or T3 after a revoke. After every event at
+    most one holder, the machine's; handovers only by release, leaving, T1 or T3. 300 randomised
+    media-session runs: forwarded RTP comes from at most one participant, the holder. Reviewer
+    mutants (a pre-emptor granted without the T3 grace; T3 granting without idling) were killed.
 VP1-FC-012:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_floor.py::test_vp1_fc_012_equal_priority_breaks_by_arrival
-  - tests/test_floor.py::test_vp1_fc_012_grant_follows_queue_order
-  - tests/test_floor.py::test_vp1_fc_012_queue_ordered_by_floor_priority_not_arrival
-  gap: 'The priority ordering and the grant-by-priority-not-arrival clauses are asserted, but priorities
-    are injected directly into Event.floor_priority. Nothing traces the result to an IF-PRI decision,
-    which is the second clause. FC-OP-12 says that with the in-tree tables every participant gets the
-    same floor priority, so priority arbitration is never produced by IF-PRI in practice. To close: a
-    test through MediaSession/SessionManager with a priority hook returning distinct per-participant priorities
-    (and the audit record of that IF-PRI decision). It asserts that the granted participant is the one
-    IF-PRI ranked highest and that the recorded decision is what the grant used. The in-tree profile question
-    in FC-OP-12 also needs resolving.'
+    - tests/test_floor.py::test_vp1_fc_012_equal_priority_breaks_by_arrival
+    - tests/test_floor.py::test_vp1_fc_012_grant_follows_queue_order
+    - tests/test_floor.py::test_vp1_fc_012_queue_ordered_by_floor_priority_not_arrival
+    - tests/test_media_e2e.py::test_vp1_fc_012_floor_arbitration_follows_the_if_pri_decision_not_arrival
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. Verified as the owner ruled (FC-OP-12
+    kept, 2026-10-28): end to end, a substituted hook ranks u1 50 < u3 120 < u2 200 (caller
+    100); they ask in the order u1, u2, u3, each queued before the next asks, and are granted
+    u2, u3, u1. The IF-PRI decisions [50, 200, 120] are read from the audit trail, and the
+    floor's transition records carry those priorities. A mutant ordering the queue by arrival
+    was killed.
 VP1-FC-013:
   verdict: pass
   by: independent review (agent)
@@ -1344,21 +1344,21 @@ VP1-FC-014:
   - tests/test_floor.py::test_vp1_fc_014_with_override_only_a_pre_emptor_is_held
   note: 'Re-reviewed after RES-OP-10 (case amended on the owner''s ruling): queueing disabled, an ordinary request is denied with no queue entry; with override allowed a pre-emptor is held in the one front place (6.3.4.4.7 item 2e, FC-OP-07), the talker revoked, with no Deny; any other request while it is held is denied (6.3.5.4.4 items 6 and 7).'
 VP1-FC-020:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_floor.py::test_vp1_fc_020_timer_values_follow_the_profile
-  - tests/test_floor.py::test_vp1_fc_020_transition_sequence_identical_across_timer_values
-  gap: 'Only T2''s start duration is checked (T20 and T8 values in the same policies are never observed),
-    and no timer is let expire, so ''observed timing'' is not observed. The transition-identity test uses
-    a scenario with no timer expiry at all, so its sequence cannot depend on timer values and the comparison
-    is vacuous for the property. Its policies also differ only in T2. Neither test loads profiles: both
-    use hand-built Policy objects, where the step says to load two profiles. To close: load two profiles
-    (or Policy.from_hook of two loaded profiles) differing only in timer values. Drive a scenario where
-    T1, T2, T3, T8 and T20 each start and expire, advancing the injected clock by each profile''s values.
-    Assert that expiry happens at each profile''s value (not before) and that the (from, event, to, actions-type)
-    sequences are equal.'
+    - tests/test_floor.py::test_vp1_fc_020_timer_values_follow_the_profile
+    - tests/test_floor.py::test_vp1_fc_020_transition_sequence_identical_across_timer_values
+    - tests/test_floor.py::test_vp1_fc_020_two_loaded_profiles_differ_only_in_timing
+    - tests/test_media.py::test_silence_ends_the_burst_on_t1
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. Two copies of the mcx package
+    differing only in the prearranged-group timers, loaded, the floor policy taken from the
+    session hook, driven through the media plane's tick: T1, T2, T3, T8 and T20 each start with
+    the profile's duration, do not run out a millisecond before the instant computed from the
+    profile's value, and run out at it; the transitions are identical in both. Early and late
+    tick mutants were killed.
 VP1-FC-021:
   verdict: pass
   by: independent review (agent)
@@ -1434,34 +1434,36 @@ VP1-MED-004:
     Not covered: a queued pre-emptor during the revoked holder''s grace, where media is correctly still
     the old holder''s.'
 VP1-DOC-001:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_service.py::test_vp1_doc_001_group_document_matches_configuration
-  - tests/test_service.py::test_vp1_doc_001_group_document_over_real_process
-  gap: '(1) ''Schema-valid'' is not in the evidence: check_rendered is structural only. test_group_schema.py::test_the_group_document_is_schema_valid
-    does XSD validation but is not listed and validates a synthetic group, not the served document. (2)
-    ''Over HTTP per TS 24.481'': it is served at a custom path /docs/groups/<id>, not an XCAP URI (org.openmobilealliance.groups
-    AUID, RFC 4825), and nothing asserts XCAP addressing. (3) Content matching covers the id and member
-    URIs of one group; display-name (''Alpha team'') is not compared with the network profile. To close:
-    fetch every group of a multi-group network profile from the running process, XSD-validate each served
-    body, compare id, display-name and members with the network profile, and either use TS 24.481 XCAP
-    URIs or record the path as a deviation.'
+    - tests/test_group_schema.py::test_the_group_document_is_schema_valid
+    - tests/test_service.py::test_vp1_doc_001_every_group_served_at_its_xcap_uri_is_valid_and_matches
+    - tests/test_service.py::test_vp1_doc_001_group_document_matches_configuration
+    - tests/test_service.py::test_vp1_doc_001_group_document_over_real_process
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. The real process, a network profile
+    with three groups (one display name with XML-special characters): each served at its TS
+    24.481 7.2.10.2 address (global tree, byGroupID, named by the group ID), XSD-valid against
+    the OMA schema set, with exactly the profile's id, display-name and members in order;
+    /docs/groups serves the same bytes; unknown is 404 at both. Serving at the TS 24.481 address
+    was added for this case. Open: no ETag, node selectors or per-document authorisation
+    (SVC-OP-09).
 VP1-OAM-001:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_session.py::test_vp1_oam_001_profile_identity_on_every_record
-  gap: 'The evidence is ENV-UNIT with a MemorySink, and it is circular: the fixture builds Auditor with
-    mcx.profile.identifier() and then asserts that records carry it. Not asserted: the release and the
-    network profile''s name/version/hash on each record; the triple logged at start; and the values matching
-    the health endpoint. The identifier also carries only a 16-char hash prefix. To close: in ENV-INT,
-    start the process, read the startup log line, /healthz (profile and network) and every audit record
-    in the store after a call, and assert that all three name the same profile name, version and hash,
-    the release, and the network name, version and hash. test_vp1_oam_003 already checks release and network
-    on store records and could be extended.'
+    - tests/test_service.py::test_vp1_oam_003_admission_refusal_establishment_release_audited
+    - tests/test_session.py::test_vp1_oam_001_profile_identity_on_every_record
+    - tests/test_sip_transport.py::test_vp1_oam_001_log_health_and_every_record_name_the_same_triples
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. The real process: its startup log
+    lines, /healthz and every audit record it stored for a call (refused by the fail-closed
+    recorder) name the same profile name, version and hash (the hash checked against loading the
+    package independently), the release and the network's name, version and hash; records carry
+    <profile>+Rel-19+<network>+test, the 16-character prefixes being ICD-NET-002's design.
 VP1-OAM-002:
   verdict: pass
   by: independent review (agent)
@@ -1475,17 +1477,17 @@ VP1-OAM-002:
     until set_ready, Health without a profile is never ready, and __main__ binds no socket before the
     profile is validated and loaded. The hash is not compared with an independently computed profile hash.
 VP1-OAM-003:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_service.py::test_vp1_oam_003_admission_refusal_establishment_release_audited
-  gap: 'The ''refusal'' exercised is an unknown target. It produces a session-failed record (reason_code
-    unknown-target), not a session-refused record; I checked this by running it. The test accepts either
-    type, so it would still pass if session-refused records were never written. Admission, establishment
-    and release are asserted. To close: in the same test, provoke an admission refusal (e.g. recording-unavailable
-    via the default fail-closed platform, or a capacity refusal) and assert a ''session-refused'' record
-    whose detail.reason_code equals the refusal''s reason code.'
+    - tests/test_service.py::test_vp1_oam_003_admission_refusal_establishment_release_audited
+    - tests/test_sip_transport.py::test_vp1_sig_005_every_final_failure_leaves_no_session_state
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. Exact session-* record sequences for
+    a success (admitted, established, released), an admission refusal by IF-SES.authorise
+    (session-refused, call-type-not-permitted) and a failure (session-failed, unknown-target);
+    over the wire, the SIG-005 table pins the refused and failed records of each failure path.
 VP1-OAM-004:
   verdict: pass
   by: independent review (agent)
@@ -1522,23 +1524,27 @@ VP1-OAM-005:
     recorded but not marked, and a start stopped between record and row, are finished once
     without a second record.
 VP1-SIG-002:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_sip.py::test_vp1_sig_002_registration_expires
-  - tests/test_sip.py::test_vp1_sig_002_registration_state_per_service_id
-  - tests/test_sip.py::test_vp1_sig_002_reregistration_refreshes
-  gap: 'Suite is ENV-INT, but all three tests are ENV-UNIT calls on RegistrationStore; no REGISTER goes
-    through SipCore/TLS, so third-party registration is never exercised. Missing clauses: (a) per-ID independence:
-    nothing shows that expiry or re-registration of u0 leaves u1 unchanged; (b) ''correct after re-registration'':
-    only is_registered is checked, never that a re-REGISTER with a new Contact replaces the binding (get()
-    contact) or that a shorter Expires shortens it; (c) after expiry only get()/is_registered are checked,
-    not registered_ids(). To close: a SipCore test that REGISTERs u0 and u1 over the fixture flows, re-REGISTERs
-    u0 with a new Contact and Expires, advances the clock past u0''s expiry, and asserts core.registrations
-    bindings (contact, expiry, registered_ids) for both IDs at each step.'
-  note: 'The store logic is correct as far as tested: refresh would fail at t=1400 without re-registration,
-    and a single-slot store would fail the per-ID test.'
+    - tests/test_alias_subscription.py::test_no_notify_goes_to_a_connection_whose_registration_has_expired
+    - tests/test_sip.py::test_vp1_sig_002_registration_expires
+    - tests/test_sip.py::test_vp1_sig_002_registration_state_per_service_id
+    - tests/test_sip.py::test_vp1_sig_002_reregistration_refreshes
+    - tests/test_sip_transport.py::test_a_trusted_core_may_assert_any_identity
+    - tests/test_sip_transport.py::test_vp1_sig_002_expires_zero_removes_only_that_id
+    - tests/test_sip_transport.py::test_vp1_sig_002_one_core_connection_two_users_one_expires
+    - tests/test_sip_transport.py::test_vp1_sig_002_registration_state_per_service_id_through_the_core
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. REGISTER through the SIP core:
+    contact and expiry asserted per MC service ID at each step; a re-registration replaces the
+    contact and shortens the expiry; at the new expiry only that ID is gone and an INVITE to it
+    gets 480. Two users registered by a trusted core on one connection: one expires, gets 480
+    with no leg, the other is still called on that connection. Expires 0 removes one ID. Taking
+    the case through the core found a defect, fixed: an expired registration was still routed to
+    while its connection stayed open (RFC 3261 10.3); both call sites (INVITE legs, NOTIFY) are
+    tested. Open: a caller with an expired registration can still originate (SIP-OP-21).
 VP1-SIG-003:
   verdict: partial
   by: independent review (agent)
@@ -1555,58 +1561,64 @@ VP1-SIG-003:
     request and response.'
   note: The Accept-Contact require/explicit check covers the INVITE only.
 VP1-SIG-004:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_sip.py::test_vp1_sig_004_body_without_content_type_is_400
-  - tests/test_sip.py::test_vp1_sig_004_malformed_cseq_is_400
-  - tests/test_sip.py::test_vp1_sig_004_missing_mandatory_header_is_400
-  - tests/test_sip.py::test_vp1_sig_004_replay_is_rejected
-  - tests/test_sip.py::test_vp1_sig_004_unknown_session_is_481
-  gap: '(1) The status codes are asserted, but no test ties them to TS 24.379 (482 for a ''replay'' is
-    RFC 3261 8.2.2.2''s merged-request code; no TS 24.379 clause is cited, and 400 for missing Content-Type
-    is not traced either). (2) The tests are ENV-UNIT on InboundGuard alone, while the suite is ENV-INT.
-    In the integrated path (service/sip_core.py) the transaction layer absorbs a same-branch retransmission
-    before the guard, so the replay test''s scenario (identical branch) never reaches the guard in production.
-    No test sends a replay with a new branch through SipCore. (3) Only an unknown-session BYE is tested;
-    ACK, INFO and UPDATE are also guarded and are not. To close: SipCore/TLS tests that send each malformed
-    variant, a replay with the same Call-ID and CSeq but a new branch, and unknown-session BYE, UPDATE
-    and ACK, asserting the wire status equals a value cited from a TS 24.379 clause.'
-  note: Malformed cases are well parametrised (five mandatory headers, each with its Warning).
+    - tests/test_sip.py::test_vp1_sig_004_body_without_content_type_is_400
+    - tests/test_sip.py::test_vp1_sig_004_malformed_cseq_is_400
+    - tests/test_sip.py::test_vp1_sig_004_missing_mandatory_header_is_400
+    - tests/test_sip.py::test_vp1_sig_004_replay_is_rejected
+    - tests/test_sip.py::test_vp1_sig_004_unknown_session_is_481
+    - tests/test_sip_transport.py::test_vp1_sig_004_a_replay_in_a_new_transaction_is_482_through_the_core
+    - tests/test_sip_transport.py::test_vp1_sig_004_an_unknown_session_ack_gets_no_response_and_changes_nothing
+    - tests/test_sip_transport.py::test_vp1_sig_004_an_unknown_session_request_is_481_through_the_core
+    - tests/test_sip_transport.py::test_vp1_sig_004_each_malformed_request_is_400_through_the_core
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. Through the core: six malformed
+    variants each give 400, a replay under a new branch 482, BYE/UPDATE/INFO for no dialog 481,
+    an unknown ACK no response. TS 24.379 states none of these codes itself; clause 5.3 makes
+    the server a routing B2BUA per TS 24.229, so RFC 3261's codes apply (21.4.1, 12.2.2,
+    8.2.2.2, 17.2.3): the reading is recorded in the plan as SIP-OP-23. The replay key is
+    stricter than RFC 3261's merged request (SIP-OP-22, low).
 VP1-SIG-005:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_sip_transport.py::test_vp1_sig_005_callee_declines_leaves_no_session_state
-  - tests/test_sip_transport.py::test_vp1_sig_005_callee_timeout_leaves_no_session_state
-  - tests/test_sip_transport.py::test_vp1_sig_005_refusal_leaves_no_session_state
-  - tests/test_sip_transport.py::test_vp1_sig_005_unregistered_callee_leaves_no_session_state
-  gap: '''Each final failure response'' is covered for 486 (relayed decline), 503 (refusal), 480 (unregistered)
-    and 480 (Timer B timeout) only. Not covered: 487 after CANCEL, 488 (no common codec), 422 (Session-Expires
-    too small), 404/403 hook refusals with Warning, 400 from InboundGuard or SipError, 500 fault path,
-    and a group call whose every leg fails. To close: parametrise the assert_no_session_state inspection
-    over every final failure status service/sip_core.py can emit (including CANCEL→487 and 488), plus
-    a group call where every leg declines.'
-  note: 'Direct inspection is real: store, sessions(), manager, core.calls and _dialogs are all checked.'
+    - tests/test_sip_transport.py::test_group_call_survives_one_decline_and_fails_only_when_all_do
+    - tests/test_sip_transport.py::test_vp1_sig_005_callee_declines_leaves_no_session_state
+    - tests/test_sip_transport.py::test_vp1_sig_005_callee_timeout_leaves_no_session_state
+    - tests/test_sip_transport.py::test_vp1_sig_005_every_final_failure_leaves_no_session_state
+    - tests/test_sip_transport.py::test_vp1_sig_005_refusal_leaves_no_session_state
+    - tests/test_sip_transport.py::test_vp1_sig_005_unregistered_callee_leaves_no_session_state
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. Thirteen provocations of every
+    INVITE-path final failure the core sends an initiator (487 after CANCEL, 488 no profile
+    codec, 422, 404, 403, 400, 500 on a hook fault, callee 404/486/488/500, callee 603 relayed
+    as 480, every group member declining), with the earlier 486, 503, unregistered-callee 480
+    and timeout 480: each inspected directly (store, session manager, core calls and dialogs),
+    nothing left, and the last audit record pinned. Statuses the table leaves out (406, 423,
+    489, 491, 501) are on non-INVITE or in-dialog paths and end no session.
 VP1-SIG-006:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_sip_transport.py::test_vp1_sig_006_client_with_untrusted_certificate_is_refused
-  - tests/test_sip_transport.py::test_vp1_sig_006_client_without_certificate_is_refused_when_required
-  - tests/test_sip_transport.py::test_vp1_sig_006_mutual_authentication_is_performed
-  - tests/test_sip_transport.py::test_vp1_sig_006_plaintext_is_refused_and_counted
-  gap: '''Every external interface'' is not shown. Only the SIP TlsListener is tested. The HTTP surface
-    (service/http.py: /healthz, /readyz and the TS 24.481 /docs/groups document server) is a plain ThreadingHTTPServer
-    with no TLS, and tests/test_service.py fetches from it over http://. The code therefore looks like
-    it breaks the criterion on that interface, not just leaves it unevidenced. The media/floor UDP sockets
-    are not addressed either. To close: plaintext and mutual-TLS refusal tests for every listening socket
-    the process opens (enumerate them from the spawned process), which would fail today for HTTP.'
-  note: 'The SIP listener evidence is solid: plaintext gets no bytes back and is counted, missing and
-    untrusted client certificates are refused, and mutual auth is counted.'
+    - tests/test_sip_transport.py::test_vp1_sig_006_client_with_untrusted_certificate_is_refused
+    - tests/test_sip_transport.py::test_vp1_sig_006_client_without_certificate_is_refused_when_required
+    - tests/test_sip_transport.py::test_vp1_sig_006_during_a_call_the_only_new_sockets_are_its_media_ports
+    - tests/test_sip_transport.py::test_vp1_sig_006_every_listening_socket_of_the_process_refuses_plaintext
+    - tests/test_sip_transport.py::test_vp1_sig_006_mutual_authentication_is_performed
+    - tests/test_sip_transport.py::test_vp1_sig_006_plaintext_is_refused_and_counted
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. The real process, SIP over TLS and
+    HTTPS both requiring a client certificate: its listening sockets read from /proc are exactly
+    the two TCP ports at idle; on each, plaintext gets not a byte, no certificate and an
+    untrusted one are refused, mutual TLS works. During a live call the TCP listeners are
+    unchanged and the UDP sockets are exactly the four relay ports offered in the call's SDPs.
+    Deviations recorded by the owner: RES-OP-05 (MCX_HTTP_TLS=off) and SEC-OP-01 (per-call RTP
+    and floor-control UDP plain until SRTP/SRTCP, PLT-MED-004, R2).
 VP1-SIG-007:
   verdict: pass
   by: independent review (agent)
@@ -1638,21 +1650,22 @@ VP1-SIG-007:
     identity provider, so a production deployment cannot start in R1 and the stub recorder and
     bearer refusals stay unreachable (SVC-OP-05).
 VP1-CC-001:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_sip_transport.py::test_vp1_cc_001_audit_names_the_controlling_function
-  - tests/test_sip_transport.py::test_vp1_cc_001_roles_are_declared_and_separately_named
-  gap: 'SIP-OP-03 (§11): the participating role alone is refused, so the roles are not ''deployable as
-    distinct roles''. The roles test uses the controlling-only set. The audit test is vacuous-prone: it
-    loops over records and asserts only when the type is session-admitted or session-established, with
-    no assertion that such records exist. Probed today, they do exist, but deleting them would still pass.
-    Only one session, and only those two record types, are checked. To close: assert that session-admitted
-    and session-established records exist and that every record of the session names controlling_function.
-    Once SIP-OP-03 is resolved, deploy participating-only and controlling-only instances separately and
-    show a call crossing them.'
-  note: ENV-E2E is required, but both tests are in-process.
+    - tests/test_sip_transport.py::test_an_unknown_role_is_refused_by_name
+    - tests/test_sip_transport.py::test_participating_only_is_refused_not_faked
+    - tests/test_sip_transport.py::test_sip_enabled_requires_every_security_setting
+    - tests/test_sip_transport.py::test_vp1_cc_001_audit_names_the_controlling_function
+    - tests/test_sip_transport.py::test_vp1_cc_001_roles_are_declared_and_separately_named
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. Against the row as amended by the
+    owner (2026-10-28; independent deployment and MCPTT-4 are R2, SIP-OP-03): MCX_SIP_ROLES is
+    required with no default, an unknown role is refused by name, participating alone is
+    refused; a combined-deployment call's admitted and established records each name both
+    functions, once each, as exact lists; a controlling-only deployment names only the
+    controlling function.
 VP1-CC-002:
   verdict: partial
   by: independent review (agent)
@@ -1738,18 +1751,18 @@ VP1-CC-006:
     owner's ruling. The one place the core reads the table's limit, the ad hoc step-6 list
     check, is an exception the ICD names.
 VP1-CC-007:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-17'
   evidence:
-  - tests/test_session.py::test_vp1_cc_007_one_priority_decision_per_session
-  gap: 'Only ''unchanged'' is touched, and weakly: `session.priority is first` passes if priority is None
-    (no decision taken). The test does not assert that exactly one IF-PRI evaluate happens per session,
-    that it happens at admission, or that the decision survives the session''s lifetime events (floor,
-    re-INVITE, pre-emption, member join or leave); the only intervening event is establishing another
-    session. To close: assert that priority is a PriorityDecision after admission, count IF-PRI evaluate
-    hook-invocation audit records per session == 1 before session-admitted, then drive floor exchange,
-    a re-INVITE and a pre-emption attempt and re-assert identity and a count of 1.'
+    - tests/test_media_e2e.py::test_vp1_cc_007_one_decision_taken_at_admission_kept_for_the_session
+    - tests/test_session.py::test_vp1_cc_007_one_priority_decision_per_session
+  note: >-
+    Batch A, 2026-11-17. Closes the partial of 2026-09-28. End to end with real UDP floor
+    control: one PriorityDecision, from exactly one IF-PRI evaluation before admission; the same
+    object and values after floor contention, a re-INVITE, a pre-emption check against it and
+    release. Later evaluations are other participants' floor priorities (FC-OP-12), after
+    establishment. A mutant replacing the decision with an equal copy on re-INVITE was killed.
 VP1-REL-001:
   verdict: pass
   by: independent review (agent)

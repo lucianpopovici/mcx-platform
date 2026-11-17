@@ -464,21 +464,30 @@ def test_socket_not_bound_when_startup_refuses(env):
 # -- VP1-OAM-003: lifecycle audited, durably ------------------------------------
 
 
+@pytest.mark.vp("VP1-OAM-001")
 def test_vp1_oam_003_admission_refusal_establishment_release_audited(env):
     rt = build_runtime(env, Clock(), platform=permissive())
     try:
         session, signals, refusal = rt.establish(req("ok"))
         assert session is not None and refusal is None
-        _, _, refused = rt.establish(req("bad", target="grp:nobody"))
-        assert refused is not None
+        _, _, failed_target = rt.establish(req("bad", target="grp:nobody"))
+        assert failed_target.reason_code == "unknown-target"
+        # A refusal by admission's own hooks: a call type this profile does not
+        # declare (IF-SES.authorise refuses it).
+        _, _, refused = rt.establish(req("no", call_type="no-such-call-type"))
+        assert refused.reason_code == "call-type-not-permitted"
         rt.release("ok")
 
         ok = [r["type"] for r in rt.store.audit_records("ok")]
-        assert "session-admitted" in ok and "session-established" in ok
-        assert ok[-1] == "session-released"
-        bad = rt.store.audit_records("bad")
-        failed = [r for r in bad if r["type"] in ("session-refused", "session-failed")]
-        assert failed and failed[0]["detail"]["reason_code"] == refused.reason_code
+        assert [t for t in ok if t.startswith("session-")] == [
+            "session-admitted", "session-established", "session-released"]
+        # A target that does not resolve fails the session; it is not a refusal.
+        bad = [(r["type"], r["detail"].get("reason_code"))
+               for r in rt.store.audit_records("bad") if r["type"].startswith("session-")]
+        assert bad == [("session-failed", "unknown-target")]
+        no = [(r["type"], r["detail"].get("reason_code"))
+              for r in rt.store.audit_records("no") if r["type"].startswith("session-")]
+        assert no == [("session-refused", "call-type-not-permitted")]
         # PLT-OAM-001 + PLT-REL-005: the record names the profile AND the
         # release. Either alone leaves an unanswerable question months later
         # -- the same profile at two releases does not put the same bytes on
@@ -1235,3 +1244,47 @@ def test_vp1_load_030_a_rejected_profile_means_no_process_and_no_socket(env, tmp
     assert (status, listened, answered) == (2, False, False)
     assert len(messages) == 1 and messages[0].startswith("startup refused: profile 'mcx' is invalid.")
     assert "call_types[0].colour" in messages[0]
+
+
+_THREE_GROUPS = [
+    {"id": "grp:alpha", "display_name": "Alpha team", "members": U},
+    {"id": "sip:bravo@mcptt.example", "display_name": "Bravo & co <night shift>",
+     "members": [U[2], U[0]]},
+    {"id": "grp:charlie", "display_name": "Charlie", "members": [U[3]]},
+]
+
+
+@pytest.mark.vp("VP1-DOC-001")
+def test_vp1_doc_001_every_group_served_at_its_xcap_uri_is_valid_and_matches(env):
+    """The real process, a network profile with three groups: each is served
+    at its TS 24.481 7.2.10.2 address (the global tree's byGroupID
+    subdirectory, named by the group ID), validates against the OMA schema
+    set in docs/OMA, and carries exactly the network profile's id,
+    display-name and members, in order. The /docs/groups path serves the same
+    bytes. An unknown group is 404 at both."""
+    from urllib.parse import quote
+    from lxml import etree as lx
+    from tests.test_group_schema import LOCAL_SCHEMAS, _parser, _schema_path
+    schema = lx.XMLSchema(lx.parse(
+        str(_schema_path(LOCAL_SCHEMAS["urn:oma:xml:poc:list-service"])), _parser()))
+    e = with_network(env, "three-groups.yaml", groups=_THREE_GROUPS)
+    ns = "{urn:oma:xml:poc:list-service}"
+    port = free_port()
+    proc = spawn(e, port)
+    try:
+        wait_ready(port, proc)
+        for g in _THREE_GROUPS:
+            xcap = f"/org.openmobilealliance.groups/global/byGroupID/{quote(g['id'], safe='')}"
+            status, body, ctype = get(port, xcap)
+            assert (status, ctype) == (200, groups_mod.MEDIA_TYPE), g["id"]
+            doc = lx.fromstring(body)
+            assert schema.validate(doc), (g["id"], schema.error_log)
+            service = doc.find(ns + "list-service")
+            assert service.get("uri") == g["id"]
+            assert service.findtext(ns + "display-name") == g["display_name"]
+            assert [x.get("uri") for x in service.iter(ns + "entry")] == list(g["members"])
+            assert get(port, f"/docs/groups/{quote(g['id'], safe='')}")[1] == body
+        assert get(port, "/org.openmobilealliance.groups/global/byGroupID/grp%3Anone")[0] == 404
+        assert get(port, "/docs/groups/grp%3Anone")[0] == 404
+    finally:
+        stop(proc)

@@ -33,6 +33,10 @@ REFERENCE_POINT = "HTTP-1"
 log = logging.getLogger("mcx.http")
 
 GROUPS_PREFIX = "/docs/groups"
+# TS 24.481 7.2.10.2: a group document addressed by its group ID is in the
+# global tree of the AUID (7.2.3), in the subdirectory "byGroupID", named by
+# the group ID. The XCAP root is this server's root.
+XCAP_BY_GROUP_ID = "/org.openmobilealliance.groups/global/byGroupID/"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -67,6 +71,13 @@ class Handler(BaseHTTPRequestHandler):
             snap = rt.health.snapshot()
             return self._json(200 if snap["ready"] else 503,
                               {"ready": snap["ready"]})
+        if path.startswith(XCAP_BY_GROUP_ID) and len(path) > len(XCAP_BY_GROUP_ID):
+            if not rt.health.ready:
+                return self._json(503, {"error": "not-ready"})
+            group = rt.groups.get(unquote(path[len(XCAP_BY_GROUP_ID):]))
+            if group is None:
+                return self._json(404, {"error": "unknown-group"})
+            return self._send(200, render(group), MEDIA_TYPE)
         if path == GROUPS_PREFIX or path.startswith(GROUPS_PREFIX + "/"):
             if not rt.health.ready:
                 return self._json(503, {"error": "not-ready"})
