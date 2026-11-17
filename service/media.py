@@ -181,6 +181,34 @@ class MediaSession:
         # the current state, or it would never hear Taken/Idle.
         self.sync_to(uri)
 
+    def remove(self, uri: str) -> None:
+        """A participant left the call while it goes on (SIP-OP-24): its relay
+        endpoint is closed, so nothing it sends is forwarded and nothing is
+        sent to it, and the floor is told -- if it held the floor the floor
+        moves on, and it leaves the queue (TS 24.380 6.3.4.3.x, 'participant
+        leaves'). Removing one that is not here does nothing."""
+        ep = self.endpoints.pop(uri, None)
+        if ep is None:
+            return
+        ep.io.close()
+        if self.closed:
+            return
+        # A departure is a fact the audit cannot veto: with
+        # MCX_FLOOR_UNRECORDED=deny an unrecordable transition is undone, which
+        # would keep the leaver on the floor and fault the caller (review of
+        # SIP-OP-24). Final, as the session's own release is (_final_floor).
+        event = fl.Event(fl.EventType.PARTICIPANT_LEFT, participant=uri)
+        try:
+            actions = self.floor.handle(event, final=True)
+        except Exception:                                   # noqa: BLE001
+            log.exception("media %s: %s left; the floor transition was not "
+                          "recorded, it stands", self.cid, uri)
+            # The transition stands (final), so the others are told what it
+            # did -- the floor idle, or the next in the queue granted.
+            last = self.floor.history[-1] if self.floor.history else None
+            actions = last.actions if last is not None and last.event is event else ()
+        self.apply(actions)
+
     def close(self) -> None:
         self.closed = True
         for ep in self.endpoints.values():

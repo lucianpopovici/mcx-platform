@@ -70,7 +70,8 @@ def test_the_value_is_reported_and_allow_is_a_deviation(tmp_path, value):
                 "a caller outside the profile's declared domains, as a trusted SIP "
                 "core may assert, is served, including a partner system's users, whose "
                 "priority is then not capped by its interconnection rules (there is no "
-                "inbound IF-ICX path); such a caller still cannot register here")
+                "inbound IF-ICX path); such a caller still cannot register here, and is "
+                "not asked for an in-date registration to originate (SIP-OP-21)")
         assert r.manager._foreign_initiator == value
     finally:
         r.close()

@@ -63,7 +63,7 @@ def _plain_env(tmp_path, **over):
            "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
            "MCX_DATA_DIR": str(tmp_path / "data"), "MCX_HTTP_PORT": "0",
            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
-           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ARP_VULNERABILITY_CHECK": "true",
+           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_GROUP_INITIATOR_LEAVES": "release", "MCX_ARP_VULNERABILITY_CHECK": "true",
            "MCX_ENV": "test"}
     env.update(over)
     return {k: v for k, v in env.items() if v is not None}
@@ -150,13 +150,14 @@ def test_the_adapter_refuses_a_status_it_has_no_mapping_for():
 def test_the_process_answers_capacity_with_the_stated_status(tmp_path, pki, clock):
     from core.session import Platform
     from service.sip_core import SipCore
-    from tests.test_sip_transport import invite
+    from tests.test_sip_transport import invite, register
     env = sip_env(tmp_path, pki, MCX_SERVICE_REFUSAL_STATUS="480",
                   MCX_RECORDER="none")
     r = build_runtime(env, clock, platform=Platform(recording_available=lambda: False))
     c = SipCore(r, LOCAL, clock)
     try:
         f = Flow(U[0])
+        register(c, U[0], f)                       # SIP-OP-21
         c.on_bytes(invite("cap1", U[0], "grp:alpha", "prearranged-group"), f)
         assert f.codes()[-1] == 480
         last = [m for m in f.messages() if hasattr(m, "code")][-1]

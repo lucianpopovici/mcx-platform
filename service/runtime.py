@@ -269,6 +269,7 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
     settings: dict = {"MCX_HTTP_TLS": "off" if config.http_tls is None else "on",
                       "MCX_FLOOR_UNRECORDED": config.floor_unrecorded,
                       "MCX_FOREIGN_INITIATOR": config.foreign_initiator,
+                      "MCX_GROUP_INITIATOR_LEAVES": config.group_initiator_leaves,
                       "MCX_ARP_VULNERABILITY_CHECK": config.arp_both_flags,
                       "MCX_ADHOC_LIST_ENTRIES": config.adhoc_list_entries}
     if config.http_tls is not None:
@@ -283,7 +284,9 @@ def behaviour_settings(config: Config, loaded: LoadedProfile) -> Tuple[dict, lis
                            "trusted SIP core may assert, is served, including a "
                            "partner system's users, whose priority is then not capped "
                            "by its interconnection rules (there is no inbound IF-ICX "
-                           "path); such a caller still cannot register here"})
+                           "path); such a caller still cannot register here, and is "
+                           "not asked for an in-date registration to originate "
+                           "(SIP-OP-21)"})
     if config.arp_both_flags == "false":
         deviations.append({
             "setting": "MCX_ARP_VULNERABILITY_CHECK", "value": "false", "ref": "ICD-OP-14",

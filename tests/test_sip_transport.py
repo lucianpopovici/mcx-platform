@@ -203,7 +203,7 @@ def sip_env(tmp_path, pki, **over):
            "MCX_SIP_ROLES": "controlling,participating",
            "MCX_SESSION_EXPIRES_MS": "1800000",
            "MCX_HTTP_TLS": "off", "MCX_FLOOR_UNRECORDED": "deny",
-           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_ARP_VULNERABILITY_CHECK": "true", "MCX_ENV": "test",
+           "MCX_FOREIGN_INITIATOR": "refuse", "MCX_GROUP_INITIATOR_LEAVES": "release", "MCX_ARP_VULNERABILITY_CHECK": "true", "MCX_ENV": "test",
            "MCX_SERVICE_REFUSAL_STATUS": "503", "MCX_DIALOG_TAKEOVER": "same-party",
            "MCX_LOCATION_REPORTS": "read",
            "MCX_MEDIA_ADDRESS": "127.0.0.1", "MCX_MEDIA_PORTS": "0"}
@@ -520,6 +520,7 @@ def test_a_caller_not_in_the_directory_is_admitted(core, rt, world):
     checked, so an authenticated caller the network profile does not list
     may call a user it does list; the reverse is refused (above)."""
     f = Flow(UNLISTED)
+    register(core, UNLISTED, f)                    # registered, but not listed
     core.on_bytes(invite("op05b", UNLISTED, U[1], "private"), f)
     assert len(world[U[1]].requests("INVITE")) == 1
     assert [r["type"] for r in rt.store.audit_records("op05b")
@@ -533,6 +534,7 @@ def test_a_non_member_cannot_start_a_group_call(core, rt, world, call_type):
     6.3.5.2 step 5b, 403 "116 user is not part of the MCPTT group", before
     anyone is invited. Here the caller is not listed at all."""
     f = Flow(UNLISTED)
+    register(core, UNLISTED, f)                    # registered, but not listed
     core.on_bytes(invite("op07", UNLISTED, "grp:alpha", call_type), f)
     refusal = f.messages()[-1]
     assert (refusal.code, refusal.headers.get("Warning")) == (
@@ -882,6 +884,8 @@ def test_vp1_sig_005_refusal_leaves_no_session_state(env, clock):
     try:
         core = SipCore(rt, LOCAL, clock)
         f = Flow(U[0])
+        register(core, U[0], f)                    # SIP-OP-21: callers register
+        f.sent.clear()
         core.on_bytes(invite("f2", U[0], U[1], "private"), f)
         assert f.codes() == [100, 503]
         assert_no_session_state(core, rt, "f2")
@@ -891,6 +895,8 @@ def test_vp1_sig_005_refusal_leaves_no_session_state(env, clock):
 
 def test_vp1_sig_005_unregistered_callee_leaves_no_session_state(core, rt):
     f = Flow(U[0])
+    register(core, U[0], f)                        # the caller is; the callee is not
+    f.sent.clear()
     core.on_bytes(invite("f3", U[0], U[1], "private"), f)
     assert f.codes() == [100, 480]
     assert_no_session_state(core, rt, "f3")
@@ -2746,3 +2752,210 @@ def test_vp1_sig_006_during_a_call_the_only_new_sockets_are_its_media_ports(tmp_
         finally:
             caller.close()
             callee.close()
+
+
+# ============================================================ SIP-OP-21
+#
+# Owner decision 2026-11-17: originating needs an in-date registration.
+# TS 24.379 10.1.1.3.1.1 step 2a (and the same step of every originating
+# INVITE procedure): no binding of the public user identity to an MCPTT ID,
+# or its validity period expired -> 404, "141 user unknown to the
+# participating function".
+
+_UNKNOWN_141 = '399 mcptt.example "141 user unknown to the participating function"'
+
+
+def _refused_141(flow):
+    last = flow.messages()[-1]
+    return (last.code, last.headers.get("Warning")) == (404, _UNKNOWN_141)
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_an_authenticated_caller_who_never_registered_cannot_originate(core, rt):
+    """The connection proves who the caller is; it is not a binding. Nobody
+    is invited and nothing reaches the session manager."""
+    caller, callee = Flow(U[0]), Flow(U[1])
+    register(core, U[1], callee)
+    callee.sent.clear()
+    core.on_bytes(invite("o21a", U[0], U[1], "private"), caller)
+    assert caller.codes() == [404] and _refused_141(caller)
+    assert callee.requests("INVITE") == []
+    assert rt.store.audit_records("o21a") == [] and rt.store.sessions() == []
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_caller_whose_registration_expired_cannot_originate_until_it_registers(
+        core, rt, world, clock):
+    """u0 registers for 60 s; past that it is refused 141, on the very
+    connection it registered on; registered again, it calls."""
+    t0 = clock.now
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r-u0", 9, U[0], U[0],
+                      extra=[f"Contact: <{U[0]}>", "Expires: 60"]), world[U[0]])
+    world[U[0]].sent.clear()
+    clock.now = t0 + 60_000
+    core.on_bytes(invite("o21b", U[0], U[1], "private"), world[U[0]])
+    assert world[U[0]].codes() == [404] and _refused_141(world[U[0]])
+    assert world[U[1]].requests("INVITE") == []
+    assert rt.store.audit_records("o21b") == []
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r-u0", 10, U[0], U[0],
+                      extra=[f"Contact: <{U[0]}>", "Expires: 60"]), world[U[0]])
+    core.on_bytes(invite("o21c", U[0], U[1], "private"), world[U[0]])
+    assert len(world[U[1]].requests("INVITE")) == 1
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_controlling_only_deployment_does_not_ask_for_a_registration(tmp_path, pki,
+                                                                       clock):
+    """The binding is the participating function's to check; a deployment
+    that hosts only the controlling role has none of its own, and the call
+    arrives from the caller's participating function (a trusted core here)."""
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_SIP_ROLES="controlling"), clock,
+                       platform=Platform())
+    core = SipCore(rt, LOCAL, clock)
+    try:
+        trunk = Flow("core", uris=(), dns=("core-client.example",), core=True)
+        callee = Flow(U[1])
+        register(core, U[1], callee)
+        callee.sent.clear()
+        core.on_bytes(invite("o21d", U[0], U[1], "private"), trunk)
+        assert not _refused_141(trunk)
+        assert len(callee.requests("INVITE")) == 1
+    finally:
+        core.close()
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_caller_from_outside_the_served_domains_is_not_asked_for_one(tmp_path, pki,
+                                                                       clock):
+    """With MCX_FOREIGN_INITIATOR=allow a caller from another system's domain
+    is admitted: its own system's participating function holds its binding,
+    and it was never registered here."""
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_FOREIGN_INITIATOR="allow"), clock,
+                       platform=Platform())
+    core = SipCore(rt, LOCAL, clock)
+    try:
+        foreign = "sip:visitor@partner.example"
+        trunk = Flow("core", uris=(), dns=("core-client.example",), core=True)
+        callee = Flow(U[1])
+        register(core, U[1], callee)
+        callee.sent.clear()
+        core.on_bytes(invite("o21e", foreign, U[1], "private"), trunk)
+        assert not _refused_141(trunk)
+        assert len(callee.requests("INVITE")) == 1
+    finally:
+        core.close()
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_user_attached_directly_to_a_controlling_only_deployment_is_checked(tmp_path,
+                                                                             pki, clock):
+    """Review of SIP-OP-21: the controlling-only exemption is for a call a
+    trusted core relays. A user on its own certificate has no participating
+    function but this deployment, and is refused like any unbound caller."""
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_SIP_ROLES="controlling"), clock,
+                       platform=Platform())
+    core = SipCore(rt, LOCAL, clock)
+    try:
+        caller, callee = Flow(U[0]), Flow(U[1])
+        register(core, U[1], callee)
+        callee.sent.clear()
+        core.on_bytes(invite("o21f", U[0], U[1], "private"), caller)
+        assert caller.codes() == [404] and _refused_141(caller)
+        assert callee.requests("INVITE") == []
+    finally:
+        core.close()
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_spoofer_asserting_an_unregistered_user_learns_nothing_of_its_state(core,
+                                                                             world):
+    """The identity check comes first: someone asserting another user (u2's
+    connection asserting u9, never registered) gets the 403 of a mismatch,
+    not the 141 that would tell it u9 is unbound."""
+    core.on_bytes(invite("o21g", UNLISTED, U[1], "private"), world[U[2]])
+    last = world[U[2]].messages()[-1]
+    assert last.code == 403 and "141" not in (last.headers.get("Warning") or "")
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_an_unbound_caller_in_a_served_domain_is_refused_even_under_allow(tmp_path, pki,
+                                                                         clock):
+    """MCX_FOREIGN_INITIATOR=allow exempts callers from outside the served
+    domains only; one inside them is still asked for its binding."""
+    rt = build_runtime(sip_env(tmp_path, pki, MCX_FOREIGN_INITIATOR="allow"), clock,
+                       platform=Platform())
+    core = SipCore(rt, LOCAL, clock)
+    try:
+        trunk = Flow("core", uris=(), dns=("core-client.example",), core=True)
+        core.on_bytes(invite("o21h", U[0], U[1], "private"), trunk)
+        assert trunk.codes() == [404] and _refused_141(trunk)
+    finally:
+        core.close()
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_the_binding_is_found_whatever_case_the_caller_writes_its_host_in(core, world):
+    """Registered as sip:u0@mcptt.example, calling as sip:u0@MCPTT.EXAMPLE: the
+    same user (host names are case-insensitive), so it is bound."""
+    shouty = "sip:u0@MCPTT.EXAMPLE"
+    core.on_bytes(invite("o21i", shouty, U[1], "private"), world[U[0]])
+    assert world[U[0]].codes() == [100]
+    assert len(world[U[1]].requests("INVITE")) == 1
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_the_binding_is_checked_before_the_session_timer(core):
+    """An unbound caller asking for too short a session interval is told it is
+    unknown (141), not 422: step 2a ends the procedure."""
+    caller = Flow(U[0])
+    core.on_bytes(invite("o21j", U[0], U[1], "private",
+                         extra=["Session-Expires: 30", "Supported: timer"]), caller)
+    assert caller.codes() == [404] and _refused_141(caller)
+
+
+@pytest.mark.vp("VP1-SIG-002")
+@pytest.mark.parametrize("method", ["INVITE", "UPDATE"])
+def test_a_caller_whose_registration_expires_mid_call_cannot_refresh_it(core, rt, world,
+                                                                        clock, method):
+    """Review of SIP-OP-21: a refresh is the caller keeping its call. TS 24.379
+    11.1.1.3.1.3 step 3a refuses a private call's re-INVITE from a user whose
+    binding has expired (404, 141); the owner's decision holds every refresh
+    the caller sends to it. While registered, the same refresh is answered."""
+    t0 = clock.now
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r-u0", 9, U[0], U[0],
+                      extra=[f"Contact: <{U[0]}>", "Expires: 60"]), world[U[0]])
+    from service.sip_core import _tag
+    _answered_call(core, world)
+    core.on_bytes(msg("ACK", LOCAL, "k1", 1, U[0], LOCAL, to_tag=_tag("k1"),
+                      branch="z9hG4bKack1"), world[U[0]])
+    core.on_bytes(msg(method, LOCAL, "k1", 2, U[0], LOCAL, to_tag=_tag("k1")), world[U[0]])
+    assert [m.code for m in world[U[0]].messages()
+            if getattr(m, "code", None) and m.headers.get("CSeq") == f"2 {method}"] == [200]
+    clock.now = t0 + 60_000
+    core.on_bytes(msg(method, LOCAL, "k1", 3, U[0], LOCAL, to_tag=_tag("k1")), world[U[0]])
+    answer3 = [m for m in world[U[0]].messages()
+               if getattr(m, "code", None) and m.headers.get("CSeq") == f"3 {method}"]
+    assert [m.code for m in answer3] == [404]
+    assert answer3[0].headers.get("Warning") == _UNKNOWN_141
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_an_unbound_callers_location_is_not_kept(core, world):
+    """Review of SIP-OP-21 (step 2a: "shall not continue with any of the
+    remaining steps"): the cell an unbound caller reports is not kept for a
+    later functional alias PUBLISH. The same report from a bound caller is."""
+    def located(cid, caller):
+        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private", U[1]),
+                              (mcf.CT_LOCATION, mcf.location_report(ecgi=mcf.ECGI)))
+        return msg("INVITE", LOCAL, cid, 1, caller, LOCAL, body=body,
+                   ctype=mcf.CONTENT_TYPE)
+    unbound = Flow(UNLISTED)
+    core.on_bytes(located("o21k", UNLISTED), unbound)
+    assert unbound.codes() == [404]
+    assert UNLISTED not in core.last_location
+    core.on_bytes(located("o21l", U[0]), world[U[0]])
+    assert core.last_location[U[0]].cell_id == mcf.ECGI

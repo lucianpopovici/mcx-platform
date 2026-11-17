@@ -1234,3 +1234,71 @@ def test_one_session_s_failing_floor_timer_does_not_stop_the_others():
     plane.tick()
     assert ticked == ["a", "b", "c"]
     assert scopes == ["a", "b", "c"]
+
+
+# -- a participant leaves while the call goes on (SIP-OP-24) --------------------
+
+def test_remove_closes_the_endpoint_and_moves_the_floor_on():
+    """A, holding the floor, leaves: its endpoint is closed and gone, B and C
+    are told Floor Idle, nothing is sent to A, and its media is not relayed."""
+    ms, ios, clock, floor = make()
+    assert floor.holder == A
+    clear(ios)
+    ms.remove(A)
+    assert A not in ms.endpoints and ios[A].closed
+    assert ios[A].floor == []
+    assert ios[B].types() == [MsgType.IDLE] and ios[C].types() == [MsgType.IDLE]
+    assert floor.holder is None
+    send_rtp(ms, B)
+    assert ios[A].rtp == []
+
+
+def test_remove_grants_the_queued_member():
+    ms, ios, clock, floor = make()
+    to_floor(ms, B, MsgType.REQUEST)
+    assert floor.queue == (B,)
+    clear(ios)
+    ms.remove(A)
+    assert floor.holder == B
+    assert ios[B].types() == [MsgType.GRANTED] and ios[C].types() == [MsgType.TAKEN]
+
+
+def test_remove_of_a_queued_member_takes_it_out_of_the_queue():
+    ms, ios, clock, floor = make()
+    to_floor(ms, B, MsgType.REQUEST)
+    ms.remove(B)
+    assert floor.queue == () and floor.holder == A and ios[B].closed
+
+
+def test_remove_on_a_closed_session_only_closes_the_endpoint():
+    ms, ios, clock, floor = make()
+    ms.close()
+    history = len(floor.history)
+    ms.remove(B)
+    assert ios[B].closed and B not in ms.endpoints
+    assert len(floor.history) == history
+
+
+def test_remove_of_an_unknown_participant_does_nothing():
+    ms, ios, clock, floor = make()
+    clear(ios)
+    history = len(floor.history)
+    ms.remove(D)
+    assert len(floor.history) == history
+    assert all(io.floor == [] and not io.closed for io in ios.values())
+
+
+def test_remove_stands_when_the_floor_record_fails():
+    """Review of SIP-OP-24, F4: the audit trail cannot take the departure of
+    the holder. The departure is a fact: the floor moves on anyway (final)
+    and the others are still told Floor Idle; nothing is raised."""
+    ms, ios, clock, floor = make()
+    clear(ios)
+
+    def store_down(transition):
+        raise OSError("audit store down")
+    floor._observer = store_down
+    ms.remove(A)
+    assert floor.holder is None
+    assert ios[B].types() == [MsgType.IDLE] and ios[C].types() == [MsgType.IDLE]
+    assert ios[A].floor == [] and ios[A].closed

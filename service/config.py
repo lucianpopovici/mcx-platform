@@ -95,6 +95,14 @@ FLOOR_UNRECORDED_VALUES = ("deny", "allow")
 # declared domains -- possible when a trusted SIP core asserts it -- is
 # refused 404 + 141 ("refuse", PLT-IDM-008) or served ("allow").
 FOREIGN_INITIATOR_VALUES = ("refuse", "allow")
+# SIP-OP-24 (owner decision 2026-11-17): TS 24.379 6.3.8.1 item 3's local
+# policy -- when the initiator of a group call (prearranged; ad hoc, from
+# Rel-18) leaves it (its BYE, or its dialog's session expiring), the call is
+# released for everyone ("release") or goes on for the others while two or
+# more remain (item 2) ("continue"). A private call ends either way (6.3.8.2
+# item 3); and an initiator whose registration expires releases its call,
+# group or private, whatever this says (SIP-OP-21).
+GROUP_INITIATOR_LEAVES_VALUES = ("release", "continue")
 # PLT-ICD-001 ICD-OP-14 (owner ruling 2026-10-26): whether a bearer decision's
 # ARP pre-emption vulnerability must agree with the priority decision's.
 ARP_BOTH_FLAGS_VALUES = {"true": True, "false": False}
@@ -393,6 +401,8 @@ class Config:
     floor_unrecorded: str = ""
     # RES-OP-11: "refuse" or "allow". Required, no default.
     foreign_initiator: str = ""
+    # SIP-OP-24: "release" or "continue". Required, no default.
+    group_initiator_leaves: str = ""
     # ICD-OP-14, MCX_ARP_VULNERABILITY_CHECK: "true" or "false", whether
     # both ARP pre-emption flags are checked. Required, no default.
     arp_both_flags: str = ""
@@ -532,6 +542,10 @@ class Config:
             env, "MCX_FOREIGN_INITIATOR", FOREIGN_INITIATOR_VALUES,
             "state whether a caller outside the profile's declared domains is "
             "served (PLT-VP-R1 RES-OP-11)")
+        group_initiator_leaves = _choice(
+            env, "MCX_GROUP_INITIATOR_LEAVES", GROUP_INITIATOR_LEAVES_VALUES,
+            "state whether a group call is released when its initiator leaves it "
+            "(TS 24.379 6.3.8.1 item 3, a local policy; PLT-VP-R1 SIP-OP-24)")
         arp_both_flags = _choice(
             env, "MCX_ARP_VULNERABILITY_CHECK", tuple(ARP_BOTH_FLAGS_VALUES),
             "state whether a bearer decision's ARP pre-emption vulnerability must "
@@ -562,6 +576,7 @@ class Config:
             environment=environment,
             floor_unrecorded=floor_unrecorded,
             foreign_initiator=foreign_initiator,
+            group_initiator_leaves=group_initiator_leaves,
             arp_both_flags=arp_both_flags,
             sip=sip,
             media=MediaConfig.from_env(env) if sip is not None else None,

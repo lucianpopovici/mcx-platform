@@ -53,7 +53,7 @@ def env(tmp_path):
             "MCX_NETWORK_FILE": str(network_yaml(tmp_path, groups=GROUPS)),
             "MCX_DATA_DIR": str(tmp_path / "data"),
             "MCX_HTTP_PORT": "0", "MCX_HTTP_TLS": "off",
-            "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse",
+            "MCX_FLOOR_UNRECORDED": "deny", "MCX_FOREIGN_INITIATOR": "refuse", "MCX_GROUP_INITIATOR_LEAVES": "release",
             "MCX_ARP_VULNERABILITY_CHECK": "true",
             "MCX_ENV": "test"}
 

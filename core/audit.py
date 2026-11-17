@@ -40,6 +40,12 @@ class RecordType(Enum):
     # MCX_FLOOR_UNRECORDED=allow (RES-OP-14): the floor transitions the store
     # could not take, written when it takes records again, before the next.
     AUDIT_GAP = "audit-gap"
+    # A participant left a session that goes on without it (PLT-VP-R1
+    # SIP-OP-24, owner decision 2026-11-17): a member who hung up or whose
+    # dialog expired, or the initiator of a group call under
+    # MCX_GROUP_INITIATOR_LEAVES=continue. A departure that ends the session
+    # is told by its session-released record instead.
+    PARTICIPANT_LEFT = "participant-left"
 
 
 @dataclass(frozen=True)

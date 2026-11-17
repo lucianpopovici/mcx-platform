@@ -19,7 +19,7 @@ from core.sip import (Headers, ReceivedResponse, SessionTimer, SipError,  # noqa
 from service.session_timer import DialogTimer  # noqa: E402
 from service.sip_core import _tag  # noqa: E402
 from tests.test_sip_transport import (  # noqa: E402,F401  (fixtures)
-    LOCAL, SDP, U, Clock, Flow, answer, clock, core, env, invite, msg, pki, rt,
+    LOCAL, SDP, U, Clock, Flow, answer, clock, core, env, invite, msg, pki, register, rt,
     sip_env, world)
 
 TIMER = ["Supported: timer"]
@@ -1491,3 +1491,249 @@ def test_the_session_interval_without_sip_is_refused_not_ignored(tmp_path, pki):
         Config.from_env(env)
     assert str(exc.value) == ("MCX_SESSION_EXPIRES_MS is set but SIP is not enabled "
                               "(MCX_SIP_LISTEN)")
+
+
+# ============================================================ SIP-OP-21
+#
+# Owner decisions 2026-11-17: originating needs an in-date registration, and
+# a call does not outlive its caller's registration past its next refresh,
+# whoever sends it: it is released, cause registration-expired.
+
+_UNKNOWN_141 = '399 mcptt.example "141 user unknown to the participating function"'
+
+
+def _registered_for(core, world, seconds):
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r-u0", 9, U[0], U[0],
+                      extra=[f"Contact: <{U[0]}>", f"Expires: {seconds}"]), world[U[0]])
+
+
+def _released_as(rt, cid):
+    return [(r["type"], r["detail"].get("cause")) for r in rt.store.audit_records(cid)
+            if r["type"] == "session-released"]
+
+
+@pytest.mark.vp("VP1-SIG-002")
+@pytest.mark.parametrize("method", ["INVITE", "UPDATE"])
+def test_the_callers_refresh_after_its_registration_expired_ends_the_call(
+        core, rt, world, clock, method):
+    """Registered for 60 s: the caller's refresh before then is answered 200;
+    after, it is refused 404 warning 141 (TS 24.379 11.1.1.3.1.3 step 3a),
+    and the call is released: the callee gets a BYE, the caller -- whose
+    dialog the 404 ended (RFC 5057 5.1) -- does not."""
+    t0 = clock.now
+    _registered_for(core, world, 60)
+    call(core, world, "x21")
+    core.on_bytes(from_initiator(method, "x21", 2, extra=TIMER), world[U[0]])
+    assert [r.code for r in responses(world[U[0]], method=method)][-1] == 200
+    clock.now = t0 + 60_000
+    core.on_bytes(from_initiator(method, "x21", 3, extra=TIMER), world[U[0]])
+    refused = responses(world[U[0]], method=method)[-1]
+    assert (refused.code, refused.headers.get("Warning")) == (404, _UNKNOWN_141)
+    assert rt.manager.session("x21").state.value == "released"
+    assert _released_as(rt, "x21") == [("session-released", "registration-expired")]
+    assert len(world[U[1]].requests("BYE")) == 1
+    assert world[U[0]].requests("BYE") == []
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_callees_refresh_after_the_callers_registration_expired_ends_the_call(
+        core, rt, world, clock):
+    """Whoever sends the next refresh: the callee's UPDATE on its own leg is
+    answered 481 -- the call it would refresh is being released -- not the
+    caller's 404/141; the caller gets the BYE, the callee does not."""
+    t0 = clock.now
+    _registered_for(core, world, 60)
+    _, leg = call(core, world, "x22")
+    clock.now = t0 + 60_000
+    leg_to = leg.headers.get("To")
+    update = msg("UPDATE", LOCAL, leg.headers.get("Call-ID"), 2, U[1], U[0])
+    update = update.replace(
+        f"To: <{U[0]}>".encode(), f"To: {leg.headers.get('From')}".encode()).replace(
+        f"From: <{U[1]}>;tag=ft".encode(), f"From: {leg_to};tag=callee".encode())
+    core.on_bytes(update, world[U[1]])
+    answered = responses(world[U[1]], method="UPDATE")
+    assert [r.code for r in answered] == [481]
+    assert answered[0].headers.get("Warning") is None
+    assert _released_as(rt, "x22") == [("session-released", "registration-expired")]
+    assert len(world[U[0]].requests("BYE")) == 1
+    assert world[U[1]].requests("BYE") == []
+
+
+@pytest.mark.vp("VP1-SIG-002")
+@pytest.mark.parametrize("extra", [["Supported: timer", "Session-Expires: 600;refresher=uas"],
+                                   []], ids=["refresher-uas", "no-timer-support"])
+def test_a_call_the_platform_refreshes_ends_at_its_refresh_after_expiry(
+        core, rt, world, clock, extra):
+    """Review of SIP-OP-21: the platform is the refresher of the caller's
+    dialog -- asked to be (refresher=uas), or because the caller runs no timer
+    (RFC 4028; PLT-CONF-AUDIT 4.39). When that refresh falls due after the
+    caller's registration expired, it is not sent: the call is released and
+    BYE goes to both parties."""
+    t0 = clock.now
+    _registered_for(core, world, 60)
+    call(core, world, "x23", extra=extra)
+    clock.now = t0 + 61_000
+    core.tick()
+    assert rt.manager.session("x23").state.value == "established"   # not yet due
+    # Time passes as it does: the core ticks every 10 s, so the refresh falls
+    # due well before the session would expire.
+    while rt.manager.session("x23").state.value == "established":
+        assert clock.now < t0 + 3_600_000, "never released"
+        clock.now += 10_000
+        core.tick()
+    assert world[U[0]].requests("INVITE") == [] and world[U[0]].requests("UPDATE") == []
+    assert rt.manager.session("x23").state.value == "released"
+    assert _released_as(rt, "x23") == [("session-released", "registration-expired")]
+    assert len(world[U[0]].requests("BYE")) == 1 and len(world[U[1]].requests("BYE")) == 1
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_call_whose_caller_stays_registered_is_refreshed_as_before(core, rt, world,
+                                                                     clock):
+    """The control: the same platform-refreshed call, its caller registered
+    for a day, is refreshed and stays up."""
+    _registered_for(core, world, 86_400)
+    call(core, world, "x24", extra=())
+    clock.now += 900_000
+    core.tick()
+    assert len(world[U[0]].requests("INVITE")) == 1
+    assert rt.manager.session("x24").state.value == "established"
+
+
+def _group_call(core, world, cid, callee_extra=()):
+    """u0 calls grp:alpha, its caller running a timer as refresher (uac); each
+    member answers -- with no timer of its own unless `callee_extra` says, so
+    the platform refreshes the members' legs."""
+    core.on_bytes(invite(cid, U[0], "grp:alpha", "prearranged-group", extra=list(TIMER)),
+                  world[U[0]])
+    legs = {}
+    for u in U[1:]:
+        (req,) = world[u].requests("INVITE")
+        legs[u] = req
+        core.on_bytes(answer(req, 200, SDP, extra=list(callee_extra)), world[u])
+    ok = responses(world[U[0]], 200)[-1]
+    core.on_bytes(msg("ACK", contact_uri(ok.headers.get("Contact")), cid, 1, U[0], LOCAL,
+                      branch=f"z9hG4bKack{cid}", to_tag=_tag(cid)), world[U[0]])
+    return legs
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_a_group_call_whose_legs_the_platform_refreshes_ends_after_the_callers_expiry(
+        core, rt, world, clock):
+    """Review of SIP-OP-21: the caller refreshes its own dialog (uac) and the
+    platform refreshes the members' legs. After the caller's registration
+    expires, the first leg refresh to fall due is not sent: the whole call is
+    released (owner decision: BYE to every party), its media closed."""
+    t0 = clock.now
+    _registered_for(core, world, 60)
+    legs = _group_call(core, world, "g21")
+    assert sorted(legs) == sorted(U[1:]) and "g21" in core.calls
+    clock.now = t0 + 61_000
+    while rt.manager.session("g21").state.value == "established":
+        assert clock.now < t0 + 3_600_000, "never released"
+        clock.now += 10_000
+        core.tick()
+    assert _released_as(rt, "g21") == [("session-released", "registration-expired")]
+    for u in U[1:]:
+        assert len(world[u].requests("BYE")) == 1, u
+        assert len(world[u].requests("INVITE")) == 1 and world[u].requests("UPDATE") == [], u
+    assert len(world[U[0]].requests("BYE")) == 1
+    assert "g21" not in core.calls and "g21" not in core.media._sessions
+
+
+def _relayed_call(tmp_path, pki, clock, caller, cid, caller_extra, callee_extra, **env_over):
+    """A call a trusted core relays for `caller` (never registered here)."""
+    from core.session import Platform
+    from service.runtime import build_runtime
+    from service.sip_core import SipCore
+    rt = build_runtime(sip_env(tmp_path, pki, **env_over), clock, platform=Platform())
+    core = SipCore(rt, LOCAL, clock)
+    trunk = Flow("core", uris=(), dns=("core-client.example",), core=True)
+    callee = Flow(U[1])
+    register(core, U[1], callee)
+    core.on_bytes(invite(cid, caller, U[1], "private", extra=list(caller_extra)), trunk)
+    (leg,) = callee.requests("INVITE")
+    core.on_bytes(answer(leg, 200, SDP, extra=list(callee_extra)), callee)
+    ok = [m for m in trunk.messages() if getattr(m, "code", 0) == 200][-1]
+    core.on_bytes(msg("ACK", contact_uri(ok.headers.get("Contact")), cid, 1, caller, LOCAL,
+                      branch=f"z9hG4bKack{cid}", to_tag=_tag(cid)), trunk)
+    assert rt.manager.session(cid).state.value == "established"
+    return rt, core, trunk, callee, leg
+
+
+_EXEMPT = [({"MCX_FOREIGN_INITIATOR": "allow"}, "sip:x9@partner.example"),
+           ({"MCX_SIP_ROLES": "controlling"}, U[0])]
+
+
+def _update_codes(flow):
+    return [m.code for m in flow.messages() if getattr(m, "code", 0)
+            and (m.headers.get("CSeq") or "").endswith("UPDATE")]
+
+
+@pytest.mark.vp("VP1-SIG-002")
+@pytest.mark.parametrize("env_over,caller", _EXEMPT, ids=["foreign-allow", "controlling-only"])
+def test_an_exempt_callers_refreshes_keep_the_call(tmp_path, pki, clock, env_over, caller):
+    """The exemptions hold in the dialog too: a caller from outside the served
+    domains, or one a trusted core relays to a controlling-only deployment, is
+    never registered here; its refresh and its callee's are answered 200 and
+    the call stays up."""
+    rt, core, trunk, callee, leg = _relayed_call(
+        tmp_path, pki, clock, caller, "e21", TIMER, CALLEE_REFRESHES, **env_over)
+    try:
+        clock.now += 100_000
+        core.on_bytes(msg("UPDATE", LOCAL, "e21", 2, caller, LOCAL, to_tag=_tag("e21"),
+                          extra=list(TIMER)), trunk)
+        cid = leg.headers.get("Call-ID")
+        core.on_bytes(msg("UPDATE", LOCAL, cid, 2, U[1], LOCAL, to_tag=f"{cid}-l",
+                          from_tag="callee"), callee)
+        assert (_update_codes(trunk), _update_codes(callee)) == ([200], [200])
+        assert rt.manager.session("e21").state.value == "established"
+    finally:
+        core.close()
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-002")
+@pytest.mark.parametrize("env_over,caller", _EXEMPT, ids=["foreign-allow", "controlling-only"])
+def test_an_exempt_callers_call_is_refreshed_by_the_platform(tmp_path, pki, clock, env_over,
+                                                             caller):
+    """...and when the platform is the refresher (refresher=uas), its refresh
+    is sent and nothing is released for want of a registration."""
+    rt, core, trunk, callee, _ = _relayed_call(
+        tmp_path, pki, clock, caller, "t21",
+        ["Supported: timer", "Session-Expires: 600;refresher=uas"], (), **env_over)
+    try:
+        while not (trunk.requests("UPDATE") or trunk.requests("INVITE")):
+            assert rt.manager.session("t21").state.value == "established"
+            clock.now += 10_000
+            core.tick()
+        refresh = (trunk.requests("UPDATE") or trunk.requests("INVITE"))[-1]
+        core.on_bytes(reply(refresh, 200, extra=["Session-Expires: 600;refresher=uas"],
+                            body=SDP if refresh.method == "INVITE" else ""), trunk)
+        clock.now += 10_000
+        core.tick()
+        assert rt.manager.session("t21").state.value == "established"
+        assert _released_as(rt, "t21") == []
+    finally:
+        core.close()
+        rt.close()
+
+
+@pytest.mark.vp("VP1-SIG-002")
+def test_the_callers_update_while_ringing_after_expiry_ends_the_attempt(core, rt, world,
+                                                                        clock):
+    """An UPDATE in the early dialog, after the caller's registration expired:
+    404 warning 141, the ringing callee is cancelled, the INVITE answered 487,
+    and the release recorded with the cause."""
+    t0 = clock.now
+    _registered_for(core, world, 60)
+    core.on_bytes(invite("e31", U[0], U[1], "private", extra=list(TIMER)), world[U[0]])
+    (leg,) = world[U[1]].requests("INVITE")
+    core.on_bytes(answer(leg, 180, extra=["Contact: <sip:u1@mcptt.example>"]), world[U[1]])
+    clock.now = t0 + 60_000
+    core.on_bytes(from_initiator("UPDATE", "e31", 2, extra=TIMER), world[U[0]])
+    refused = responses(world[U[0]], method="UPDATE")[-1]
+    assert (refused.code, refused.headers.get("Warning")) == (404, _UNKNOWN_141)
+    assert world[U[1]].requests("CANCEL")
+    assert responses(world[U[0]])[-1].code == 487
+    assert _released_as(rt, "e31") == [("session-released", "registration-expired")]
