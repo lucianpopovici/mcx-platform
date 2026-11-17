@@ -806,7 +806,7 @@ class SipCore:
         "active" with the seconds left, or "terminated" once it has ended.
         Sent on the subscription's connection, or, once that closed, on the
         user's registered one; with neither it waits (_resume_alias_subs)."""
-        flow = sub.flow or self.flows_by_user.get(sub.subscriber)
+        flow = sub.flow or self._registered_flow(sub.subscriber)
         if flow is None:
             return
         sub.flow = flow
@@ -928,6 +928,17 @@ class SipCore:
         # After the 200 (review): the subscriptions waiting for a connection
         # (after a deregistration there is none, and they go on waiting).
         self._resume_alias_subs(aor)
+
+    def _registered_flow(self, aor: str) -> Any:
+        """The connection a user registered on, while the registration is in
+        date. A registration that has expired is no binding (RFC 3261 10.3),
+        whether or not its connection is still open: the connection was kept
+        for routing, and routing follows the registration. Found when
+        VP1-SIG-002 was taken through the core: an expired user was still
+        being called."""
+        if not self.registrations.is_registered(aor):
+            return None
+        return self.flows_by_user.get(aor)
 
     # -- INVITE (initiator side) ---------------------------------------------
 
@@ -1109,7 +1120,7 @@ class SipCore:
         # Registrations are keyed by the canonical form (_register); a member
         # the directory spells with an upper-case host is the same user
         # (RFC 3261 19.1.4), and must not get a dead leg (RES-OP-01 review).
-        flow = self.flows_by_user.get(canonical_uri(target))
+        flow = self._registered_flow(canonical_uri(target))
         # Random, not "<call>.legN": every member would otherwise know the
         # caller's Call-ID and every other leg's, and with them the platform's
         # tag on each ("<Call-ID>-l"). The tags are part of what binds a dialog

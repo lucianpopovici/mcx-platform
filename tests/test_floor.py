@@ -1220,3 +1220,213 @@ def test_the_floor_machine_runs_alone_on_an_injected_clock():
     clock.advance(4000)
     expire(fc, T_END_OF_MEDIA)
     assert fc.state is FloorState.IDLE and fc.holder is None
+
+
+# -- VP1-FC-011 under contention, as the participants see it -------------------
+
+
+def _contention_run(seed):
+    """One randomised run: four participants, mixed floor priorities, the
+    profile switches (queueing, override, queue depth, what a full queue does
+    to a pre-emptor) drawn per run, and 60 events from every kind the machine
+    takes: requests, releases (by the holder and by others), media, revokes,
+    leavers and expiry of whichever timers are running. Returns the per-step
+    record of who holds permission as the wire shows it."""
+    rnd = random.Random(seed)
+    now = [0]
+    policy = Policy(initial_grant_to_initiator=rnd.random() < 0.7,
+                    queueing_enabled=rnd.random() < 0.8,
+                    override_allowed=rnd.random() < 0.6,
+                    max_queue_depth=rnd.choice([0, 1, 2, 8]),
+                    preemption_at_full_queue=rnd.choice(["deny", "insert"]))
+    fc = FloorControl(policy, clock=lambda: now[0])
+    parts = ["a", "b", "c", "d"]
+    # Permission as the participants are told it: from a Floor Granted to
+    # them until they release, leave, the floor goes idle, they send no media
+    # for T1 (TS 24.380 6.3.4.4.3: the floor leaves the silent holder), or --
+    # after a Floor Revoke to them -- their grace (T3) runs out.
+    holding, revoked = set(), set()
+    seen = []
+
+    def told(event, actions, holder_before):
+        if event.type in (EventType.FLOOR_RELEASE, EventType.PARTICIPANT_LEFT):
+            holding.discard(event.participant)
+            revoked.discard(event.participant)
+        if event.type is EventType.TIMER_EXPIRY and event.timer == "T3":
+            holding.difference_update(revoked)
+            revoked.clear()
+        if event.type is EventType.TIMER_EXPIRY and event.timer == "T1":
+            holding.discard(holder_before)
+        for a in actions:
+            if a.type is ActionType.SEND_IDLE:
+                holding.clear()
+                revoked.clear()
+            elif a.type is ActionType.SEND_REVOKE:
+                revoked.add(a.target)
+            elif a.type is ActionType.SEND_GRANTED:
+                holding.add(a.target)
+        seen.append((event.type.value, event.timer, tuple(sorted(holding)), fc.holder))
+
+    first = Event(EventType.SESSION_ESTABLISHED, participant="a",
+                  floor_priority=rnd.choice([0, 100, 200]))
+    told(first, fc.handle(first), None)
+    for _ in range(60):
+        k, p = rnd.random(), rnd.choice(parts)
+        if k < 0.45:
+            ev = Event(EventType.FLOOR_REQUEST, participant=p,
+                       floor_priority=rnd.choice([0, 100, 200, 250]))
+        elif k < 0.6:
+            ev = Event(EventType.FLOOR_RELEASE,
+                       participant=p if rnd.random() < 0.5 else (fc.holder or p))
+        elif k < 0.7:
+            ev = Event(EventType.MEDIA_RECEIVED, participant=fc.holder or p)
+        elif k < 0.85 and fc.running_timers():
+            now[0] += 60_000
+            ev = Event(EventType.TIMER_EXPIRY, timer=rnd.choice(sorted(fc.running_timers())))
+        elif k < 0.92:
+            ev = Event(EventType.FLOOR_REVOKE, participant=fc.holder or p)
+        else:
+            ev = Event(EventType.PARTICIPANT_LEFT, participant=p)
+        before = fc.holder
+        told(ev, fc.handle(ev), before)
+    return seen
+
+
+@pytest.mark.vp("VP1-FC-011")
+def test_vp1_fc_011_at_most_one_participant_holds_permission_on_the_wire():
+    """2 000 randomised contention runs, override and pre-emption included:
+    after every event at most one participant holds permission as the wire
+    tells it, and that participant is the machine's holder. The floor changes
+    hands only when the holder releases or leaves, or when T1 (no media) or
+    T3 (the revoked holder's grace) runs out -- never while a revoked holder
+    may still be talking."""
+    handovers = set()
+    grants = 0
+    for seed in range(2000):
+        seen = _contention_run(seed)
+        for (_, _, before, _), (event, timer, after, holder) in zip(seen, seen[1:]):
+            assert len(after) <= 1, (seed, event, after)
+            assert after == ((holder,) if holder else ()), (seed, event, after, holder)
+            if after and after != before:
+                grants += 1
+                if before:
+                    handovers.add((event, timer))
+    # The runs did exercise the property: thousands of grants, and the floor
+    # passed directly from one holder to the next by each of the four routes.
+    assert grants > 10_000
+    assert handovers == {("floor-release", None), ("participant-left", None),
+                         ("timer-expiry", "T1"), ("timer-expiry", "T3")}
+
+
+# -- VP1-FC-020 from two loaded profiles ---------------------------------------
+
+# T1 shorter than T2 in both, so the second holder's silence (T1) ends its
+# turn before its own T2 would; no T8 multiple meets T3 (no simultaneous
+# expiry to order).
+_TIMERS_A = {"T1": 3000, "T2": 4000, "T3": 3000, "T8": 1100, "T20": 100}
+_TIMERS_B = {"T1": 5000, "T2": 7000, "T3": 4500, "T8": 1800, "T20": 250}
+
+
+def _profile_with_timers(tmp_path, timers):
+    """The mcx package, copied, its prearranged-group floor timers replaced;
+    loaded through the loader. Nothing else differs."""
+    import shutil
+    from core import loader
+    from core.hooks import MediaKind, Resolution, ResolutionKind, SessionRequest
+    root = tmp_path / "profiles"
+    for name in ("mcx", "common"):
+        shutil.copytree(ROOT / "profiles" / name, root / name,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+    p = root / "mcx" / "profile.yaml"
+    text = p.read_text(encoding="utf-8")
+    old = "  - id: prearranged-group\n"
+    head, tail = text.split(old, 1)
+    shipped = "timers_ms: {T2: 4000, T20: 100, T8: 1000, T3: 3000}"
+    assert shipped in tail.split("  - id:", 1)[0]
+    mine = "timers_ms: {" + ", ".join(f"{k}: {v}" for k, v in timers.items()) + "}"
+    p.write_text(head + old + tail.replace(shipped, mine, 1), encoding="utf-8")
+    lp = loader.load(root / "mcx")
+    request = SessionRequest(request_id="r", initiator="a", target="grp:x",
+                             call_type="prearranged-group", media=(MediaKind.VOICE,))
+    fp = lp.hooks.session_policy.floor_policy(
+        request, Resolution(kind=ResolutionKind.GROUP, members=("a", "b")))
+    return lp, Policy.from_hook(fp)
+
+
+def _every_timer_expires(policy, timers):
+    """Through the media plane, whose tick fires the machine's timers as the
+    clock reaches them: a grant to A, A's media (T2 starts), B asks and is
+    queued, T2 runs out (revoke: T3 and T8 start), T8 runs out (the revoke is
+    re-sent), T3 runs out (B is granted: T20 and T1 start), T20 runs out
+    (Granted re-sent), then silence until T1 runs out. Each expected instant
+    is computed here from the profile's values, not read from the machine; at
+    one millisecond before it the tick must fire nothing for that timer, and
+    at it, that timer's expiry. Returns the floor's transitions."""
+    from tests.test_media import A, B, make, send_rtp, to_floor
+    from core.rtcp import MsgType
+    ms, ios, clock, fc = make(users=(A, B), pol=policy)
+
+    def expiries():
+        return [t.event.timer for t in fc.history if t.event.type is EventType.TIMER_EXPIRY]
+
+    def at(instant, timer):
+        clock.now = instant - 1
+        before = len(expiries())
+        ms.tick()
+        assert timer not in expiries()[before:], (timer, "fired early")
+        clock.now = instant
+        ms.tick()
+        assert expiries()[before:].count(timer) == 1, (timer, expiries()[before:])
+
+    clock.now += 10
+    send_rtp(ms, A, seq=1)
+    t2 = clock.now + timers["T2"]
+    to_floor(ms, B, MsgType.REQUEST)
+    # A keeps talking (a packet every 500 ms, well inside T1) until T2 is near.
+    seq = 1
+    while clock.now + 500 < t2 - 1:
+        clock.now += 500
+        seq += 1
+        send_rtp(ms, A, seq=seq)
+        ms.tick()
+    assert expiries() == []
+    at(t2, "T2")
+    at(t2 + timers["T8"], "T8")
+    t3 = t2 + timers["T3"]
+    at(t3, "T3")
+    assert fc.holder == B
+    at(t3 + timers["T20"], "T20")
+    at(t3 + timers["T1"], "T1")
+    assert fc.holder is None
+    return fc.history
+
+
+@pytest.mark.vp("VP1-FC-020")
+def test_vp1_fc_020_two_loaded_profiles_differ_only_in_timing(tmp_path):
+    """Two packages that differ only in the prearranged-group floor timers,
+    loaded and their floor policies taken from the session hook, driven
+    through the media plane: each of T1, T2, T3, T8 and T20 is started with
+    that profile's duration, does not run out a millisecond before the instant
+    its value gives, and runs out at it; the transitions -- states, triggers,
+    what is sent to whom, which timers start and stop -- are the same in
+    both."""
+    runs = {}
+    for name, timers in (("a", _TIMERS_A), ("b", _TIMERS_B)):
+        lp, policy = _profile_with_timers(tmp_path / name, timers)
+        assert {k: policy.timer(k) for k in timers} == timers
+        history = _every_timer_expires(policy, timers)
+        # Each timer was started with the profile's duration.
+        started = {a.timer: a.duration_ms for t in history for a in t.actions
+                   if a.type is ActionType.START_TIMER}
+        assert started == timers, name
+        runs[name] = history
+
+    def shape(history):
+        return [(t.from_state, t.event.type, t.event.timer, t.event.participant, t.to_state,
+                 [(a.type, a.target, a.timer, a.reason) for a in t.actions], t.holder, t.queue)
+                for t in history]
+    assert shape(runs["a"]) == shape(runs["b"])
+    assert [t.at_ms for t in runs["a"]] != [t.at_ms for t in runs["b"]]
+    # Every one of the five ran out, in both, in the same order.
+    order = [t.event.timer for t in runs["a"] if t.event.type is EventType.TIMER_EXPIRY]
+    assert set(order) == {"T1", "T2", "T3", "T8", "T20"}

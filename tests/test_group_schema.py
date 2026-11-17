@@ -135,6 +135,7 @@ def test_the_schema_harness_itself_works():
     assert not schema.validate(wrong), "the validator accepts anything"
 
 
+@pytest.mark.vp("VP1-DOC-001")
 @pytest.mark.skipif(bool(_missing()),
                     reason=f"absent from docs/OMA/: {', '.join(_missing())} — "
                            f"the schema set chains poc_listService -> "

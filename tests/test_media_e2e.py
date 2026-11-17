@@ -11,6 +11,7 @@ import re
 import socket
 import struct
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -824,3 +825,134 @@ def test_the_sip_tick_writes_a_pending_gap_with_no_other_record(call):
         core.tick()
     assert [r["detail"]["sessions"] for r in rt.store.audit_records("audit-gap")] == \
         [["lonely"]]
+
+
+@pytest.mark.vp("VP1-CC-007")
+def test_vp1_cc_007_one_decision_taken_at_admission_kept_for_the_session(call):
+    """A group call's priority decision: a PriorityDecision, taken by the one
+    IF-PRI evaluation before admission, and the same object (and value)
+    after floor contention, a re-INVITE, a pre-emption check against it and
+    release. The floor's later evaluations are each requesting participant's
+    floor priority (FC-OP-12), recorded as the floor's work after
+    establishment; none replaces the session's decision."""
+    from core.hooks import PriorityDecision
+    from service.sip_core import _tag
+    rt, core, flows, ues, _ = call
+    setup_call(call)
+    session = rt.manager.session("e2e")
+    decision = session.priority
+    assert type(decision) is PriorityDecision
+    snapshot = (decision.level, decision.scope, decision.label, decision.floor_priority)
+
+    for u in U[:3]:
+        while ues[u].floor_msg(0.2):
+            pass
+    ues[U[1]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+    assert ues[U[1]].floor_msg().type is MsgType.QUEUE_POSITION_INFO
+    ues[U[2]].send_floor(MsgType.REQUEST, rtcp.f_priority(0))
+    assert ues[U[2]].floor_msg().type is MsgType.QUEUE_POSITION_INFO
+    ues[U[0]].send_floor(MsgType.RELEASE)
+    while ues[U[1]].floor_msg(0.3):
+        pass
+    with core.lock:
+        core.on_bytes(msg("INVITE", LOCAL, "e2e", 2, U[0], LOCAL, to_tag=_tag("e2e"),
+                          body=ues[U[0]].sdp(), ctype="application/sdp"), flows[U[0]])
+    assert [m.code for m in flows[U[0]].messages()
+            if getattr(m, "code", None) and m.headers.get("CSeq") == "2 INVITE"][-1] == 200
+    stronger = PriorityDecision(level=decision.level + 1, scope=decision.scope,
+                                preemption_capability=True, preemption_vulnerability=False,
+                                floor_priority=255, label="probe")
+    with core.lock:
+        rt.manager.preemption_victims(stronger, "another-call")
+    assert rt.manager.session("e2e").priority is decision
+    with core.lock:
+        core.on_bytes(msg("BYE", LOCAL, "e2e", 3, U[0], LOCAL, to_tag=_tag("e2e")),
+                      flows[U[0]])
+    assert rt.manager.session("e2e").state.value == "released"
+    assert rt.manager.session("e2e").priority is decision
+    assert (decision.level, decision.scope, decision.label, decision.floor_priority) == snapshot
+
+    records = rt.store.audit_records("e2e")
+    admitted = next(i for i, r in enumerate(records) if r["type"] == "session-admitted")
+    established = next(i for i, r in enumerate(records) if r["type"] == "session-established")
+    evaluations = [i for i, r in enumerate(records) if r["type"] == "hook-invocation"
+                   and (r["detail"]["interface"], r["detail"]["method"]) == ("IF-PRI",
+                                                                             "evaluate")]
+    before = [i for i in evaluations if i < admitted]
+    assert len(before) == 1
+    assert records[before[0]]["detail"]["returned"]["label"] == decision.label
+    assert records[admitted]["detail"]["priority"] == decision.label
+    # The rest came after establishment, one per other participant asking
+    # for the floor (u1 and u2; the caller's is the session's own).
+    assert [i > established for i in evaluations[1:]] == [True, True]
+
+
+@pytest.mark.vp("VP1-FC-012")
+def test_vp1_fc_012_floor_arbitration_follows_the_if_pri_decision_not_arrival(call,
+                                                                             monkeypatch):
+    """A priority hook that ranks participants (u1 50, u3 120, u2 200; the
+    caller u0 100) in place of the in-tree table, which gives every
+    participant the same floor priority (FC-OP-12, a recorded limitation).
+    u1, u2 and u3 ask for the floor in that order while u0 talks. The floor
+    goes to u2, then u3, then u1: IF-PRI's order, not arrival order. Each
+    participant's IF-PRI decision is in the audit trail, and the floor's
+    transitions record the priority each request was queued with, which is
+    that decision's."""
+    import dataclasses
+    from profiles.common.tables import TablePriorityPolicy
+    rank = {U[0]: 100, U[1]: 50, U[2]: 200, U[3]: 120}
+    table = TablePriorityPolicy.evaluate
+
+    def ranked(self, request, resolution):
+        return dataclasses.replace(table(self, request, resolution),
+                                   floor_priority=rank[request.initiator])
+    monkeypatch.setattr(TablePriorityPolicy, "evaluate", ranked)
+    rt, core, flows, ues, _ = call
+    setup_call(call, answering=(1, 2, 3))
+
+    def drain():
+        """Discard what each client was sent so far, for at most a second."""
+        end = time.time() + 1
+        for u in U[:4]:
+            while time.time() < end and ues[u].floor_msg(0.05):
+                pass
+    drain()
+    # Each request is in the floor's queue before the next is sent: the
+    # arrival order is u1, u2, u3 whatever the receive threads do.
+    for u in (U[1], U[2], U[3]):
+        ues[u].send_floor(MsgType.REQUEST)
+        deadline = time.time() + 3
+        while True:
+            with core.lock:
+                if u in core.calls["e2e"].media.floor.queue:
+                    break
+            assert time.time() < deadline, f"{u} never queued"
+            time.sleep(0.01)
+    drain()
+    granted = []
+    for _ in range(3):
+        with core.lock:
+            holder = core.calls["e2e"].media.floor.holder
+        ues[holder].send_floor(MsgType.RELEASE)
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            with core.lock:
+                now = core.calls["e2e"].media.floor.holder
+            if now not in (None, holder):
+                break
+            time.sleep(0.02)
+        granted.append(now)
+        drain()
+    assert granted == [U[2], U[3], U[1]]
+
+    records = rt.store.audit_records("e2e")
+    established = next(i for i, r in enumerate(records) if r["type"] == "session-established")
+    asked = [r["detail"]["returned"]["floor_priority"] for r in records[established:]
+             if r["type"] == "hook-invocation"
+             and (r["detail"]["interface"], r["detail"]["method"]) == ("IF-PRI", "evaluate")]
+    assert asked == [50, 200, 120]                 # one decision each, in arrival order
+    queued = {r["detail"]["trigger"]["participant"]: r["detail"]["trigger"]["floor_priority"]
+              for r in records if r["type"] == "floor-transition"
+              and r["detail"]["trigger"]["type"] == "floor-request"
+              and r["detail"]["trigger"]["participant"] in (U[1], U[2], U[3])}
+    assert queued == {U[1]: 50, U[2]: 200, U[3]: 120}

@@ -339,6 +339,37 @@ def clear(ios):
         io.floor.clear()
 
 
+@pytest.mark.vp("VP1-FC-011")
+def test_vp1_fc_011_media_from_at_most_one_participant_is_forwarded():
+    """The media side of VP1-FC-011: 300 randomised runs, three participants
+    at three floor priorities, override on in half of them. After every floor
+    event, and every timer tick, each participant sends RTP; the packets
+    forwarded come from at most one participant, the floor's holder."""
+    import random
+    forwarded_from_someone = 0
+    for seed in range(300):
+        rnd = random.Random(seed)
+        ms, ios, clock, floor = make(
+            pol=policy(override_allowed=seed % 2 == 0, max_queue_depth=rnd.choice([0, 2])),
+            priority={A: 50, B: 150, C: 250, D: 100})
+        seq = 0
+        for _ in range(40):
+            k, u = rnd.random(), rnd.choice((A, B, C))
+            if k < 0.5:
+                to_floor(ms, u, MsgType.REQUEST, rtcp.f_priority(rnd.choice([0, 255])))
+            elif k < 0.8:
+                to_floor(ms, u, MsgType.RELEASE)
+            else:
+                clock.now += rnd.choice([500, 5000, 40000])
+                ms.tick()
+            seq += 1
+            senders = [v for v in (A, B, C) if send_rtp(ms, v, seq=seq, ssrc=ord(v[4]))]
+            assert len(senders) <= 1, (seed, senders)
+            assert senders in ([], [floor.holder]), (seed, senders, floor.holder)
+            forwarded_from_someone += bool(senders)
+    assert forwarded_from_someone > 3000
+
+
 # ============================================================ VP1-FC-001
 
 
@@ -798,6 +829,7 @@ def test_stop_talking_expiry_revokes_and_grace_recovers_the_floor():
     assert all(MsgType.IDLE in io.types() for io in ios.values())
 
 
+@pytest.mark.vp("VP1-FC-020")
 def test_silence_ends_the_burst_on_t1():
     """No RTP from the holder for T1 -> floor idle (6.3.4.4.3)."""
     ms, ios, clock, floor = make(pol=policy(timers_ms={"T1": 500}))
