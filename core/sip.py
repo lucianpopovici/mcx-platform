@@ -937,6 +937,14 @@ class Adapter:
         # exist before Rel-17 (PLT-CONF-AUDIT CA-12).
         self._release = release
 
+    def is_group_call_type(self, call_type: str) -> bool:
+        """Whether a call type is a group call in TS 24.379's sense -- its
+        MCPTT signature's session type prearranged, or ad hoc (from Rel-18):
+        the calls 6.3.8.1 item 3's local policy is about (PLT-VP-R1 SIP-OP-24).
+        A private call, or a call type with no signature, is not."""
+        sig = self._signature_of.get(call_type)
+        return sig is not None and sig.session_type in ("prearranged", "adhoc")
+
     # -- rendering -------------------------------------------------------
 
     def render(self, signal: Signal, context: DialogContext,

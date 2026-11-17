@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.37 (draft)
+**Version:** 0.38 (draft)
 **Date:** 2026-10-28
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -859,7 +859,7 @@ they may not redefine these.
 | `adhoc-participants-undetermined` | core, IF-IDR | Ad hoc participants cannot be determined (TS 24.379 warning 187) |
 | `adhoc-too-many-participants` | core | Ad hoc participants over the call type's limit (warning 189) |
 | `participant-limit-exceeded` | core | More participants than the session decision allows, in a session that is not a group call the core can truncate (§5.2; SIP 486, warning 122). Since v0.21 |
-| `initiator-not-served` | core | The initiator is not within the profile's declared domains, and the deployment states `MCX_FOREIGN_INITIATOR=refuse` (PLT-IDM-008; PLT-VP-R1 RES-OP-11). Checked before step 0, so no hook runs; SIP 404 with warning `141 user unknown to the participating function`, as TS 24.379 answers a caller the participating function has no MCPTT ID for (10.1.1.3.1.1 step 2a, 11.1.1.3.1.1 step 4). Not applied to a request a gateway relays through the IF-IWF API (§7.2); a gateway's INVITE over SIP is subject to it. Since v0.23 |
+| `initiator-not-served` | core | The initiator is not within the profile's declared domains, and the deployment states `MCX_FOREIGN_INITIATOR=refuse` (PLT-IDM-008; PLT-VP-R1 RES-OP-11). Checked before step 0, so no hook runs; SIP 404 with warning `141 user unknown to the participating function`, as TS 24.379 answers a caller the participating function has no MCPTT ID for (10.1.1.3.1.1 step 2a, 11.1.1.3.1.1 step 4). Not applied to a request a gateway relays through the IF-IWF API (§7.2); a gateway's INVITE over SIP is subject to it. Since v0.23. Since v0.38 also: a caller in the declared domains with no in-date registration, where the deployment is its participating function (PLT-VP-R1 SIP-OP-21, owner decision: 10.1.1.3.1.1 step 2a's "validity period of an existing binding has expired"), and that caller's refresh of a call it originated (11.1.1.3.1.3 step 3a) |
 | `functional-alias-not-authorised` | core | A functional alias the user may not hold (ICD-NET-007): not in the network profile's `functional_aliases` for the user, or not a functional identity the profile declares for users. SIP 403, with warning `201 user not authorized to change the functional alias status` from Rel-20 (TS 24.379 9A.2.2.2.3 step 4B), the phrase alone before. Since v0.27 |
 | `functional-alias-held` | core | A single-holder functional alias another user holds, and the request does not take it over (9A.2.2.3.3 step 5). SIP 403. Since v0.27 |
 | `functional-alias-take-over-not-allowed` | core | A take-over by a user the network profile does not allow to take over that alias (9A.2.2.3.3 step 6). SIP 403. Since v0.27 |
@@ -911,6 +911,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.38 | 2026-11-17 | §9: `initiator-not-served` also answers a caller with no in-date registration, and that caller's refresh (PLT-VP-R1 SIP-OP-21, owner decision). A minor change: no hook or parameter object changes. |
 | 0.37 | 2026-10-28 | Major change (ICD-VER-003): IF-IDR gains `kind_of` (§3.6), which says what a target is without its members; the core asks it for each entry of an ad hoc caller's list before resolving it (ICD-ADH-003). `MCX_ADHOC_LIST_ENTRIES` (optional, default `users`; PLT-VP-R1 ADHOC-OP-06, owner decision 2026-10-28): with `users` a listed group is left out unresolved and the caller told in the 200 OK's Warning; with `users-and-groups` (a reported deviation) its members are invited, every listed user and member counting against `MCX_ADHOC_LIST_MAX`. All in-tree profiles implement `kind_of` in the same change set. |
 | 0.36 | 2026-10-28 | ICD-ADH-001: `MCX_ADHOC_LIST_MAX` is at most 1 000; a larger value refuses startup (owner decision 2026-10-28, from the review of ICD-OP-01: a listed ad hoc call resolves each entry, one IF-IDR invocation each, under the one SIP, media and timer lock, about 25 µs a user entry, so 1 000 users take about 24 ms at the median). It bounds the entries, not the time: an entry naming a group is resolved over all its members before it is left out (PLT-VP-R1 ADHOC-OP-06). A larger ad hoc call goes by criteria. No interface change; a major change for a deployment that states more than 1 000, which no longer starts. |
 | 0.35 | 2026-10-27 | ICD-OP-01 closed for R1 (owner): IF-IDR's 50 ms budget is met with the in-memory binding store, measured with `tests/bench_idr.py` (p99 of 1 000 runs: a user 0.05 ms, a group of 20 000 members 34 ms, every one of 5 000 trains' drivers by criteria 7.8 ms); ad hoc criteria were quadratic in the holders (94 ms for 5 000) and are now linear, as are the core's list of listed ad hoc participants and a restart check (review). The single lock that serialises hook calls also stops media relay and timers while one runs (review). ICD-OP-16 opened: a cache and its staleness bound, decided with the first external binding store. No interface change. |

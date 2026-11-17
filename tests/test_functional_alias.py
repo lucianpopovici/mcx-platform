@@ -701,7 +701,7 @@ def test_a_pidf_body_that_is_not_9a_3_1_is_refused(body, says):
 from tests.test_sip_transport import (  # noqa: E402
     LOCAL, SDP, Flow, answer, invite, msg, network_yaml, pki, sip_env)
 from service.runtime import build_runtime  # noqa: E402
-from service.sip_core import SipCore  # noqa: E402
+from service.sip_core import SipCore, _tag  # noqa: E402
 
 __all__ = ["pki"]           # the session fixture, shared
 
@@ -748,6 +748,8 @@ def test_publish_activates_and_a_switching_order_follows(tmp_path, pki):
         assert rt.store.holdings() == [("control-engineer", "", ENG[0])]
         assert rt.health.snapshot()["functional_aliases"] == [
             {"identity": "control-engineer", "slot": "", "holder": ENG[0]}]
+        core.on_bytes(msg("REGISTER", "sip:utility.example", "r-e0", 1, ENG[0], ENG[0],
+                          extra=[f"Contact: <{ENG[0]}>"]), f)   # SIP-OP-21
         core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f)
         admitted = [x for x in rt.store.audit_records("sw1") if x["type"] == "session-admitted"]
         assert [x["detail"]["call_type"] for x in admitted] == ["switching-order"]
@@ -893,6 +895,8 @@ def test_a_displaced_holder_s_call_is_kept_or_released_as_stated(tmp_path, pki, 
             core.on_bytes(msg("REGISTER", "sip:utility.example", f"r-{u}", 1, u, u,
                               extra=[f"Contact: <{u}>"]), f)
         core.on_bytes(publish(ENG[0], ["control-engineer"], call_id="a"), f0)
+        core.on_bytes(msg("REGISTER", "sip:utility.example", "r-e0", 1, ENG[0], ENG[0],
+                          extra=[f"Contact: <{ENG[0]}>"]), f0)   # SIP-OP-21
         core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f0)
         # A switching order is held to 4 (PRF-OP-01): e0 and three invited.
         invited = sorted(u for u, f in legs.items() if f.requests("INVITE"))
@@ -934,6 +938,8 @@ def test_a_call_that_cannot_be_released_does_not_undo_the_take_over(tmp_path, pk
                               extra=[f"Contact: <{u}>"]), f)
         f1 = legs[ENG[1]]
         core.on_bytes(publish(ENG[0], ["control-engineer"], call_id="a"), f0)
+        core.on_bytes(msg("REGISTER", "sip:utility.example", "r-e0", 1, ENG[0], ENG[0],
+                          extra=[f"Contact: <{ENG[0]}>"]), f0)   # SIP-OP-21
         core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f0)
         core.on_bytes(invite("sw2", ENG[0], "grp:sw", "prearranged-group",
                              from_tag="ft2"), f0)
@@ -1013,7 +1019,10 @@ def test_the_location_is_the_publishes_or_else_the_last_reported_cell(tmp_path, 
         assert "no location to hold the functional alias at" in _last(f0).headers.get("Warning")
         core.on_bytes(publish(DRV[0], ["track-controller"], cell=CELL_S1, call_id="l1"), f0)
         assert _last(f0).code == 200
-        # DRV[1] reports S2 on a call, then publishes with no location.
+        # DRV[1] (registered: SIP-OP-21) reports S2 on a call, then publishes
+        # with no location.
+        core.on_bytes(msg("REGISTER", "sip:frmcs.example", "r-d1", 1, DRV[1], DRV[1],
+                          extra=[f"Contact: <{DRV[1]}>"]), f1)
         sdp = SDP
         body = mcf.with_parts(sdp, mcf.mcinfo_xml("private", DRV[2]),
                               (mcf.CT_LOCATION, mcf.location_report(ecgi=CELL_S2)))
@@ -1125,6 +1134,41 @@ def test_a_store_failing_after_the_resolver_is_recorded_end_to_end(tmp_path, pki
         recs = [x["detail"] for x in rt.store.audit_records("b") if x["type"] == "binding-changed"]
         assert recs == [{"action": "not-persisted", "stage": "after-resolver", "user": ENG[1],
                          "wanted": ["control-engineer"], "detail": "disk I/O error"}]
+    finally:
+        core.close()
+        rt.close()
+
+
+def test_a_displaced_holder_s_call_it_already_left_is_not_released(tmp_path, pki):
+    """Review of SIP-OP-24, F5: e0 left its switching order, which went on
+    (MCX_GROUP_INITIATOR_LEAVES=continue); it is no longer a party, so e1
+    taking the alias over does not release the members' call, even with
+    MCX_DISPLACED_HOLDER_CALLS=release."""
+    rt, core = _start(utility_env(tmp_path, pki, take_over=[ENG[1]],
+                                  MCX_DISPLACED_HOLDER_CALLS="release",
+                                  MCX_GROUP_INITIATOR_LEAVES="continue"))
+    try:
+        f0 = Flow(ENG[0])
+        legs = {u: Flow(u) for u in ENG[1:] + [f"sip:x{i}@utility.example" for i in range(5)]}
+        f1 = legs[ENG[1]]
+        for u, f in legs.items():
+            core.on_bytes(msg("REGISTER", "sip:utility.example", f"r-{u}", 1, u, u,
+                              extra=[f"Contact: <{u}>"]), f)
+        core.on_bytes(publish(ENG[0], ["control-engineer"], call_id="a"), f0)
+        core.on_bytes(msg("REGISTER", "sip:utility.example", "r-e0", 1, ENG[0], ENG[0],
+                          extra=[f"Contact: <{ENG[0]}>"]), f0)
+        core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f0)
+        invited = sorted(u for u, f in legs.items() if f.requests("INVITE"))
+        for u in invited:
+            core.on_bytes(answer(legs[u].requests("INVITE")[0], 200, SDP, tag=f"t{u[4:6]}"),
+                          legs[u])
+        core.on_bytes(msg("BYE", LOCAL, "sw1", 2, ENG[0], LOCAL, to_tag=_tag("sw1")), f0)
+        assert [s.correlation_id for s in rt.manager.active] == ["sw1"]
+        core.on_bytes(publish(ENG[1], ["control-engineer"], take_over="true", call_id="b"), f1)
+        assert [m.code for m in f1.messages() if getattr(m, "code", None)][-1] == 200
+        assert [s.correlation_id for s in rt.manager.active] == ["sw1"]
+        assert [r for r in rt.store.audit_records("sw1") if r["type"] == "session-released"] == []
+        assert [u for u, f in legs.items() if f.requests("BYE")] == []
     finally:
         core.close()
         rt.close()

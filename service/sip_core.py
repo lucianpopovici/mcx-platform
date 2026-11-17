@@ -137,6 +137,9 @@ class Call:
     ended: bool = False
     skip_bye_to: Optional[str] = None
     bye_sent_to_initiator: bool = False
+    # SIP-OP-24 (MCX_GROUP_INITIATOR_LEAVES=continue): the initiator left a
+    # group call that goes on; its dialog is gone, the call is the members'.
+    initiator_left: bool = False
     cseq_out: int = 0
     media: Optional[MediaSession] = None
     # The call's codec (core/codec.py): chosen from the caller's offer by the
@@ -325,6 +328,10 @@ def _tag(seed: str) -> str:
     the caller's side of the dialog on a shared (core) connection (review of
     SIP-OP-17)."""
     return "mcx-" + hmac.new(_TAG_KEY, seed.encode(), hashlib.sha256).hexdigest()[:16]
+
+
+# SIP-OP-21: the release cause of a call whose caller's registration expired.
+REGISTRATION_EXPIRED = "registration-expired"
 
 
 class SipCore:
@@ -644,6 +651,10 @@ class SipCore:
                 for cid in self.rt.manager.sessions_of_role(h.identity, h.holder):
                     try:
                         call = self.calls.get(cid)
+                        if call is not None and not self._still_in(call, h.holder):
+                            # It left that call (SIP-OP-24): the call goes on
+                            # without it, and is not its to end.
+                            continue
                         if call is not None:
                             self._end(call, cause=TAKEN_OVER_CAUSE)
                         else:
@@ -940,6 +951,34 @@ class SipCore:
             return None
         return self.flows_by_user.get(aor)
 
+    def _unbound_caller(self, caller: str, flow: Any) -> bool:
+        """SIP-OP-21 (owner decision 2026-11-17): True if this deployment is
+        the caller's participating function and finds no in-date binding of
+        the caller -- "if the participating MCPTT function cannot find a
+        binding between the public user identity and an MCPTT ID or if the
+        validity period of an existing binding has expired": 404, warning
+        141. TS 24.379 states it in each originating INVITE procedure
+        (10.1.1.3.1.1 step 2a, 10.1.2.3.1.1, 11.1.1.3.1.1, 11.1.6.3.1.1;
+        17.3.2.1.1 step 3 from Rel-18) and for a private call's re-INVITE
+        (11.1.1.3.1.3 step 3a). The binding is the registration (7.3.2); an
+        authenticated connection alone is not one.
+
+        Not this deployment's to check: a caller outside the served domains
+        (MCX_FOREIGN_INITIATOR=allow; its own system's participating function
+        holds its binding), and a call a trusted SIP core relays to a
+        deployment that hosts only the controlling role (the caller's
+        participating function is the core's side). A user attached directly
+        to a controlling-only deployment has no participating function but
+        this one, and is checked (review). With SIP-OP-03's separate roles
+        this must follow the role played for the request, not the roles
+        hosted."""
+        if identity.outside([caller], self.rt.loaded.profile.identity.domains):
+            return False
+        if "participating" not in self.rt.config.sip.roles and \
+                getattr(flow, "peer_is_core", False):
+            return False
+        return not self.registrations.is_registered(canonical_uri(caller))
+
     # -- INVITE (initiator side) ---------------------------------------------
 
     def _authenticated_as(self, flow: Any, identity: str) -> bool:
@@ -968,12 +1007,6 @@ class SipCore:
             # Checked before anything is established or anyone invited: the
             # initiator's identity decides priority, roles and admission.
             return self._reject(txn, IDENTITY_NOT_AUTHENTICATED)
-        if sr.location is not None and sr.location.cell_id:
-            # SVC-OP-06: the cell this user last reported (owner decision
-            # 2026-10-23), for a functional alias PUBLISH that reports none.
-            # Kept from an authenticated INVITE whatever its outcome: the
-            # location is the client's claim either way (accepted residue).
-            self.last_location[canonical_uri(sr.initiator)] = sr.location
         if self.rt.config.foreign_initiator == "refuse" and identity.outside(
                 [sr.initiator], self.rt.loaded.profile.identity.domains):
             # RES-OP-11: the participating function's check (TS 24.379
@@ -981,6 +1014,15 @@ class SipCore:
             # controlling function's (17.4.2.2 step 3A) and the session timer.
             # The core makes it again for callers that do not come over SIP.
             return self._reject(txn, INITIATOR_NOT_SERVED)
+        if self._unbound_caller(sr.initiator, flow):
+            return self._reject(txn, INITIATOR_NOT_SERVED)
+        if sr.location is not None and sr.location.cell_id:
+            # SVC-OP-06: the cell this user last reported (owner decision
+            # 2026-10-23), for a functional alias PUBLISH that reports none.
+            # Kept from an INVITE that passed the participating function's
+            # checks, whatever its outcome after them: the location is the
+            # client's claim either way (accepted residue).
+            self.last_location[canonical_uri(sr.initiator)] = sr.location
         if sr.request_id in self._dialogs or sr.request_id in self.calls:
             # A new INVITE reusing a live call's Call-ID would replace that
             # call in every table keyed by it: its BYE would then end the
@@ -1314,7 +1356,10 @@ class SipCore:
             call.media.set_remote(leg.uri, (info.address, info.audio_port),
                                   (info.address, info.floor_port)
                                   if info.floor_port else None)
-            body = self._relay_sdp(call, call.initiator)
+            # The initiator's answer is made once; a member answering after
+            # the initiator left (SIP-OP-24) has no relay endpoint to read.
+            if not call.answered:
+                body = self._relay_sdp(call, call.initiator)
         if not call.answered:
             call.answered = True
             call.answer_sdp = body
@@ -1631,12 +1676,13 @@ class SipCore:
                     Status.OK if known else Status.CALL_DOES_NOT_EXIST))
         self._final(txn, Response(Status.OK))
         if call_id == call.cid:                     # the initiator hung up
-            self._end(call, cause="normal", skip=call.initiator)
+            self._initiator_leaves(call, "normal", bye=False)
             return
         if leg is not None:
-            leg.state = "failed"
-            if not any(l.state == "confirmed" for l in call.legs.values()):
-                self._end(call, cause="normal", skip=leg.uri)
+            # As _dialog_gone does: a refresh of this leg still outstanding
+            # is answered into nothing (its relay endpoint is gone).
+            leg.state, leg.timer, leg.refresh = "failed", None, None
+            self._member_left(call, leg, "normal")
 
     def _end(self, call: Call, cause: str, skip: Optional[str] = None) -> None:
         if call.ended:
@@ -1653,6 +1699,7 @@ class SipCore:
             self.rt.release(call.cid, cause)
             # A private call's member set is the callee alone, so the
             # initiator gets no BYE from the session layer's signals.
+            # (Not to an initiator that left: _bye_leg, SIP-OP-24.)
             if skip != call.initiator and not call.bye_sent_to_initiator:
                 self._bye_leg(call, Signal(SignalType.BYE, target=call.initiator))
         finally:
@@ -1666,6 +1713,8 @@ class SipCore:
         if target == call.skip_bye_to:
             return
         if target == call.initiator:
+            if call.initiator_left:
+                return              # SIP-OP-24: its dialog ended when it left
             call.bye_sent_to_initiator = True
             call.cseq_out += 1
             h = Headers([
@@ -1802,6 +1851,21 @@ class SipCore:
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
         call, leg = found
         state = leg if leg is not None else call
+        if not call.initiator_left and self._unbound_caller(call.initiator, call.flow):
+            # SIP-OP-21 (owner decisions 2026-11-17): a call does not outlive
+            # its caller's registration past the next refresh, whoever sends
+            # it. The caller's own re-INVITE or UPDATE is refused as a new
+            # call would be, 404 warning 141 (TS 24.379 11.1.1.3.1.3 step 3a
+            # for a private call's re-INVITE; every refresh the caller sends,
+            # by the decision); the 404 ends the caller's dialog (RFC 5057
+            # 5.1), so it gets no BYE. A callee's refresh is answered 481: the
+            # call it would refresh is released now, and BYE ends the others.
+            if leg is None:
+                self._reject(txn, INITIATOR_NOT_SERVED)
+                return self._end(call, cause=REGISTRATION_EXPIRED, skip=call.initiator)
+            self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
+            leg.state, leg.timer, leg.refresh = "failed", None, None
+            return self._end(call, cause=REGISTRATION_EXPIRED, skip=leg.uri)
         if leg is None and not call.answered:
             # Early dialog: the platform has no answer to refresh yet.
             return self._final(txn, Response(Status.REQUEST_PENDING))
@@ -2089,12 +2153,85 @@ class SipCore:
             return
         if leg is None:
             log.warning("session %s: initiator dialog %s", call.cid, cause)
-            return self._end(call, cause=cause)
+            return self._initiator_leaves(call, cause, bye=True)
         log.warning("session %s: leg %s %s", call.cid, leg.uri, cause)
         self._bye_leg(call, Signal(SignalType.BYE, target=leg.uri))
         leg.state, leg.timer, leg.refresh = "failed", None, None
-        if not any(l.state == "confirmed" for l in call.legs.values()):
-            self._end(call, cause=cause, skip=leg.uri)
+        self._member_left(call, leg, cause)
+
+    def _is_group_call(self, call: Call) -> bool:
+        """A prearranged or ad hoc group call (TS 24.379 6.3.8.1 item 3 names
+        both, the ad hoc from Rel-18). The adapter knows each call type's
+        MCPTT signature; the core does not read the profile for it
+        (VP1-BND-009)."""
+        return self.adapter.is_group_call_type(call.sr.call_type)
+
+    def _still_in(self, call: Call, who: str) -> bool:
+        """Whether `who` is still a party to the call: the initiator unless it
+        left (SIP-OP-24), or a member whose leg is confirmed."""
+        who = canonical_uri(who)
+        if who == canonical_uri(call.initiator):
+            return not call.initiator_left
+        return any(canonical_uri(l.uri) == who and l.state == "confirmed"
+                   for l in call.legs.values())
+
+    def _confirmed_members(self, call: Call) -> int:
+        return sum(1 for l in call.legs.values() if l.state == "confirmed")
+
+    def _initiator_leaves(self, call: Call, cause: str, bye: bool) -> None:
+        """The initiator's dialog ended (its BYE; `bye`: its session expired,
+        so it is sent one). A private call ends (6.3.8.2 item 3). A group call
+        ends too unless the deployment says MCX_GROUP_INITIATOR_LEAVES=continue
+        (6.3.8.1 item 3, local policy, owner decision 2026-11-17) and two or
+        more members are still in it (item 2): then only the initiator goes --
+        its dialog, its relay endpoint, its place on the floor -- and the
+        call is the members'. A registration that expires is not a leaving:
+        the call is released (SIP-OP-21)."""
+        if call.ended:
+            return
+        if bye and self._unbound_caller(call.initiator, call.flow):
+            # Its dialog expired after its registration did: the expiry is
+            # the refresh it would have sent, and SIP-OP-21 releases the call
+            # whatever MCX_GROUP_INITIATOR_LEAVES says (review of SIP-OP-24).
+            return self._end(call, cause=REGISTRATION_EXPIRED)
+        if (self.rt.config.group_initiator_leaves == "continue"
+                and self._is_group_call(call) and self._confirmed_members(call) >= 2):
+            log.info("session %s: initiator %s left (%s); the call goes on",
+                     call.cid, call.initiator, cause)
+            if bye:
+                self._bye_leg(call, Signal(SignalType.BYE, target=call.initiator))
+            call.initiator_left = True
+            call.timer = call.refresh = None
+            self._dialogs.pop(call.cid, None)
+            if call.media is not None:
+                call.media.remove(call.initiator)
+            self._record_departure(call, call.initiator, "initiator", cause)
+            return
+        self._end(call, cause=cause, skip=None if bye else call.initiator)
+
+    def _member_left(self, call: Call, leg: Leg, cause: str) -> None:
+        """A callee's dialog ended. The call ends when no callee is left -- or,
+        once the initiator has left, when fewer than two remain (6.3.8.1 item
+        2: "only one or no participants"). Otherwise only that member goes."""
+        if call.ended:
+            return
+        left = self._confirmed_members(call)
+        if left == 0 or (call.initiator_left and left < 2):
+            return self._end(call, cause=cause, skip=leg.uri)
+        if call.media is not None:
+            call.media.remove(leg.uri)
+        self._record_departure(call, leg.uri, "member", cause)
+
+    def _record_departure(self, call: Call, who: str, role: str, cause: str) -> None:
+        """The participant-left audit record (SIP-OP-24, owner decision
+        2026-11-17); written after the departure took effect, never undoing
+        it."""
+        try:
+            self.rt.manager.participant_left(call.cid, who, role, cause,
+                                             self._confirmed_members(call))
+        except Exception:                                   # noqa: BLE001
+            log.exception("session %s: the departure of %s was not recorded",
+                          call.cid, who)
 
     def _force_remove(self, call: Call) -> None:
         """Last resort when ending a call faulted: forget it, so that it is
@@ -2122,8 +2259,8 @@ class SipCore:
         now = self.clock()
         for call in list(self.calls.values()):
             with session_context(call.cid):
-                dialogs = [(call, None)] + [(l, l) for l in list(call.legs.values())
-                                            if l.state == "confirmed"]
+                dialogs = [(call, None)] + [
+                    (l, l) for l in list(call.legs.values()) if l.state == "confirmed"]
                 for state, leg in dialogs:
                     if call.ended:
                         break
@@ -2135,6 +2272,13 @@ class SipCore:
                             # RFC 4028 section 10: BYE when the session expires.
                             self._dialog_gone(call, leg, "session-expired")
                         elif timer.refresh_due(now):
+                            if not call.initiator_left and \
+                                    self._unbound_caller(call.initiator, call.flow):
+                                # SIP-OP-21: the platform's own refresh, of any
+                                # of the call's dialogs, is the call's next
+                                # refresh too; the call ends instead.
+                                self._end(call, cause=REGISTRATION_EXPIRED)
+                                break
                             self._send_refresh(call, leg)
                     except Exception:  # noqa: BLE001
                         # Contained: the transaction timers in the same tick, and
@@ -2174,6 +2318,10 @@ class SipCore:
                     (w.leg if w.leg is not None else w.call).awaiting_answer = False
                 continue
             call = self.calls.get(txn.call_id)
+            if call is not None and call.initiator_left:
+                # SIP-OP-24: the initiator left (its BYE) before it ACKed; its
+                # dialog is over, and the members' call is not its to end.
+                continue
             if call is not None and not call.ended:
                 with session_context(call.cid):
                     try:

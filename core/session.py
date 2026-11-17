@@ -861,6 +861,22 @@ class SessionManager:
                                cause=cause)
         return tuple(signals)
 
+    def participant_left(self, correlation_id: str, participant: str, role: str,
+                         cause: str, remaining: int) -> None:
+        """Record that `participant` (`role` "initiator" or "member") left an
+        established session that goes on with `remaining` members (PLT-VP-R1
+        SIP-OP-24). A departure is a fact: like a release it is neither undone
+        nor held up by the audit trail, and a record that cannot be written is
+        logged as lost."""
+        if role not in ("initiator", "member"):
+            raise ValueError(f"participant role {role!r} is not initiator or member")
+        session = self._sessions.get(correlation_id)
+        if session is None or session.state is not SessionState.ESTABLISHED:
+            return
+        self._emit_unless_lost(RecordType.PARTICIPANT_LEFT, correlation_id,
+                               participant=participant, role=role, cause=cause,
+                               remaining=remaining)
+
     def _final_floor(self, session: Session) -> None:
         """End the session's floor; its last transition stands even if its
         record cannot be written (FloorControl.handle `final`)."""
