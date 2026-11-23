@@ -662,10 +662,16 @@ def test_vp1_oam_004_two_calls_log_under_their_own_correlation_ids(call, json_lo
     rt, core, flows, ues, clock = call
     second = {u: UE(u) for u in U}
     try:
-        for cid, side in (("call-a", ues), ("call-b", second)):
+        # A group call and a private call: a second call to the group would
+        # join the first (CC-OP-01).
+        for cid, side, to, ct, answering in (
+                ("call-a", ues, "grp:alpha", "prearranged-group", (U[1], U[2])),
+                ("call-b", second, U[1], "private", (U[1],))):
             with core.lock:
-                core.on_bytes(group_invite(side[U[0]], cid=cid), flows[U[0]])
-                for u in (U[1], U[2]):
+                core.on_bytes(msg("INVITE", LOCAL, cid, 1, U[0], LOCAL,
+                                  body=mcf.body_for(ct, to, side[U[0]].sdp()),
+                                  ctype=mcf.CONTENT_TYPE), flows[U[0]])
+                for u in answering:
                     leg = flows[u].requests("INVITE")[-1]      # this call's leg
                     side[u].learn_relay(mcf.sdp_of(leg))
                     core.on_bytes(answer(leg, 200, side[u].sdp()), flows[u])

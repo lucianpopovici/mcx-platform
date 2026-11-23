@@ -721,7 +721,12 @@ def utility_env(tmp_path, pki, release="19", take_over=(), **over):
     users = ENG + [f"sip:x{i}@utility.example" for i in range(5)]
     net = network_yaml(tmp_path, fname="utility-net.yaml",
                        trusted_cores=["core-client.example"], core_ca=pki / "core-ca.crt",
+                       # Two groups: the holder's second concurrent call is
+                       # to the other (a second call to a group with one
+                       # ongoing joins it, CC-OP-01).
                        groups=[{"id": "grp:sw", "members": users,
+                                "call_type": "switching-order"},
+                               {"id": "grp:sw2", "members": users,
                                 "call_type": "switching-order"}],
                        functional_aliases=[{"id": "control-engineer", "users": ENG[:2],
                                             "take_over": list(take_over)}])
@@ -941,7 +946,7 @@ def test_a_call_that_cannot_be_released_does_not_undo_the_take_over(tmp_path, pk
         core.on_bytes(msg("REGISTER", "sip:utility.example", "r-e0", 1, ENG[0], ENG[0],
                           extra=[f"Contact: <{ENG[0]}>"]), f0)   # SIP-OP-21
         core.on_bytes(invite("sw1", ENG[0], "grp:sw", "prearranged-group"), f0)
-        core.on_bytes(invite("sw2", ENG[0], "grp:sw", "prearranged-group",
+        core.on_bytes(invite("sw2", ENG[0], "grp:sw2", "prearranged-group",
                              from_tag="ft2"), f0)
         assert [s.correlation_id for s in rt.manager.active] == ["sw1", "sw2"]
         real, failed = core._end, []

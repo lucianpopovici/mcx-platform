@@ -181,6 +181,10 @@ class Runtime:
     def establish(self, request: SessionRequest
                   ) -> Tuple[Optional[Session], Tuple[Signal, ...], Optional[Refusal]]:
         session, signals, refusal = self.manager.establish(request)
+        if session is not None and session.correlation_id != request.request_id:
+            # A join (TS 24.379 10.1.1.4.2 step 15): the ongoing session,
+            # already persisted; the transport admits the joiner.
+            return session, signals, refusal
         if session is not None:
             self._persist(session)
             self.on_signals(session, signals)

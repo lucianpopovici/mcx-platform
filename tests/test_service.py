@@ -542,11 +542,12 @@ def clock():
     t[0] += 1
     return t[0]
 rt = build_runtime(dict(os.environ), clock, platform=Platform())
+# One group each: a call to a group with one ongoing would join it (CC-OP-01).
 for i in range(3):
     s, _, r = rt.establish(SessionRequest(request_id="c%%d" %% i,
-        initiator=%r, target="grp:alpha", call_type="prearranged-group",
+        initiator=%r, target="grp:c%%d" %% i, call_type="prearranged-group",
         media=(MediaKind.VOICE,)))
-    assert s is not None, r
+    assert s is not None and s.correlation_id == "c%%d" %% i, r
 rt.release("c2")
 # What was committed, per session, as the killed process last saw it.
 print({c: len(rt.store.audit_records(c)) for c in ("c0", "c1", "c2")}, flush=True)
@@ -555,6 +556,8 @@ os.kill(os.getpid(), signal.SIGKILL)      # no close(), no flush, no atexit
 
 
 def test_vp1_oam_005_committed_records_survive_kill_and_service_returns(env):
+    env = with_network(env, "oam005.yaml", groups=[
+        {"id": f"grp:c{i}", "members": list(U)} for i in range(3)])
     child = subprocess.run([sys.executable, "-c", CRASH % (str(ROOT), U[0])],
                            env={**os.environ, **env}, capture_output=True)
     assert child.returncode == -signal.SIGKILL, child.stderr.decode()
@@ -599,7 +602,7 @@ def test_vp1_oam_005_committed_records_survive_kill_and_service_returns(env):
         assert [r["type"] for r in rt.store.audit_records("c0")].count(
             "session-released") == 1
         session, _, refusal = rt.establish(SessionRequest(
-            request_id="after", initiator=U[0], target="grp:alpha",
+            request_id="after", initiator=U[0], target="grp:c0",
             call_type="prearranged-group", media=(MediaKind.VOICE,)))
         assert refusal is None and session is not None
     finally:

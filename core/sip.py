@@ -1127,6 +1127,11 @@ class Adapter:
             "imminentperil-ind" in info.encrypted
         return imminent and info.emergency is not None
 
+    def session_already_exists(self) -> str:
+        """The Warning header value of the 200 OK to a caller who joined a
+        group call already ongoing (TS 24.379 10.1.1.4.2 step 15j)."""
+        return f'{WARNING_CODE_MISC} {self._host} "123 MCPTT session already exists"'
+
     def too_many_participants(self) -> str:
         """The Warning header value for a group call over its limit."""
         code, text = TOO_MANY_PARTICIPANTS

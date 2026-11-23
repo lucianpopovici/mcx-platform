@@ -88,10 +88,10 @@ def test_vp1_cc_005_group_call_invites_exactly_the_member_set(manager):
     session, signals, refusal = manager.establish(req())
     assert refusal is None and session is not None
     assert session.state is SessionState.ESTABLISHED
-    invited = {s.target for s in signals if s.type is SignalType.INVITE}
-    # Four members, initiator not invited to its own session.
-    assert invited == {f"sip:u{i}@mcptt.example" for i in (1, 2, 3)}
-    assert len(invited) == 3
+    invited = [s.target for s in signals if s.type is SignalType.INVITE]
+    # Four members, the initiator not invited to its own session; each other
+    # member once, in the resolver's order (a list: a duplicate would show).
+    assert invited == [f"sip:u{i}@mcptt.example" for i in (1, 2, 3)]
 
 
 def test_vp1_cc_003_private_call_establishes(manager):
@@ -121,12 +121,33 @@ def test_vp1_cc_007_one_priority_decision_per_session(manager):
     assert session.priority is first        # unchanged for the session's life
 
 
-def test_vp1_cc_002_one_controlling_function_per_session(manager):
+def test_vp1_cc_002_one_controlling_function_per_session(manager, sink):
+    """Two groups, two sessions, each controlled here; a second call to a
+    group whose call is ongoing is that call (TS 24.379 10.1.1.4.2 step 9,
+    CC-OP-01): the same session comes back with a JOIN for the caller, and
+    nothing else -- no invitation, no second controller, no session record
+    (only the hooks it took to know the group: the roles, authorise, resolve)."""
     a, _, _ = manager.establish(req(rid="a"))
-    b, _, _ = manager.establish(req(rid="b"))
+    b, _, _ = manager.establish(req(rid="b", target="grp:pair"))
     assert a.controlling and b.controlling
     assert a.correlation_id != b.correlation_id
+    before = len(sink.records)
+    again, signals, refusal = manager.establish(req(rid="c", initiator="sip:u1@mcptt.example",
+                                                    call_type="emergency-group"))
+    assert again is a and refusal is None
+    assert [(s.type, s.target, dict(s.detail)) for s in signals] == [
+        (SignalType.JOIN, "sip:u1@mcptt.example",
+         {"correlation_id": "a", "call_type": "emergency-group"})]
+    assert manager.session("c") is None
+    assert [(r.type.value, r.detail.get("method")) for r in sink.records[before:]] == [
+        ("hook-invocation", "identities_of"), ("hook-invocation", "authorise"),
+        ("hook-invocation", "resolve")]
+    assert sorted(s.correlation_id for s in manager.active) == ["a", "b"]
     assert len({s.correlation_id for s in manager.active}) == len(manager.active)
+    # Once released, the group's next call is a new session.
+    manager.release("a")
+    fresh, signals, _ = manager.establish(req(rid="d"))
+    assert fresh.correlation_id == "d" and SignalType.JOIN not in [s.type for s in signals]
 
 
 def test_floor_machine_created_for_voice_sessions(manager):

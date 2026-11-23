@@ -1,8 +1,8 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.38 (draft)
-**Date:** 2026-10-28
+**Version:** 0.39 (draft)
+**Date:** 2026-11-23
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
 **Implements:** `core/hooks.py`
@@ -593,6 +593,21 @@ apply it. A session over it:
   renders as 503 "maximum number of sessions reached": a server condition, and
   one a caller may retry.
 
+A call to a group whose call is already ongoing joins that call (TS 24.379
+10.1.1.4.2 steps 9 and 15; PLT-VP-R1 CC-OP-01, since v0.39). The core
+evaluates IF-SES `authorise` and IF-IDR `resolve` and checks membership, as
+for any group call, and then nothing more: the ongoing session's priority,
+admission and decision stand, whatever call type the joiner asked for, and no
+other hook is called for it. The decision's limit is applied to the join as
+decided (INV-1): it counts the parties in the call or being invited to it,
+the joiner left out, and a joiner at the limit is refused
+`participant-limit-exceeded`, SIP 486 with warning `122 too many
+participants` (step 15d; its optional removal of a participant of lower
+priority is not done). A joiner is answered with warning `123 MCPTT session
+already exists` (step 15j). A member invited because it registered during
+the call (late entry, 10.1.1.4.6) is counted the same way, and at the limit
+is not invited.
+
 A routed or partner session has no local members, and the limit is not
 applied to it here. One exception reads the call type's declared limit rather
 than the decision's: 17.4.2.2 step 6 checks an ad hoc caller's list against
@@ -911,6 +926,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.39 | 2026-11-23 | §5.2: a call to a group whose call is ongoing joins it, and the session decision's limit applies to the joiner and to a late entry (TS 24.379 10.1.1.4.2 steps 9 and 15, 10.1.1.4.6; PLT-VP-R1 CC-OP-01, owner decisions). A minor change: no hook or parameter object changes. |
 | 0.38 | 2026-11-17 | §9: `initiator-not-served` also answers a caller with no in-date registration, and that caller's refresh (PLT-VP-R1 SIP-OP-21, owner decision). A minor change: no hook or parameter object changes. |
 | 0.37 | 2026-10-28 | Major change (ICD-VER-003): IF-IDR gains `kind_of` (§3.6), which says what a target is without its members; the core asks it for each entry of an ad hoc caller's list before resolving it (ICD-ADH-003). `MCX_ADHOC_LIST_ENTRIES` (optional, default `users`; PLT-VP-R1 ADHOC-OP-06, owner decision 2026-10-28): with `users` a listed group is left out unresolved and the caller told in the 200 OK's Warning; with `users-and-groups` (a reported deviation) its members are invited, every listed user and member counting against `MCX_ADHOC_LIST_MAX`. All in-tree profiles implement `kind_of` in the same change set. |
 | 0.36 | 2026-10-28 | ICD-ADH-001: `MCX_ADHOC_LIST_MAX` is at most 1 000; a larger value refuses startup (owner decision 2026-10-28, from the review of ICD-OP-01: a listed ad hoc call resolves each entry, one IF-IDR invocation each, under the one SIP, media and timer lock, about 25 µs a user entry, so 1 000 users take about 24 ms at the median). It bounds the entries, not the time: an entry naming a group is resolved over all its members before it is left out (PLT-VP-R1 ADHOC-OP-06). A larger ad hoc call goes by criteria. No interface change; a major change for a deployment that states more than 1 000, which no longer starts. |
