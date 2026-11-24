@@ -90,6 +90,10 @@ class SignalType(Enum):
     START_RECORDING = "start-recording"
     ROUTE_EXTERNAL = "route-external"
     ROUTE_PARTNER = "route-partner"
+    # The request is for a group whose call is already ongoing here: the
+    # caller joins that session (TS 24.379 10.1.1.4.2 steps 9 and 15). The
+    # session returned with it is the ongoing one, not a new one.
+    JOIN = "join"
 
 
 @dataclass(frozen=True)
@@ -141,6 +145,8 @@ class Session:
 FLOOR_UNRECORDED = ("deny", "allow")
 # RES-OP-11: what a caller outside the profile's declared domains gets.
 FOREIGN_INITIATOR = ("refuse", "allow")
+# CC-OP-01: how a participant joined an established session.
+JOIN_KINDS = ("invite", "rejoin", "late-entry")
 
 
 
@@ -480,7 +486,11 @@ class SessionManager:
             Optional[Session], Tuple[Signal, ...], Optional[Refusal]]:
         """Run the §8.1 sequence. Returns (session, signals, refusal).
 
-        Exactly one of `session` and `refusal` is non-None.
+        Exactly one of `session` and `refusal` is non-None. A session whose
+        correlation id is not the request's is the ongoing call of the
+        request's group, which the request joins (step 1b, CC-OP-01): the
+        signals are then one `JOIN` for the caller, and nothing was
+        established; the transport admits the joiner (`admit_join`).
         """
         return self._establish(request, relayed=False)
 
@@ -554,6 +564,28 @@ class SessionManager:
                     return self._refuse(cid, request, NOT_GROUP_MEMBER,
                                         "the caller is not a member of the group",
                                         step="membership")
+
+                # 1b — one controlling function per group call (PLT-CC-002):
+                # a call to a group whose call is already ongoing here joins
+                # it (TS 24.379 10.1.1.4.2 step 9: "if an MCPTT group call for
+                # the group identity is already ongoing"; step 15). Nothing
+                # further is evaluated: the ongoing session's priority,
+                # admission and decision stand, whatever call type this
+                # request asked for (CC-OP-01 decision 1: an in-progress
+                # upgrade is R2, PLT-CC-006/007).
+                if resolution.kind is ResolutionKind.GROUP:
+                    host = self._ongoing_group_session(resolution.group_id)
+                    if host is not None and request.initiator not in resolution.members:
+                        # A group named by a functional identity is not
+                        # checked at 1a; a join always is (step 15a).
+                        return self._refuse(cid, request, NOT_GROUP_MEMBER,
+                                            "the caller is not a member of the group",
+                                            step="membership")
+                    if host is not None:
+                        return host, (Signal(
+                            SignalType.JOIN, target=request.initiator,
+                            detail={"correlation_id": host.correlation_id,
+                                    "call_type": request.call_type}),), None
 
             # 2 — IF-IWF, only when resolution says the target is foreign.
             #
@@ -816,6 +848,9 @@ class SessionManager:
         One check is skipped: MCX_FOREIGN_INITIATOR, since a relayed caller
         is foreign by nature (RES-OP-11). This is the IF-IWF API path only; a
         gateway's INVITE over SIP is an ordinary request and subject to it.
+        Its result reads as `establish`'s: a request for a group whose call is
+        ongoing comes back as that call with a `JOIN` (CC-OP-01), for the
+        caller to admit; no transport calls this path in R1.
         """
         # A read-only copy: the gateway must not change what the core reads
         # back below, nor the caller's own mapping (RES-OP-06).
@@ -860,6 +895,81 @@ class SessionManager:
         self._emit_unless_lost(RecordType.SESSION_RELEASED, correlation_id,
                                cause=cause)
         return tuple(signals)
+
+    def _ongoing_group_session(self, group_id: Optional[str]) -> Optional[Session]:
+        """The established, locally controlled session of the group's call,
+        if one is ongoing (TS 24.379 10.1.1.4.2 step 9). A group identity is
+        compared as SIP compares URIs (RFC 3261 19.1.4)."""
+        if not group_id:
+            return None
+        key = identity.canonical(group_id)
+        for session in self._sessions.values():
+            if session.state is SessionState.ESTABLISHED and session.controlling \
+                    and not session.request.adhoc \
+                    and session.resolution.kind is ResolutionKind.GROUP \
+                    and session.resolution.group_id \
+                    and identity.canonical(session.resolution.group_id) == key:
+                return session
+        return None
+
+    def admit_join(self, correlation_id: str, present: int,
+                   request: Optional[SessionRequest] = None) -> Optional[Refusal]:
+        """Whether one more participant may join the ongoing session
+        `correlation_id`, which `present` parties are in or being invited
+        to: the session decision's limit, applied as decided (PLT-CC-005,
+        PLT-ICD-001 §5.2 INV-1). Over it, TS 24.379 10.1.1.4.2 step 15d
+        refuses with 486, warning 122; removing a participant of lower
+        priority instead is a "may" the platform does not take (CC-OP-01).
+
+        `request`: the joiner's INVITE, whose refusal is audited under its own
+        request id like any other; None for a late entry (10.1.1.4.6), which
+        is simply not made."""
+        session = self._sessions.get(correlation_id)
+        if session is None or session.state is not SessionState.ESTABLISHED:
+            raise ValueError(f"session {correlation_id!r} is not established")
+        limit = session.decision.max_participants
+        if limit is None or present < limit:
+            return None
+        detail = (f"the call has {present} participants, the session decision "
+                  f"allows {limit}")
+        if request is None:
+            return Refusal(reason_code=PARTICIPANT_LIMIT_EXCEEDED, detail=detail)
+        _, _, refusal = self._refuse(request.request_id, request,
+                                     PARTICIPANT_LIMIT_EXCEEDED, detail, step="join")
+        return refusal
+
+    def participant_joined(self, correlation_id: str, participant: str, how: str,
+                           members: int, call_id: str) -> None:
+        """Record that `participant` joined the established session `how`
+        ("invite", "rejoin" or "late-entry") in the dialog `call_id` (the
+        joiner's own INVITE's, whose refusal or hook records are under it; a
+        late entry's, the platform's invitation), the call then having
+        `members` members in it besides its initiator -- the measure
+        participant-left's `remaining` uses (PLT-VP-R1 CC-OP-01). It becomes
+        one of the session's members, so its release reaches it. Written
+        after the join took effect, never undoing it: a record that cannot be
+        written is logged as lost."""
+        if how not in JOIN_KINDS:
+            raise ValueError(f"join kind {how!r} is not one of {', '.join(JOIN_KINDS)}")
+        session = self._sessions.get(correlation_id)
+        if session is None or session.state is not SessionState.ESTABLISHED:
+            return
+        if identity.canonical(participant) not in \
+                {identity.canonical(m) for m in session.members}:
+            session.members = session.members + (participant,)
+        self._emit_unless_lost(RecordType.PARTICIPANT_JOINED, correlation_id,
+                               participant=participant, how=how, members=members,
+                               call_id=call_id)
+
+    def join_failed(self, request: SessionRequest, correlation_id: str,
+                    detail: str) -> None:
+        """A join the transport could not carry out (the joiner's offer, the
+        call's media): the last record of the joiner's INVITE, under its own
+        request id, as every failed INVITE has one (PLT-SIG-005)."""
+        self._emit_unless_lost(RecordType.SESSION_FAILED, request.request_id,
+                               call_type=request.call_type,
+                               initiator=_bounded(request.initiator),
+                               reason_code="", detail=detail, join_of=correlation_id)
 
     def participant_left(self, correlation_id: str, participant: str, role: str,
                          cause: str, remaining: int) -> None:

@@ -212,7 +212,13 @@ def test_a_session_ending_writes_a_pending_gap(mcx):
 def test_the_gap_lists_at_most_a_hundred_sessions(mcx):
     sink = SinkDown()
     mgr = _manager(mcx, sink, "allow")
-    sessions = [mgr.establish(req(rid=f"s{i}", initiator="sip:u0@mcptt.example"))[0]
+    # One group each: a second call to a group with one ongoing joins it
+    # (CC-OP-01).
+    for i in range(GAP_SESSIONS_LISTED + 3):
+        mcx.hooks.identity_resolver.register_group(
+            f"grp:s{i}", [f"sip:u{n}@mcptt.example" for n in range(4)])
+    sessions = [mgr.establish(req(rid=f"s{i}", initiator="sip:u0@mcptt.example",
+                                  target=f"grp:s{i}"))[0]
                 for i in range(GAP_SESSIONS_LISTED + 3)]
     sink.down = True
     for s in sessions:

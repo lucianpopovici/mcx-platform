@@ -46,6 +46,11 @@ class RecordType(Enum):
     # MCX_GROUP_INITIATOR_LEAVES=continue. A departure that ends the session
     # is told by its session-released record instead.
     PARTICIPANT_LEFT = "participant-left"
+    # A participant joined a session already established (TS 24.379
+    # 10.1.1.4.2 step 15, 10.1.1.4.6; PLT-VP-R1 CC-OP-01, owner decision
+    # 2026-11-23): by its own INVITE to the group, replacing its own dialog
+    # (rejoin), or invited when it registered during the call (late entry).
+    PARTICIPANT_JOINED = "participant-joined"
 
 
 @dataclass(frozen=True)

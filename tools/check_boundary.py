@@ -3217,6 +3217,9 @@ PRIORITY_USES: Dict[Tuple[str, str], Tuple[frozenset, str]] = {
     ("core/floor.py", "FloorControl._on_request_taken"): (
         frozenset({"floor_priority", "_holder_priority"}),
         "a request's IF-PRI floor_priority against the holder's (TS 24.380 6.3.4.4.x)"),
+    ("service/media.py", "MediaSession._request"): (frozenset({"priority"}),
+        "IF-PRI's floor priority capped by the one the Floor Request asks for: the "
+        "lower of the two (TS 24.380 6.3.5.4 item 1a.i; owner decision 2026-11-24)"),
     ("core/session.py", "SessionManager.preemption_victims"): (frozenset({"scope"}),
         "IF-PRI decisions' scopes (PLT-ICD-001 4.2 POST-1), then IF-PRI compare"),
     ("core/session.py", "SessionManager._check_bearer"): (
@@ -5011,7 +5014,7 @@ SUITE_IMPORTS = ("__future__", "os", "sys", "pathlib", "pytest", "json", "re",
 # ... and what the pinned checks import besides, to read the code.
 _RUN_TIME_CHECK_IMPORTS = ("ast", "copy", "inspect")
 # Test helpers the suite imports, pinned as reviewed (source_fingerprint).
-SUITE_HELPERS: Dict[str, str] = {"tests/mcpttinfo_fixture.py": "665c553db99b2c58a74bf15e0d401d3f30fbad600d3a12947c48472e57319850"}
+SUITE_HELPERS: Dict[str, str] = {"tests/mcpttinfo_fixture.py": "b1aaf9f2643d0f6defa54484c9da5f67bbfa816a1bd1d5d382726a25f74be09e"}
 # Asking what an object is, or where its code is: a profile's hook class
 # or package tells the profiles apart.
 _INTROSPECTION_CALLS = frozenset({"type", "isinstance", "issubclass"})

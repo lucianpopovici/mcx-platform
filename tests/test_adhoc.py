@@ -439,17 +439,29 @@ def test_criteria_finding_more_than_the_limit_are_189_not_503(core, rt, world):
     assert code == 403 and "189 " in warning
 
 
-def test_a_private_call_carrying_a_resource_list_is_not_read_as_ad_hoc(core, rt, world):
-    """Other INVITEs may carry resource lists (TS 24.379 clause 4.8); only an
-    ad hoc call's list is this code's business, so a list it could not use
-    must not refuse a private call."""
+def test_a_private_call_s_resource_list_names_its_one_callee(core, rt, world):
+    """A private call's list is not an ad hoc participant list: it names the
+    callee (TS 24.379 11.1.1.2.1.1 item 9, owner decision 2026-11-24), and
+    <mcptt-request-uri> does not. A list the platform cannot read for one
+    callee -- an <entry-ref>, or two entries -- leaves the called party
+    undetermined: 403, warning 145 (11.1.1.3.1.1 items 8 and 9), nobody
+    invited."""
     rt.loaded.hooks.identity_resolver.bind("train-driver", F[0], T1)
     xml = mcf.mcinfo_xml("private", F[1])
-    body = mcf.adhoc_body(SDP, xml, mcf.resource_list([F[2]], extra='<entry-ref ref="x"/>'))
+    body = mcf.adhoc_body(SDP, xml, mcf.resource_list([F[2]]))
     core.on_bytes(msg("INVITE", LOCAL, "rv6", 1, F[0], LOCAL, body=body,
                       ctype=mcf.CONTENT_TYPE), world[F[0]])
-    assert world[F[1]].requests("INVITE")
-    assert world[F[2]].requests("INVITE") == []
+    assert world[F[2]].requests("INVITE") and world[F[1]].requests("INVITE") == []
+    for cid, rl in (("rv7", mcf.resource_list([F[2]], extra='<entry-ref ref="x"/>')),
+                    ("rv8", mcf.resource_list([F[1], F[2]]))):
+        world[F[0]].sent.clear()
+        core.on_bytes(msg("INVITE", LOCAL, cid, 1, F[0], LOCAL,
+                          body=mcf.adhoc_body(SDP, xml, rl), ctype=mcf.CONTENT_TYPE),
+                      world[F[0]])
+        final = [m for m in world[F[0]].messages() if getattr(m, "code", 0) >= 300]
+        assert [m.code for m in final] == [403], cid
+        assert "145 unable to determine called party" in final[0].headers.get("Warning")
+    assert len(world[F[2]].requests("INVITE")) == 1 and world[F[1]].requests("INVITE") == []
 
 
 def test_ad_hoc_is_not_understood_before_rel_18(tmp_path, pki, clock):

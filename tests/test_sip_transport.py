@@ -494,6 +494,25 @@ def test_a_register_contact_expires_in_ascii_digits_is_read(core, contact):
     assert [(m.code, m.headers.get("Expires")) for m in f.messages()] == [(200, "60")]
 
 
+@pytest.mark.parametrize("contact,expires,listed", [
+    ("<{u}>;expires=60;q=0.5", None, "<{u}>;expires=60"),
+    ("<{u}>;expires=60 , <sip:x@mcptt.example>", None, "<{u}>;expires=60"),
+    ('"Bob" <{u}>', "120", "<{u}>;expires=120"),
+    ("<{u}>", None, "<{u}>;expires=3600"),
+    ("<{u}>;expires=0", None, None),
+])
+def test_the_register_200_lists_the_binding_it_holds(core, contact, expires, listed):
+    """RFC 3261 10.3 step 8 (batch C review H5): the 200 carries the binding
+    with its expiry -- the stored URI, not the request's header echoed; a
+    deregistration's 200 lists none."""
+    f = Flow(U[1])
+    extra = [f"Contact: {contact.format(u=U[1])}"] + ([f"Expires: {expires}"] if expires else [])
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r-c", 1, U[1], U[1], extra=extra), f)
+    (ok,) = f.messages()
+    assert (ok.code, ok.headers.get_all("Contact")) == \
+        (200, (listed.format(u=U[1]),) if listed else ())
+
+
 # ============================================================ SIP-OP-05
 
 
@@ -670,6 +689,11 @@ def test_a_conformant_client_request_selects_the_declared_call_type(rt, core, wo
         core.on_bytes(invite(cid, U[0], "grp:alpha", ct), world[U[0]])
         recs = {r["correlation_id"]: r for r in rt.store.sessions()}
         assert recs[cid]["call_type"] == ct, (ct, recs[cid])
+        # Ended before the next: a call to a group with one ongoing joins it
+        # (CC-OP-01), and would keep that call's type.
+        core.on_bytes(msg("CANCEL", LOCAL, cid, 1, U[0], LOCAL,
+                          branch=f"z9hG4bK{cid}1INVITE"), world[U[0]])
+        assert rt.manager.session(cid) is None
 
 
 def test_the_invented_format_is_no_longer_understood(rt, core, world):
@@ -701,7 +725,7 @@ def test_the_floor_control_stream_is_not_data_media(core, world, rt):
     counting it as DATA made every real voice call look like voice + data."""
     offer = SDP + "m=application 20032 udp MCPTT\r\na=fmtp:MCPTT mc_queueing\r\n"
     core.on_bytes(msg("INVITE", LOCAL, "fc1", 1, U[0], LOCAL,
-                      body=mcf.multipart(offer, mcf.mcinfo_xml("private", U[1])),
+                      body=mcf.body_for("private", U[1], offer),
                       ctype=mcf.CONTENT_TYPE), world[U[0]])
     (req,) = world[U[1]].requests("INVITE")
     accept = " ".join(req.headers.get_all("Accept-Contact"))
@@ -2424,8 +2448,10 @@ def test_a_fault_in_one_call_s_timers_is_logged_in_its_scope_and_contained(
     as a bare "tick fault" and skipped every other call's timers."""
     from service import logs
     caplog.handler.addFilter(logs.CorrelationFilter())   # as the service's handler
-    for cid in ("f1", "f2"):
-        core.on_bytes(invite(cid, U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    # Two calls at once: a group call and a private call (a second call to
+    # the same group would join the first, CC-OP-01).
+    for cid, to, ct in (("f1", "grp:alpha", "emergency-group"), ("f2", U[1], "private")):
+        core.on_bytes(invite(cid, U[0], to, ct), world[U[0]])
     for req in world[U[1]].requests("INVITE"):
         core.on_bytes(answer(req, 200, SDP), world[U[1]])
     ended = []
@@ -2450,8 +2476,8 @@ def test_a_fault_in_one_call_s_transaction_timeout_is_contained(core, world, cap
     timed-out transactions are still handled."""
     from service import logs
     caplog.handler.addFilter(logs.CorrelationFilter())
-    for cid in ("g1", "g2"):
-        core.on_bytes(invite(cid, U[0], "grp:alpha", "emergency-group"), world[U[0]])
+    for cid, to, ct in (("g1", "grp:alpha", "emergency-group"), ("g2", U[1], "private")):
+        core.on_bytes(invite(cid, U[0], to, ct), world[U[0]])
     handled = []
     real = core._client_timeout
 
@@ -2464,7 +2490,7 @@ def test_a_fault_in_one_call_s_transaction_timeout_is_contained(core, world, cap
     core._client_timeout = timeout
     core.clock.now += 40_000
     core.tick()
-    assert handled.count("g1") == 3 and handled.count("g2") == 3     # three legs each
+    assert handled.count("g1") == 3 and handled.count("g2") == 1     # one per leg
     faults = [r for r in caplog.records
               if r.getMessage() == "client transaction timeout handling failed"]
     assert len(faults) == 3 and {r.correlation_id for r in faults} == {"g1"}
@@ -2512,6 +2538,10 @@ def test_a_prearranged_call_to_a_choosing_group_is_its_call_type(tmp_path, pki, 
             c.on_bytes(invite(cid, U[0], to, sent), flows[U[0]])
             admitted = [x for x in r.store.audit_records(cid) if x["type"] == "session-admitted"]
             assert [x["detail"]["call_type"] for x in admitted] == [want], cid
+            # Ended before the next call to the group, which would join it
+            # (CC-OP-01).
+            c.on_bytes(msg("CANCEL", LOCAL, cid, 1, U[0], LOCAL,
+                           branch=f"z9hG4bK{cid}1INVITE"), flows[U[0]])
     finally:
         c.close()
         r.close()
@@ -2949,8 +2979,9 @@ def test_an_unbound_callers_location_is_not_kept(core, world):
     remaining steps"): the cell an unbound caller reports is not kept for a
     later functional alias PUBLISH. The same report from a bound caller is."""
     def located(cid, caller):
-        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private", U[1]),
-                              (mcf.CT_LOCATION, mcf.location_report(ecgi=mcf.ECGI)))
+        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private"),
+                              (mcf.CT_LOCATION, mcf.location_report(ecgi=mcf.ECGI)),
+                              (mcf.CT_RESOURCE_LISTS, mcf.resource_list([U[1]])))
         return msg("INVITE", LOCAL, cid, 1, caller, LOCAL, body=body,
                    ctype=mcf.CONTENT_TYPE)
     unbound = Flow(UNLISTED)

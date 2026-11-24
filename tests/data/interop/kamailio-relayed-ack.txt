@@ -1,0 +1,10 @@
+ACK sip:u2@127.0.0.1:60034;transport=tls SIP/2.0
+Via: SIP/2.0/TLS 127.0.0.1:45407;branch=z9hG4bKec2d.587c4354344be717f28d75fb264816f9.0;i=4
+Via: SIP/2.0/TLS mcptt.example;received=127.0.0.1;branch=z9hG4bKmcxackmcx-3c5590ac9fe10300e8d86938.75b46e36c6db1b53
+From: <sip:mcptt@mcptt.example>;tag=mcx-3c5590ac9fe10300e8d86938-l
+To: <sip:u2@mcptt.example>;tag=a1014ba2
+Call-ID: mcx-3c5590ac9fe10300e8d86938
+CSeq: 1 ACK
+Max-Forwards: 69
+Content-Length: 0
+

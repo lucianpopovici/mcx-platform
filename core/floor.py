@@ -278,6 +278,18 @@ class FloorControl:
     def queue(self) -> Tuple[str, ...]:
         return tuple(e.participant for e in self._queue)
 
+    def priority_of(self, participant: str) -> Optional[int]:
+        """The floor priority the machine arbitrates `participant` at: the
+        holder's, or its queued request's; None when it is neither. Floor
+        Granted and Queue Position Info report this one (TS 24.380 8.2.4,
+        8.2.12), the effective priority of 6.3.5.4 item 1."""
+        if participant is not None and participant == self._holder:
+            return self._holder_priority
+        for entry in self._queue:
+            if entry.participant == participant:
+                return entry.floor_priority
+        return None
+
     @property
     def history(self) -> Tuple[Transition, ...]:
         return tuple(self._history)

@@ -328,8 +328,9 @@ def test_a_driver_activates_a_train_and_is_called_on_it(tmp_path, pki):
         assert _last(f1).code == 200
         core.on_bytes(msg("REGISTER", "sip:frmcs.example", "r1", 1, DRV[1], DRV[1],
                           extra=[f"Contact: <{DRV[1]}>"]), f1)    # SIP-OP-21
-        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private", td("T1")),
-                              (mcf.CT_LOCATION, mcf.location_report(ecgi=CELL_S1)))
+        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private"),
+                              (mcf.CT_LOCATION, mcf.location_report(ecgi=CELL_S1)),
+                              (mcf.CT_RESOURCE_LISTS, mcf.resource_list([td("T1")])))
         core.on_bytes(msg("INVITE", LOCAL, "dc1", 1, DRV[1], LOCAL, body=body,
                           ctype=mcf.CONTENT_TYPE), f1)
         assert len(f0.requests("INVITE")) == 1, f1.codes()

@@ -1,0 +1,39 @@
+INVITE sip:u2@127.0.0.1:60034;transport=tls SIP/2.0
+Record-Route: <sip:127.0.0.1:45407;transport=tls;lr;ftag=mcx-3c5590ac9fe10300e8d86938-l>
+From: <sip:mcptt@mcptt.example>;tag=mcx-3c5590ac9fe10300e8d86938-l
+Call-ID: mcx-3c5590ac9fe10300e8d86938
+CSeq: 1 INVITE
+Max-Forwards: 69
+To: <sip:u2@mcptt.example>
+Contact: <sip:mcptt@mcptt.example;gr=urn:uuid:42258978-2ca3-499d-887d-311f601db55b>;+g.3gpp.mcptt;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt";isfocus
+Supported: timer
+Allow: INVITE, ACK, BYE, CANCEL, UPDATE, REGISTER, OPTIONS
+Session-Expires: 90
+Accept-Contact: *;+g.3gpp.mcptt;require;explicit
+Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt";require;explicit
+P-Asserted-Service: urn:urn-7:3gpp-service.ims.icsi.mcptt
+Answer-Mode: Manual
+P-Asserted-Identity: <sip:mcptt@mcptt.example>
+Content-Type: multipart/mixed;boundary=mcxd6925eb6ec8d451b
+Via: SIP/2.0/TLS 127.0.0.1:45407;branch=z9hG4bKec2d.8e7899c27729a60c820da615c3137f7b.0;i=4
+Via: SIP/2.0/TLS mcptt.example;received=127.0.0.1;branch=z9hG4bKmcx1.542083f3e802aae3
+Content-Length: 786
+
+--mcxd6925eb6ec8d451b
+Content-Type: application/sdp
+
+v=0
+o=- 0 0 IN IP4 127.0.0.1
+s=-
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 40935 RTP/AVP 97
+a=rtpmap:97 AMR-WB/16000
+a=fmtp:97 mode-set=0,1,2
+m=application 41889 udp MCPTT
+--mcxd6925eb6ec8d451b
+Content-Type: application/vnd.3gpp.mcptt-info+xml
+
+<?xml version="1.0" encoding="UTF-8"?>
+<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0"><mcptt-Params><session-type>prearranged</session-type><mcptt-request-uri type="Normal"><mcpttURI>sip:u2@mcptt.example</mcpttURI></mcptt-request-uri><mcptt-calling-user-id type="Normal"><mcpttURI>sip:u1@mcptt.example</mcpttURI></mcptt-calling-user-id><mcptt-calling-group-id type="Normal"><mcpttURI>grp:alpha</mcpttURI></mcptt-calling-group-id></mcptt-Params></mcpttinfo>
+--mcxd6925eb6ec8d451b--

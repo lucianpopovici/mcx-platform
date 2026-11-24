@@ -22,7 +22,7 @@ import logging
 import re
 import secrets
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import dataclasses
 import threading
@@ -122,6 +122,9 @@ class Leg:
     peer_allows_update: bool = False
     awaiting_answer: bool = False      # our offer (offerless re-INVITE) awaits the ACK
     retired: Any = field(default_factory=weakref.WeakSet)   # connections it left
+    # CC-OP-01: invited because the member registered during the call (TS
+    # 24.379 10.1.1.4.6, late call entry); its answer is a join.
+    late: bool = False
 
 
 @dataclass
@@ -163,6 +166,23 @@ class Call:
     answer_sdp: str = ""
     awaiting_answer: bool = False
     retired: Any = field(default_factory=weakref.WeakSet)
+    # CC-OP-01 (TS 24.379 10.1.1.4.2 step 15). A participant who joined a call
+    # already ongoing by its own INVITE has a dialog of its own, in which the
+    # platform is the UAS as in the initiator's: it is a Call whose `host` is
+    # the cid of the call it joined, and which shares that call's media. The
+    # host keeps its joined dialogs by their Call-ID.
+    host: Optional[str] = None
+    joined: Dict[str, "Call"] = field(default_factory=dict)
+    # The joined dialog through which the initiator is in the call, after it
+    # rejoined (decision 2: the new dialog replaces the old, the role stays):
+    # its leaving is the initiator's, and SIP-OP-21 follows its registration.
+    initiator_via: Optional[str] = None
+    # Who was a party of the call and left it: not invited again by late
+    # entry (owner decision 2026-11-23); they may join by their own INVITE.
+    departed: Set[str] = field(default_factory=set)
+    # The signal the members were first invited with: a late entry (10.1.1.4.6)
+    # is invited as they were.
+    member_sig: Any = None
 
 
 @dataclass
@@ -438,7 +458,9 @@ class SipCore:
         """The correlation id of the session a Call-ID belongs to: the
         caller's dialog or any leg's."""
         call = self._dialogs.get(call_id or "") or self.calls.get(call_id or "")
-        return call.cid if call is not None else None
+        if call is None:
+            return None
+        return call.host or call.cid
 
     def _cid_of_message(self, message: Any) -> Optional[str]:
         """A known call's; for a new INVITE, the Call-ID, which becomes the
@@ -928,17 +950,64 @@ class SipCore:
             # as an unreadable value always was.
             int(expires_s) if expires_s and expires_s.isascii() and expires_s.isdigit()
             else _DEFAULT_REGISTER_S)
+        newly = False
         if seconds == 0:
             self.registrations.deregister(aor)
             self.flows_by_user.pop(aor, None)
         else:
-            self.registrations.register(aor, _uri(contact) or aor,
-                                        seconds * 1000)
+            newly = not self.registrations.is_registered(aor)
+            bound = _uri(contact) or aor
+            self.registrations.register(aor, bound, seconds * 1000)
             self.flows_by_user[aor] = flow
-        self._final(txn, Response(Status.OK, Headers([("Expires", str(seconds))])))
+        ok = Headers([("Expires", str(seconds))])
+        if seconds:
+            # RFC 3261 10.3 step 8: the 200 lists the current bindings, each
+            # with its expiry -- here the one binding the platform holds, not
+            # the request's header echoed (batch C review H5).
+            ok.add("Contact", f"<{bound}>;expires={seconds}")
+        self._final(txn, Response(Status.OK, ok))
         # After the 200 (review): the subscriptions waiting for a connection
         # (after a deregistration there is none, and they go on waiting).
         self._resume_alias_subs(aor)
+        if newly:
+            self._late_entry(aor)
+
+    def _late_entry(self, aor: str) -> None:
+        """TS 24.379 10.1.1.4.6, late call entry (CC-OP-01 decision 3): a
+        member who registers -- newly, or again after its registration
+        expired; registration stands in for affiliation -- while its group
+        has a call ongoing here is invited into it, once per registration,
+        unless it is already a party or being invited. The session
+        decision's limit applies (10.1.1.4.1 via 10.1.1.4.6): at it, nobody
+        is invited."""
+        for call in list(self.calls.values()):
+            # Only a group call has members who are not already its parties.
+            if call.ended or call.host is not None or call.member_sig is None \
+                    or call.sr.adhoc:
+                continue
+            session = self.rt.manager.session(call.cid)
+            if session is None or session.state.value != "established":
+                continue
+            member = next((m for m in session.members if canonical_uri(m) == aor), None)
+            # Only a member never in this call: not anyone who left it, the
+            # initiator included (owner decision 2026-11-23); they may INVITE.
+            if member is None or aor in call.departed \
+                    or self._present_or_invited(call, aor):
+                continue
+            with session_context(call.cid):
+                try:
+                    if self.rt.manager.admit_join(call.cid, self._parties(call)) is not None:
+                        log.info("session %s: %s registered; not invited, the call is full",
+                                 call.cid, member)
+                        continue
+                    log.info("session %s: %s registered; invited (late entry)",
+                             call.cid, member)
+                    self._invite_leg(call, Signal(SignalType.INVITE, target=member,
+                                                  detail=call.member_sig.detail), late=True)
+                except Exception:                           # noqa: BLE001
+                    # One call's fault, after the REGISTER was answered: the
+                    # other calls are still looked at (review F5).
+                    log.exception("session %s: late entry of %s failed", call.cid, member)
 
     def _registered_flow(self, aor: str) -> Any:
         """The connection a user registered on, while the registration is in
@@ -1065,6 +1134,8 @@ class SipCore:
             # Nothing was established: no session, no persisted record, no legs.
             return self._reject(txn, refusal.reason_code, invite=req,
                                 authorisation=refusal.step == "authorise")
+        if session is not None and session.correlation_id != call.cid:
+            return self._join(call, session)
         # `_consume` (called from establish) has created the legs.
         if call.media_error:
             return self._fail_call(call, Status.NOT_ACCEPTABLE_HERE,
@@ -1072,6 +1143,161 @@ class SipCore:
         if all(l.state == "failed" for l in call.legs.values()):
             self._fail_call(call, Status.TEMPORARILY_UNAVAILABLE,
                             "no invitation could be delivered")
+
+    # -- joining a call already ongoing (CC-OP-01) -----------------------------
+
+    def _join(self, j: Call, session: Session) -> None:
+        """TS 24.379 10.1.1.4.2 step 15: the caller joins the group call that
+        is ongoing (step 9), in a dialog of its own. The core has already
+        authorised it and checked it is a member (the platform's order,
+        PLT-ICD-001 §5.0; for a non-member 403 warning 116, where step 15a
+        says 120, the platform having no affiliation). Here: the session
+        decision's limit (step 15d, 486 warning 122), the media (step 15i, m:
+        the call's codec in the caller's offer, or 488), then the 200 OK with
+        the SDP answer and warning 123 (steps 15h-j, n).
+
+        Decisions of 2026-11-23 (CC-OP-01): the call keeps its own type
+        whatever this INVITE asked for; a party already in the call that
+        sends a new INVITE rejoins -- its new dialog replaces the old, which
+        is ended, and it keeps its relay endpoint and its place on the floor;
+        a member still being invited to the call (both sides calling at once)
+        has that invitation CANCELled and joins by its own."""
+        host = self.calls.get(session.correlation_id)
+        if host is None or host.ended or host.host is not None:
+            # Not a call of this transport's (every call is, in R1).
+            return self._join_failed(j, session.correlation_id,
+                                     Status.TEMPORARILY_UNAVAILABLE,
+                                     "the group call in progress cannot be joined here")
+        if host.media is None:
+            return self._join_failed(j, host.cid, Status.NOT_ACCEPTABLE_HERE,
+                                     "the group call in progress has no media to join")
+        offer = _offer_of(j.invite)
+        try:
+            info = parse_sdp(offer)
+            pt = codec_mod.match(offer, host.choice)
+        except SipError:
+            pt = None
+        if pt is None:
+            return self._join_failed(j, host.cid, Status.NOT_ACCEPTABLE_HERE,
+                                     "the offer does not carry the call's codec")
+        me = canonical_uri(j.initiator)
+        legs = [l for l in host.legs.values() if canonical_uri(l.uri) == me
+                and l.state in ("inviting", "ringing", "confirmed")]
+        dialogs = [c for c in host.joined.values() if canonical_uri(c.initiator) == me
+                   and not c.ended]
+        as_initiator = canonical_uri(host.initiator) == me and not host.initiator_left
+        # The initiator's role goes with it into the new dialog (review F2).
+        keeps_role = as_initiator or any(d.cid == host.initiator_via for d in dialogs)
+        rejoin = as_initiator or bool(dialogs) or any(l.state == "confirmed" for l in legs)
+        refusal = self.rt.manager.admit_join(host.cid, self._parties(host, besides=me),
+                                             request=j.sr)
+        if refusal is not None:
+            return self._reject(j.txn, refusal.reason_code, invite=j.invite)
+        # The joiner's dialog takes over from whatever it had in the call.
+        for leg in legs:
+            if leg.state == "confirmed":
+                self._bye_leg(host, Signal(SignalType.BYE, target=leg.uri))
+            else:
+                self._cancel_leg(leg)
+            leg.state, leg.timer, leg.refresh = "failed", None, None
+        for old in dialogs:
+            self._end_joined(old, "rejoined", skip=None, departed=False)
+        if as_initiator:
+            if host.answered:
+                self._bye_leg(host, Signal(SignalType.BYE, target=host.initiator))
+            else:
+                # Its own INVITE is still pending: answered 487 (RFC 3261
+                # 15.1.2), and the call is set up through the new dialog.
+                self._final(host.txn, Response(Status.REQUEST_TERMINATED))
+                host.answered = True
+                host.media.apply(self.rt.manager.start_floor(host.cid))
+            host.initiator_left = True
+            host.timer = host.refresh = None
+            self._dialogs.pop(host.cid, None)
+        key = next((u for u in host.media.endpoints if canonical_uri(u) == me), j.initiator)
+        host.media.add(key)
+        # The relay answers with the joiner's own number (RFC 3264 6.1).
+        host.media.set_payload_types(key, rx=pt, tx=pt)
+        host.media.set_remote(key, (info.address, info.audio_port),
+                              (info.address, info.floor_port) if info.floor_port else None)
+        j.initiator, j.host = key, host.cid
+        j.media, j.choice, j.session_uri = host.media, host.choice, host.session_uri
+        body = self._relay_sdp(host, key)
+        headers = self._answer_headers(j)
+        headers.add("Warning", self.adapter.session_already_exists())
+        headers.add("Content-Type", "application/sdp")
+        j.answered, j.answer_sdp = True, body
+        host.joined[j.cid] = j
+        if keeps_role:
+            host.initiator_via = j.cid
+        self.calls[j.cid] = j
+        self._dialogs[j.cid] = j
+        self._final(j.txn, Response(Status.OK, headers, body))
+        self._start_uas_timer(j)
+        log.info("session %s: %s joined (%s)", host.cid, key,
+                 "rejoin" if rejoin else "invite", extra={"correlation_id": host.cid})
+        if not host.answered:
+            # The call was still being set up: it has a second party now.
+            self._answer_initiator(host, "")
+        self._record_join(host, key, "rejoin" if rejoin else "invite", j.cid)
+
+    def _join_failed(self, j: Call, host_cid: str, status: Status, reason: str) -> None:
+        """A join refused for the media or the call: answered, and recorded as
+        the joiner's INVITE's last record (review F4)."""
+        self._final(j.txn, Response(status, Headers(
+            [("Warning", f'399 mcx "{_quoted(reason)}"')])))
+        self.rt.manager.join_failed(j.sr, host_cid, reason)
+
+    def _parties(self, call: Call, besides: str = "") -> int:
+        """The parties of a call that are in it or being invited to it --
+        what the session decision's limit counts -- leaving out `besides`
+        (canonical)."""
+        n = 0 if call.initiator_left or canonical_uri(call.initiator) == besides else 1
+        n += sum(1 for l in call.legs.values()
+                 if l.state in ("inviting", "ringing", "confirmed")
+                 and canonical_uri(l.uri) != besides)
+        n += sum(1 for c in call.joined.values()
+                 if not c.ended and canonical_uri(c.initiator) != besides)
+        return n
+
+    def _present_or_invited(self, call: Call, who: str) -> bool:
+        return self._parties(call) != self._parties(call, besides=who)
+
+    def _record_join(self, call: Call, who: str, how: str, call_id: str) -> None:
+        """The participant-joined audit record (CC-OP-01 decision 4), after
+        the join took effect, never undoing it."""
+        try:
+            self.rt.manager.participant_joined(call.cid, who, how,
+                                               self._confirmed_members(call), call_id)
+        except Exception:                                   # noqa: BLE001
+            log.exception("session %s: the join of %s was not recorded", call.cid, who)
+
+    def _end_joined(self, j: Call, cause: str, skip: Optional[str],
+                    departed: bool = True) -> None:
+        """A joined participant's dialog ends: a BYE to it unless it ended it
+        itself (`skip`), and it leaves its host call -- as a member who hangs
+        up does, unless it is replaced by a new dialog of its own or the host
+        ended (`departed` False)."""
+        if j.ended:
+            return
+        j.ended = True
+        j.timer = j.refresh = None
+        try:
+            if skip != j.initiator and not j.bye_sent_to_initiator:
+                self._bye_leg(j, Signal(SignalType.BYE, target=j.initiator))
+        finally:
+            self.calls.pop(j.cid, None)
+            for k in [k for k, c in self._dialogs.items() if c is j]:
+                del self._dialogs[k]
+            host = self.calls.get(j.host or "")
+            if host is not None:
+                host.joined.pop(j.cid, None)
+        if departed and host is not None and not host.ended:
+            if host.initiator_via == j.cid:
+                host.initiator_via = None
+                self._rejoined_initiator_left(host, j.initiator, cause)
+            else:
+                self._member_left(host, j.initiator, cause)
 
     def _consume(self, session: Session, signals: Tuple[Signal, ...]) -> None:
         """The seam `SessionManager` signals arrive at."""
@@ -1155,9 +1381,10 @@ class SipCore:
                          [(pt, choice.offered.name)],
                          {pt: choice.offered.fmtp} if choice.offered.fmtp else None)
 
-    def _invite_leg(self, call: Call, sig: Signal) -> None:
+    def _invite_leg(self, call: Call, sig: Signal, late: bool = False) -> None:
         if call.media_error:
             return
+        call.member_sig = sig
         target = sig.target or ""
         # Registrations are keyed by the canonical form (_register); a member
         # the directory spells with an upper-case host is the same user
@@ -1167,7 +1394,8 @@ class SipCore:
         # caller's Call-ID and every other leg's, and with them the platform's
         # tag on each ("<Call-ID>-l"). The tags are part of what binds a dialog
         # to its party (review of the reconnect decision, SIP-OP-18 item 6).
-        leg = Leg(uri=target, call_id=f"mcx-{secrets.token_hex(12)}", flow=flow)
+        leg = Leg(uri=target, call_id=f"mcx-{secrets.token_hex(12)}", flow=flow,
+                  late=late)
         if flow is None:
             # Unregistered, or its flow is gone: the leg is dead on arrival.
             leg.state = "failed"
@@ -1356,29 +1584,40 @@ class SipCore:
             call.media.set_remote(leg.uri, (info.address, info.audio_port),
                                   (info.address, info.floor_port)
                                   if info.floor_port else None)
+        if leg.late:
+            # CC-OP-01: a late entry is a join, once it is in (10.1.1.4.6).
+            self._record_join(call, leg.uri, "late-entry", leg.call_id)
+        if not call.answered:
+            self._answer_initiator(call, body)
+
+    def _answer_initiator(self, call: Call, body: str) -> None:
+        """The 200 OK to the initiator, once: at the first answer from a
+        member, or when a member joins by its own INVITE first (CC-OP-01)."""
+        if call.media is not None:
             # The initiator's answer is made once; a member answering after
             # the initiator left (SIP-OP-24) has no relay endpoint to read.
-            if not call.answered:
-                body = self._relay_sdp(call, call.initiator)
-        if not call.answered:
-            call.answered = True
-            call.answer_sdp = body
-            headers = self._answer_headers(call)
-            ctype = "application/sdp" if body else ""
-            if call.sr.adhoc:
-                ctype, body = self._adhoc_answer(call, body)
-            if body:
-                headers.add("Content-Type", ctype)
-            self._final(call.txn, Response(Status.OK, headers, body))
-            if call.st is not None:
-                # RFC 4028 section 9: the timer runs from the 2xx.
-                call.timer = DialogTimer.start(self.clock(), call.st.seconds,
-                                               call.st.refresher == "uas",
-                                               own=not call.st.peer_supports)
-            if call.media is not None:
-                # The floor starts now, when the call is answered, not when it
-                # was admitted: its timers must not run while callees ring.
-                call.media.apply(self.rt.manager.start_floor(call.cid))
+            body = self._relay_sdp(call, call.initiator)
+        call.answered = True
+        call.answer_sdp = body
+        headers = self._answer_headers(call)
+        ctype = "application/sdp" if body else ""
+        if call.sr.adhoc:
+            ctype, body = self._adhoc_answer(call, body)
+        if body:
+            headers.add("Content-Type", ctype)
+        self._final(call.txn, Response(Status.OK, headers, body))
+        self._start_uas_timer(call)
+        if call.media is not None:
+            # The floor starts now, when the call is answered, not when it
+            # was admitted: its timers must not run while callees ring.
+            call.media.apply(self.rt.manager.start_floor(call.cid))
+
+    def _start_uas_timer(self, call: Call) -> None:
+        if call.st is not None:
+            # RFC 4028 section 9: the timer runs from the 2xx.
+            call.timer = DialogTimer.start(self.clock(), call.st.seconds,
+                                           call.st.refresher == "uas",
+                                           own=not call.st.peer_supports)
 
     def _answer_headers(self, call: Call) -> Headers:
         """The 200 OK to the originator: 6.3.3.2.3.2 items 2-3 and 5-10,
@@ -1553,15 +1792,18 @@ class SipCore:
         A leg that has sent no provisional response yet cannot be CANCELled
         yet; it is marked and CANCELled when one arrives."""
         for leg in call.legs.values():
-            txn = leg.txn
-            if leg.state not in ("inviting", "ringing") or leg.cancel \
-                    or txn is None or txn.done or txn.accepted \
-                    or txn.method != "INVITE":
-                continue
-            if txn.proceeding:
-                self._send_cancel(leg)
-            else:
-                leg.cancel = "pending"
+            self._cancel_leg(leg)
+
+    def _cancel_leg(self, leg: Leg) -> None:
+        txn = leg.txn
+        if leg.state not in ("inviting", "ringing") or leg.cancel \
+                or txn is None or txn.done or txn.accepted \
+                or txn.method != "INVITE":
+            return
+        if txn.proceeding:
+            self._send_cancel(leg)
+        else:
+            leg.cancel = "pending"
 
     def _send_cancel(self, leg: Leg) -> None:
         """RFC 3261 9.1: the INVITE's Request-URI, Call-ID, To, From and
@@ -1607,8 +1849,17 @@ class SipCore:
                         "cancelled by the initiator")
 
     def _maybe_fail(self, call: Call, code: int) -> None:
-        if call.answered or any(l.state in ("inviting", "ringing", "confirmed")
-                                for l in call.legs.values()):
+        # (A call someone joined is answered: _join answers it first.)
+        if any(l.state in ("inviting", "ringing", "confirmed")
+               for l in call.legs.values()):
+            return
+        if call.answered:
+            if self._confirmed_members(call) == 0:
+                # Answered, and every invitation has now failed with no
+                # member in the call: only its initiator is left -- possible
+                # once it rejoined before anyone answered (review F3). Item 2
+                # of 6.3.8.1 releases it.
+                self._end(call, cause="no-participants")
             return
         # A callee's 408 is about the callee, not the caller's request:
         # relaying it would tell the initiator its own request timed out.
@@ -1628,6 +1879,9 @@ class SipCore:
 
     def _undo(self, cid: str, reason: str) -> None:
         self.rt.abandon(cid, reason)
+        call = self.calls.get(cid)
+        for j in list(call.joined.values()) if call is not None else ():
+            self._end_joined(j, reason, skip=None, departed=False)
         call = self.calls.pop(cid, None)
         self.media.close(cid)
         for cid_key in [k for k, c in self._dialogs.items()
@@ -1674,6 +1928,12 @@ class SipCore:
                 known = tag in leg.acks
                 return self._final(txn, Response(
                     Status.OK if known else Status.CALL_DOES_NOT_EXIST))
+        if leg is not None and leg.state != "confirmed":
+            # A leg already over -- its member rejoined, or the platform hung it
+            # up -- whose BYE crossed ours or came late: answered, and nothing
+            # more; above all not a departure, which would take the shared
+            # relay endpoint from the member's new dialog (re-review G1).
+            return self._final(txn, Response(Status.OK))
         self._final(txn, Response(Status.OK))
         if call_id == call.cid:                     # the initiator hung up
             self._initiator_leaves(call, "normal", bye=False)
@@ -1682,9 +1942,12 @@ class SipCore:
             # As _dialog_gone does: a refresh of this leg still outstanding
             # is answered into nothing (its relay endpoint is gone).
             leg.state, leg.timer, leg.refresh = "failed", None, None
-            self._member_left(call, leg, "normal")
+            self._member_left(call, leg.uri, "normal")
 
     def _end(self, call: Call, cause: str, skip: Optional[str] = None) -> None:
+        if call.host is not None:
+            # A joined participant's dialog: it leaves its host (CC-OP-01).
+            return self._end_joined(call, cause, skip)
         if call.ended:
             return
         call.ended = True
@@ -1703,6 +1966,13 @@ class SipCore:
             if skip != call.initiator and not call.bye_sent_to_initiator:
                 self._bye_leg(call, Signal(SignalType.BYE, target=call.initiator))
         finally:
+            # The joined dialogs the release's BYEs did not reach (CC-OP-01).
+            for j in list(call.joined.values()):
+                try:
+                    self._end_joined(j, cause, skip=skip, departed=False)
+                except Exception:                           # noqa: BLE001
+                    log.exception("ending joined dialog %s of call %s failed",
+                                  j.cid, call.cid)
             self.media.close(call.cid)
             self.calls.pop(call.cid, None)
             for k in [k for k, c in self._dialogs.items() if c is call]:
@@ -1712,6 +1982,11 @@ class SipCore:
         target = sig.target or ""
         if target == call.skip_bye_to:
             return
+        for j in list(call.joined.values()):
+            # A participant who joined, the initiator among them once it
+            # rejoined: its own dialog (CC-OP-01; review F1).
+            if canonical_uri(j.initiator) == canonical_uri(target) and not j.ended:
+                self._end_joined(j, "released", skip=None, departed=False)
         if target == call.initiator:
             if call.initiator_left:
                 return              # SIP-OP-24: its dialog ended when it left
@@ -1851,7 +2126,7 @@ class SipCore:
             return self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
         call, leg = found
         state = leg if leg is not None else call
-        if not call.initiator_left and self._unbound_caller(call.initiator, call.flow):
+        if self._initiator_unbound(call):
             # SIP-OP-21 (owner decisions 2026-11-17): a call does not outlive
             # its caller's registration past the next refresh, whoever sends
             # it. The caller's own re-INVITE or UPDATE is refused as a new
@@ -1866,6 +2141,16 @@ class SipCore:
             self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
             leg.state, leg.timer, leg.refresh = "failed", None, None
             return self._end(call, cause=REGISTRATION_EXPIRED, skip=leg.uri)
+        host = self._unbound_host(call)
+        if host is not None:
+            # A joined member's refresh after the call's caller's registration
+            # expired: as a callee's (re-review G2), 481 -- which ends its
+            # dialog (RFC 5057 5.1), so it gets no BYE -- and the call is
+            # released.
+            self._final(txn, Response(Status.CALL_DOES_NOT_EXIST))
+            self._end_joined(call, REGISTRATION_EXPIRED, skip=call.initiator,
+                             departed=False)
+            return self._end(host, cause=REGISTRATION_EXPIRED)
         if leg is None and not call.answered:
             # Early dialog: the platform has no answer to refresh yet.
             return self._final(txn, Response(Status.REQUEST_PENDING))
@@ -2157,7 +2442,7 @@ class SipCore:
         log.warning("session %s: leg %s %s", call.cid, leg.uri, cause)
         self._bye_leg(call, Signal(SignalType.BYE, target=leg.uri))
         leg.state, leg.timer, leg.refresh = "failed", None, None
-        self._member_left(call, leg, cause)
+        self._member_left(call, leg.uri, cause)
 
     def _is_group_call(self, call: Call) -> bool:
         """A prearranged or ad hoc group call (TS 24.379 6.3.8.1 item 3 names
@@ -2170,13 +2455,47 @@ class SipCore:
         """Whether `who` is still a party to the call: the initiator unless it
         left (SIP-OP-24), or a member whose leg is confirmed."""
         who = canonical_uri(who)
+        if any(canonical_uri(c.initiator) == who and not c.ended
+               for c in call.joined.values()):
+            return True
         if who == canonical_uri(call.initiator):
             return not call.initiator_left
         return any(canonical_uri(l.uri) == who and l.state == "confirmed"
                    for l in call.legs.values())
 
     def _confirmed_members(self, call: Call) -> int:
-        return sum(1 for l in call.legs.values() if l.state == "confirmed")
+        """The members in the call besides its initiator: confirmed legs and
+        joined dialogs, the initiator's own (initiator_via) not counted."""
+        return sum(1 for l in call.legs.values() if l.state == "confirmed") + \
+            sum(1 for c in call.joined.values()
+                if not c.ended and c.cid != call.initiator_via)
+
+    @staticmethod
+    def _initiator_gone(call: Call) -> bool:
+        """The initiator left the call (SIP-OP-24) and is not back in it."""
+        return call.initiator_left and call.initiator_via is None
+
+    def _initiator_unbound(self, call: Call) -> bool:
+        """SIP-OP-21 for the call's caller, through the dialog it is in the
+        call by: its own, or the joined one it rejoined with."""
+        if self._initiator_gone(call):
+            return False
+        via = call.joined.get(call.initiator_via or "")
+        return self._unbound_caller(call.initiator, via.flow if via else call.flow)
+
+    def _unbound_host(self, call: Call) -> Optional[Call]:
+        """For a joined dialog, its host call if that call's caller has no
+        in-date registration (SIP-OP-21, "whoever sends it")."""
+        host = self.calls.get(call.host or "") if call.host else None
+        if host is None or host.ended or not self._initiator_unbound(host):
+            return None
+        return host
+
+    def _goes_on_without_initiator(self, call: Call) -> bool:
+        """MCX_GROUP_INITIATOR_LEAVES=continue, a group call, and two or more
+        members still in it (6.3.8.1 items 2 and 3)."""
+        return (self.rt.config.group_initiator_leaves == "continue"
+                and self._is_group_call(call) and self._confirmed_members(call) >= 2)
 
     def _initiator_leaves(self, call: Call, cause: str, bye: bool) -> None:
         """The initiator's dialog ended (its BYE; `bye`: its session expired,
@@ -2189,15 +2508,18 @@ class SipCore:
         the call is released (SIP-OP-21)."""
         if call.ended:
             return
+        # A joined dialog (CC-OP-01) comes here too: it has no members of its
+        # own, so every branch below ends in _end, which makes it leave its
+        # host alone.
         if bye and self._unbound_caller(call.initiator, call.flow):
             # Its dialog expired after its registration did: the expiry is
             # the refresh it would have sent, and SIP-OP-21 releases the call
             # whatever MCX_GROUP_INITIATOR_LEAVES says (review of SIP-OP-24).
             return self._end(call, cause=REGISTRATION_EXPIRED)
-        if (self.rt.config.group_initiator_leaves == "continue"
-                and self._is_group_call(call) and self._confirmed_members(call) >= 2):
+        if self._goes_on_without_initiator(call):
             log.info("session %s: initiator %s left (%s); the call goes on",
                      call.cid, call.initiator, cause)
+            call.departed.add(canonical_uri(call.initiator))
             if bye:
                 self._bye_leg(call, Signal(SignalType.BYE, target=call.initiator))
             call.initiator_left = True
@@ -2209,18 +2531,34 @@ class SipCore:
             return
         self._end(call, cause=cause, skip=None if bye else call.initiator)
 
-    def _member_left(self, call: Call, leg: Leg, cause: str) -> None:
-        """A callee's dialog ended. The call ends when no callee is left -- or,
-        once the initiator has left, when fewer than two remain (6.3.8.1 item
-        2: "only one or no participants"). Otherwise only that member goes."""
+    def _member_left(self, call: Call, uri: str, cause: str) -> None:
+        """A member's dialog ended (a callee's, or one that joined). The call
+        ends when no member is left -- or, once the initiator has left, when
+        fewer than two remain (6.3.8.1 item 2: "only one or no
+        participants"). Otherwise only that member goes."""
         if call.ended:
             return
         left = self._confirmed_members(call)
-        if left == 0 or (call.initiator_left and left < 2):
-            return self._end(call, cause=cause, skip=leg.uri)
+        if left == 0 or (self._initiator_gone(call) and left < 2):
+            return self._end(call, cause=cause, skip=uri)
+        call.departed.add(canonical_uri(uri))
         if call.media is not None:
-            call.media.remove(leg.uri)
-        self._record_departure(call, leg.uri, "member", cause)
+            call.media.remove(uri)
+        self._record_departure(call, uri, "member", cause)
+
+    def _rejoined_initiator_left(self, call: Call, key: str, cause: str) -> None:
+        """The initiator's dialog ended after it had rejoined (review F2): as
+        when its own dialog ends (_initiator_leaves). A registration that
+        lapsed releases the call whatever the setting (SIP-OP-21)."""
+        if cause != REGISTRATION_EXPIRED and self._goes_on_without_initiator(call):
+            log.info("session %s: initiator %s left (%s); the call goes on",
+                     call.cid, key, cause)
+            call.departed.add(canonical_uri(key))
+            if call.media is not None:
+                call.media.remove(key)
+            self._record_departure(call, key, "initiator", cause)
+            return
+        self._end(call, cause=cause, skip=key)
 
     def _record_departure(self, call: Call, who: str, role: str, cause: str) -> None:
         """The participant-left audit record (SIP-OP-24, owner decision
@@ -2237,6 +2575,17 @@ class SipCore:
         """Last resort when ending a call faulted: forget it, so that it is
         not retried on every tick. Each step on its own, so one fault does not
         stop the others."""
+        if call.host is not None:
+            # A joined dialog has no session of its own (CC-OP-01).
+            try:
+                self._end_joined(call, "session-timer-fault", skip=call.initiator)
+            except Exception:  # noqa: BLE001
+                log.exception("joined dialog fault on call %s", call.cid)
+            call.ended = True
+            self.calls.pop(call.cid, None)
+            for k in [k for k, c in self._dialogs.items() if c is call]:
+                del self._dialogs[k]
+            return
         call.ended = True
         try:
             self.rt.release(call.cid, "session-timer-fault")
@@ -2246,6 +2595,11 @@ class SipCore:
                 self.rt.abandon(call.cid, "session-timer fault")
             except Exception:  # noqa: BLE001
                 log.exception("abandon fault on call %s", call.cid)
+        for j in list(call.joined.values()):
+            try:
+                self._end_joined(j, "session-timer-fault", skip=None, departed=False)
+            except Exception:  # noqa: BLE001
+                log.exception("joined dialog fault on call %s", call.cid)
         try:
             self.media.close(call.cid)
         except Exception:  # noqa: BLE001
@@ -2272,12 +2626,16 @@ class SipCore:
                             # RFC 4028 section 10: BYE when the session expires.
                             self._dialog_gone(call, leg, "session-expired")
                         elif timer.refresh_due(now):
-                            if not call.initiator_left and \
-                                    self._unbound_caller(call.initiator, call.flow):
+                            if self._initiator_unbound(call):
                                 # SIP-OP-21: the platform's own refresh, of any
                                 # of the call's dialogs, is the call's next
                                 # refresh too; the call ends instead.
                                 self._end(call, cause=REGISTRATION_EXPIRED)
+                                break
+                            host = self._unbound_host(call)
+                            if host is not None:
+                                # Of a joined dialog too (re-review G2).
+                                self._end(host, cause=REGISTRATION_EXPIRED)
                                 break
                             self._send_refresh(call, leg)
                     except Exception:  # noqa: BLE001

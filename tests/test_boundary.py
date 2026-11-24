@@ -2256,6 +2256,7 @@ def test_bnd_013_the_reviewed_uses_are_these():
         ("core/floor.py", "FloorControl._enqueue"): ["floor_priority"],
         ("core/floor.py", "FloorControl._on_request_taken"): ["_holder_priority",
                                                                "floor_priority"],
+        ("service/media.py", "MediaSession._request"): ["priority"],
         ("core/session.py", "SessionManager.preemption_victims"): ["scope"],
         ("core/session.py", "SessionManager._check_bearer"): [
             "arp_level", "preemption_capability", "preemption_vulnerability", "priority"],

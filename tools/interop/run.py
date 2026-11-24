@@ -673,6 +673,125 @@ def refusal_comparison(core: str, work: Path, core_port: int, platform_port: int
         platform.stop()
 
 
+def wait_capture(capture, timeout: float = 10.0) -> str:
+    """"" once tcpdump says it is listening, else why not (review H8)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        text = capture.log.read_text(errors="replace") if capture.log.exists() else ""
+        if "listening on" in text:
+            return ""
+        if capture.p.poll() is not None:
+            return text.strip() or f"tcpdump exited {capture.p.returncode}"
+        time.sleep(0.05)
+    return f"tcpdump said nothing in {timeout:.0f} s"
+
+
+def merge_keylogs(work: Path) -> None:
+    """The agents' key logs joined for tshark, every line checked: a damaged
+    line would leave a direction undecryptable without saying so (review H4)."""
+    lines = []
+    for f in sorted(work.glob("keys-*.log")):
+        for line in f.read_text(errors="strict").splitlines():
+            if line and not line.startswith("#"):
+                if len(line.split()) != 3:
+                    raise RuntimeError(f"{f.name}: damaged key log line {line[:40]!r}")
+                lines.append(line)
+    (work / "keys.log").write_text("\n".join(lines) + "\n")
+
+
+def _bottom_via_host(text: str) -> Optional[str]:
+    """The sent-by host of the first Via its sender wrote (the bottom one,
+    RFC 3261 16.6 item 8: each proxy adds its own on top)."""
+    vias = [v for line in text.split("\r\n\r\n", 1)[0].split("\r\n")[1:]
+            for k, _, v in [line.partition(":")] if k.strip().lower() in ("via", "v")
+            for v in v.split(",")]
+    if not vias:
+        return None
+    sent_by = vias[-1].split(";")[0].split()[-1]
+    return re.sub(r":\d+$", "", sent_by).lower()
+
+
+def platform_made(text: str, platform_host: str = DOMAIN) -> bool:
+    """A message the platform wrote, as a proxy delivers it: a request whose
+    bottom Via is the platform's (sent-by its identity's host: it writes
+    `Via: SIP/2.0/TLS mcptt.example;branch=...`, with no port), or a
+    response whose Contact is the platform's identity. A B2BUA writes its
+    own, so none of its messages is the platform's. (Review N1: this looked
+    for the platform's listening port, which its Via does not carry, and
+    matched none of its requests.)"""
+    if text.startswith("SIP/2.0"):
+        return any(re.match(r"\s*<?sip:mcptt@", c, re.I)
+                   for c in analyse_header(text, "Contact") + analyse_header(text, "m"))
+    return _bottom_via_host(text) == platform_host.lower()
+
+
+def analyse_header(text: str, name: str) -> List[str]:
+    out = []
+    for line in text.split("\r\n\r\n", 1)[0].split("\r\n")[1:]:
+        k, _, v = line.partition(":")
+        if k.strip().lower() == name.lower():
+            out.append(v.strip())
+    return out
+
+
+def _mc_tagged(text: str) -> bool:
+    head = text.split("\r\n\r\n", 1)[0].lower()
+    return "+g.3gpp.mcptt" in head or "3gpp-service.ims.icsi.mcptt" in head
+
+
+def wire_tags(core: str, work: Path, core_port: int, platform_port: int,
+              report: Report) -> None:
+    """SIP-OP-02: the messages between the agents and the core, decrypted from
+    the capture with the agents' key logs, against the feature-tag table of
+    tools/e2e/tags.py. Observed, not judged here: what reaches the agents
+    depends on the core's topology. Through a proxy (kamailio) the platform's
+    own messages arrive and are checked; a B2BUA (asterisk) regenerates every
+    message, so none is the platform's, and the count of messages from the
+    core that carry no MCPTT feature tag says what it delivers (review H4)."""
+    sys.path.insert(0, str(HERE.parent / "e2e"))
+    import analyse  # noqa: E402
+    from tags import check_message  # noqa: E402
+    merge_keylogs(work)
+    msgs = analyse.sip_messages(work, [{"sip_port": core_port}])
+    records = analyse.tls_records(work, [{"sip_port": core_port}])
+    (work / "sip-decrypted.txt").write_text("\n\n".join(
+        f"=== frame {m['frame']} {'core ->' if m['from_platform'] else '-> core'} agent port "
+        f"{m['peer_port']}\n{m['text']}" for m in msgs))
+    relayed = [m for m in msgs if m["from_platform"]]
+    mine = [m for m in relayed if platform_made(m["text"])]
+    untagged = [m for m in relayed if not _mc_tagged(m["text"])]
+    bad, kinds = [], {}
+    for m in mine:
+        verdict, kind = check_message(m["text"], True)
+        kinds[kind] = kinds.get(kind, 0) + 1
+        if verdict:
+            bad.append(f"frame {m['frame']} {m['start']}: {verdict}")
+    # The agents log their keys; the platform and the core do not (they are
+    # under test, not instrumented). Records left undecrypted must all be on
+    # connections no agent made: between the platform and the core.
+    agents = {m["peer_port"] for m in msgs}
+    on_agents = sorted(set(records.get("undecrypted_peers", [])) & agents)
+    report.observe(f"wire (keylog-decrypted capture): SIP messages between the agents "
+                   f"and {core}",
+                   f"{len(msgs)} decrypted, {len(relayed)} from the core; "
+                   f"{records['encrypted']} encrypted records, "
+                   f"{len(records['undecrypted'])} not decrypted, "
+                   + (f"none on an agent's connection (all on ports "
+                      f"{records.get('undecrypted_peers', [])}, which no agent used: between "
+                      f"the platform and the core, neither logging keys)"
+                      if not on_agents else f"ON AGENT CONNECTIONS {on_agents}"))
+    if mine:
+        verdict = ("all conform " + json.dumps(kinds, sort_keys=True)) if not bad \
+            else f"{len(bad)} of {len(mine)} do not: " + "; ".join(bad[:4])
+    else:
+        verdict = (f"none of the {len(relayed)} messages from the core is the platform's "
+                   f"(a {TOPOLOGY[core]} writes its own)")
+    report.observe(f"wire: feature tags on the platform's messages as {core} delivered "
+                   "them (tools/e2e/tags.py)", verdict)
+    report.observe(f"wire: messages from {core} with no MCPTT feature tag or ICSI",
+                   f"{len(untagged)} of {len(relayed)}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--core", choices=sorted(CORES), required=True)
@@ -681,6 +800,10 @@ def main() -> int:
                     help="keep the working directory (always kept with --workdir)")
     ap.add_argument("--results", metavar="PATH",
                     help="also write the run as JSON, for tools/vp_results.py")
+    ap.add_argument("--capture", action="store_true",
+                    help="capture loopback with tcpdump and the agents' TLS keys, and "
+                         "report the feature tags as decrypted from the wire between "
+                         "the agents and the core (PLT-VP-R1 SIP-OP-02)")
     args = ap.parse_args()
 
     work = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="mcx-interop-"))
@@ -690,6 +813,20 @@ def main() -> int:
 
     report, uas, procs = Report(), [], []
     platform_port, core_port = free_port(), free_port()
+    capture = None
+    if args.capture:
+        for f in [work / "capture.pcap", work / "keys.log"] + list(work.glob("keys-*.log")):
+            f.unlink(missing_ok=True)
+        UA.keylog_dir = str(work)
+        capture = Proc("tcpdump", ["tcpdump", "-i", "lo", "-U", "-s", "0", "-w",
+                                   str(work / "capture.pcap"), "host", "127.0.0.1"],
+                       work / "tcpdump.log")
+        why = wait_capture(capture)
+        if why:
+            capture.p.terminate()
+            print(f"cannot capture on lo: {why}\n(run as root, or give tcpdump "
+                  f"CAP_NET_RAW and CAP_NET_ADMIN)", file=sys.stderr)
+            return 2
     try:
         platform = start_platform(work, platform_port,
                                   trusted=f"{args.core}.interop.test")
@@ -707,6 +844,13 @@ def main() -> int:
             ua.close()
         for p in reversed(procs):
             p.stop()
+        if capture is not None:
+            time.sleep(0.5)
+            capture.p.send_signal(signal.SIGINT)
+            capture.p.wait(timeout=10)
+            capture.fh.close()
+    if capture is not None:
+        wire_tags(args.core, work, core_port, platform_port, report)
 
     with open(work / "transcript.txt", "w") as t:
         for ua in uas:
