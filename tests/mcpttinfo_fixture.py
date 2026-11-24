@@ -49,11 +49,13 @@ def mcinfo_xml(session_type: str, request_uri: Optional[str] = None,
             f"<mcptt-Params>{''.join(parts)}</mcptt-Params></mcpttinfo>")
 
 
-def multipart(sdp: str, xml: str) -> str:
+def multipart(sdp: str, xml: str, rl: Optional[str] = None) -> str:
     sdp = sdp.replace("\r\n", "\n").rstrip("\n").replace("\n", "\r\n")
+    tail = (f"--{BOUNDARY}\r\nContent-Type: application/resource-lists+xml\r\n\r\n"
+            f"{rl}\r\n") if rl else ""
     return (f"--{BOUNDARY}\r\nContent-Type: application/sdp\r\n\r\n{sdp}\r\n"
             f"--{BOUNDARY}\r\nContent-Type: {CT_MCINFO}\r\n\r\n{xml}\r\n"
-            f"--{BOUNDARY}--\r\n")
+            f"{tail}--{BOUNDARY}--\r\n")
 
 
 CONTENT_TYPE = f"multipart/mixed;boundary={BOUNDARY}"
@@ -64,6 +66,11 @@ def body_for(call_type: str, target: str, sdp: str) -> str:
     unknown call type gets session-type "chat", which no mcx call type
     declares, so the platform finds no call type -- the refusal path."""
     session_type, emergency, peril = MCX.get(call_type, ("chat", False, False))
+    if session_type == "private":
+        # 11.1.1.2.1.1: the callee in a resource list (item 9), not in
+        # <mcptt-request-uri>.
+        return multipart(sdp, mcinfo_xml(session_type, None, emergency, peril),
+                         resource_list([target]))
     return multipart(sdp, mcinfo_xml(session_type, target, emergency, peril))
 
 

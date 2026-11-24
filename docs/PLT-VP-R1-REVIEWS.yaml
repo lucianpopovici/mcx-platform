@@ -1257,23 +1257,20 @@ VP1-HOOK-041:
     while the platform's own pre-emption read it as open). Accepted: a bearer more open than the
     priority decision, the check off (a reported deviation), each state through establish.
 VP1-FC-001:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-24'
   evidence:
-  - tests/test_media.py::test_vp1_fc_001_grant_and_taken_reach_the_right_endpoints
-  - tests/test_media.py::test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire
-  gap: 'Environment: the suite step says ENV-E2E, but the evidence is an in-process MediaSession with
-    recording fakes. No client, no SIP-negotiated floor stream, and FC-OP-11 (floor m=application SDP
-    attributes and the ack-required indication not implemented) is open against VP1-FC-001. Revoke is
-    triggered by calling floor.handle(FLOOR_REVOKE) directly, not by any wire or operator path. ''Per
-    TS 24.380'' is only a round trip through the platform''s own codec (encoder and decoder are the same
-    module). To close: an ENV-E2E run with two real MC clients negotiating the floor stream over SIP,
-    where each of the 8 message types is exchanged and decoded by the client or the trace comparator,
-    not by core.rtcp.'
-  note: The unit test does assert that all 6 server-sent types were sent and all 3 client types were parsed;
-    test_floor_grant_and_taken_arrive_over_udp is real UDP but not listed and covers only Granted and
-    Taken.
+    - tests/test_media.py::test_vp1_fc_001_grant_and_taken_reach_the_right_endpoints
+    - tests/test_media.py::test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire
+    - e2e:VP1-FC-001
+  note: >-
+    End to end in a prearranged group call: all eight messages (queue position as request and
+    info) cross the wire, named by Wireshark's own MCPTT dissector, each in its direction, none
+    malformed, mandatory fields decoded (TS 24.380 8.2.4-8.2.12), revoke cause #2, and
+    tools/trace_compare.py finds 0 deviations in the group call's floor trace. Priority is
+    min(requested, IF-PRI) (SIP-OP-25). Residue: FC-OP-11 (no floor SDP attributes; ack-required
+    path not exercised).
 VP1-FC-010:
   verdict: partial
   by: independent review (agent)
@@ -1384,31 +1381,29 @@ VP1-FC-021:
     and resulting state; the chain is unbroken and equals the machine''s history field by field, deferred
     start, first media and release included. The store failing is RES-OP-14, outside this case.'
 VP1-MED-001:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-24'
   evidence:
-  - tests/test_media.py::test_vp1_med_001_only_the_negotiated_payload_type_is_forwarded
-  - tests/test_media_e2e.py::test_vp1_med_001_only_the_negotiated_codec_is_forwarded
-  gap: 'Both tests show only that an RTP payload type other than the negotiated one is dropped and the
-    negotiated one is forwarded. The VP-OP-03 criterion clauses are not in the evidence. (1) The call
-    uses the first of the profile''s codecs that the caller offers: the e2e caller offers only AMR-WB,
-    so a platform that accepted an undeclared codec would pass. (2) Every party uses that codec with the
-    same payload layout. Environment: SIP is in-process fakes, not ENV-E2E clients with packet capture.
-    To close: add test_med_op_01_the_profile_order_picks_the_codec_and_every_party_is_offered_it and test_rfc_4867_a_callee_answering_another_payload_layout_is_hung_up
-    (both exist) to the evidence, plus an e2e case where the caller offers undeclared and declared codecs
-    and the capture shows only the declared, profile-first codec.'
+    - tests/test_media.py::test_vp1_med_001_only_the_negotiated_payload_type_is_forwarded
+    - tests/test_media_e2e.py::test_vp1_med_001_only_the_negotiated_codec_is_forwarded
+    - e2e:VP1-MED-001
+  note: >-
+    End to end: the caller offers opus (declared by no profile), AMR-WB and PCMU; the answer and
+    the offer to the callee carry AMR-WB alone; of the RTP the caller sends in PT 0, 111 and 96
+    only PT 96 is relayed, to both clients; the private call carries PCMU end to end. Residue:
+    fmtp is not compared between the parties on the wire.
 VP1-MED-002:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-24'
   evidence:
-  - tests/test_codec.py::test_vp1_med_002_nothing_declared_in_the_offer_is_no_codec
-  gap: 'The only evidence is a unit call showing core.codec.choose() returns None. It asserts neither
-    the rejection (no 488, no absence of session or legs) nor the second clause (an acceptable offer negotiated
-    correctly), and it is not ENV-E2E. To close: cite test_offer_with_no_profile_codec_is_refused_488_and_leaves_nothing
-    and test_med_op_01_the_profile_order_picks_the_codec_and_every_party_is_offered_it (in test_media_e2e.py),
-    ideally run in ENV-E2E with real clients.'
+    - tests/test_codec.py::test_vp1_med_002_nothing_declared_in_the_offer_is_no_codec
+    - e2e:VP1-MED-002
+  note: >-
+    End to end: an opus-only offer is refused 488 and nobody is invited, as captured; an
+    acceptable offer is answered with the profile's first offered codec alone. Residue: the 488
+    carries no Warning.
 VP1-MED-003:
   verdict: pass
   by: independent review (agent)
@@ -1573,20 +1568,20 @@ VP1-SIG-002:
     mutants on the exemptions, the ordering, the case of the host and the release paths were
     killed.
 VP1-SIG-003:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-24'
   evidence:
-  - tests/test_sip.py::test_vp1_sig_003_feature_tag_follows_media
-  - tests/test_sip.py::test_vp1_sig_003_invite_carries_feature_tags
-  gap: '''Every request and response'' is not covered. Only a rendered INVITE is checked: no 200/180/4xx
-    responses, no BYE, UPDATE, re-INVITE, ACK, CANCEL or outbound-leg message. The media feature parameters
-    beyond the one tag are not checked (e.g. Accept-Contact for video/data is never checked). ''Verified
-    by trace comparator'' is not met: tools/trace_compare.py is not used. To close: drive a full private
-    and group call through SipCore, collect every message sent on every flow, and run tools/trace_compare.py
-    (or an assertion per message) requiring the TS 24.379 feature tags in Contact/Accept-Contact on each
-    request and response.'
-  note: The Accept-Contact require/explicit check covers the INVITE only.
+    - tests/test_sip.py::test_vp1_sig_003_feature_tag_follows_media
+    - tests/test_sip.py::test_vp1_sig_003_invite_carries_feature_tags
+    - e2e:VP1-SIG-003
+  note: >-
+    End to end (ENV-E2E): every encrypted TLS record on the SIP ports decrypts with the clients'
+    keys (103 of 103) and all 57 frames of application data are SIP; each message is checked
+    against the per-message TS 24.379 feature-tag table in tools/e2e/tags.py, including
+    P-Preferred-Service from clients and P-Asserted-Service from the platform (owner decision
+    2026-11-24, SIP-OP-25); a message the table does not list fails. Residue: re-INVITE, UPDATE
+    and CANCEL are checked only on recorded and doctored data, not on the wire.
 VP1-SIG-004:
   verdict: pass
   by: independent review (agent)
@@ -1720,32 +1715,30 @@ VP1-CC-002:
     event package (15o/p) are not implemented. Two review rounds; findings F1-F8 and G1-G2 fixed
     before signature.
 VP1-CC-003:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-24'
   evidence:
-  - tests/test_session.py::test_vp1_cc_003_private_call_establishes
-  gap: 'Neither clause is asserted. ''Established after callee acceptance'': the test calls SessionManager.establish
-    directly, with no callee answer modelled and no check that establishment waits for one. ''Trace matches
-    the expected flow'': no trace and no comparator (PLT-VER-005 lists CC-003 for trace comparison). It
-    asserts only no refusal, a USER resolution and one INVITE target. To close: an ENV-E2E (or SipCore)
-    private call with manual commencement, asserting the session is not established before the callee''s
-    200 and is afterwards, with the captured message sequence checked by tools/trace_compare.py against
-    the TS 24.379 private call flow.'
+    - tests/test_session.py::test_vp1_cc_003_private_call_establishes
+    - e2e:VP1-CC-003
+  note: >-
+    End to end between two independent clients, decided from the decrypted capture: a
+    specification-form private call (callee in the resource-lists body, 11.1.1.2.1.1 item 9;
+    SIP-OP-25) with Answer-Mode: Manual. The flow is exact (tools/e2e/flows.py): the callee
+    rings, and the caller's 200 OK comes only after the callee's 200, about 0.5 s after ringing;
+    the callee's 180 and 200 follow 6.2.3.2.1 and 6.2.3.1.1.
 VP1-CC-004:
-  verdict: partial
+  verdict: pass
   by: independent review (agent)
-  date: '2026-09-28'
+  date: '2026-11-24'
   evidence:
-  - tests/test_sip_transport.py::test_vp1_cc_004_auto_answer_establishes_without_callee_action
-  gap: 'The case is a private call with automatic commencement, but the test uses an ''emergency-group''
-    call. No private call with auto_answer is exercised. The ''where the session decision sets auto-answer''
-    condition is shown one way only: no test shows that a call type without auto_answer does not get Priv-Answer-Mode.
-    ''Without callee action'' is simulated by the test injecting a 200; no ENV-E2E client shows it. To
-    close: a private call type whose decision sets auto_answer, run through SipCore (and ENV-E2E), asserting
-    Priv-Answer-Mode: Auto and establishment on the client''s automatic 200; plus the negative case, a
-    manual call type carrying no answer-mode header.'
-  note: 'SIP-OP-07: the unforced automatic branch is not expressible; the forced branch is what is tested.'
+    - tests/test_sip_transport.py::test_vp1_cc_004_auto_answer_establishes_without_callee_action
+    - e2e:VP1-CC-004
+  note: >-
+    End to end on a copy of mcx whose private call type sets auto_answer: true: the platform
+    sends Priv-Answer-Mode: Auto (SIP-OP-07, the forced branch), no 18x reaches the caller, and
+    the call is established on the callee's automatic 200, as captured. Residue: no shipped
+    profile sets auto_answer.
 VP1-CC-005:
   verdict: pass
   by: independent review (agent)

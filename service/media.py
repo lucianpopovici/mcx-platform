@@ -288,7 +288,7 @@ class MediaSession:
             return
         t = msg.type
         if t is MsgType.REQUEST:
-            self._request(uri)
+            self._request(uri, msg.priority)
         elif t is MsgType.RELEASE:
             self.apply(self.floor.handle(fl.Event(
                 fl.EventType.FLOOR_RELEASE, participant=uri)))
@@ -301,7 +301,7 @@ class MediaSession:
             # A server-to-client message arriving from a client.
             self.counters["floor_unexpected"] += 1
 
-    def _request(self, uri: str) -> None:
+    def _request(self, uri: str, requested: Optional[int] = None) -> None:
         try:
             priority = self._priority_of(uri)
         except Exception:  # noqa: BLE001 - IF-PRI failed; do not guess
@@ -310,6 +310,13 @@ class MediaSession:
                 MsgType.DENY, PLATFORM_SSRC,
                 rtcp.f_reject(rtcp.DENY_INTERNAL_ERROR, "priority-unavailable")))
             return
+        if requested is not None:
+            # TS 24.380 6.3.5.4 item 1a.i: the lower of the Floor Priority in
+            # the request and the most the participant may ask for -- here
+            # IF-PRI's. Without the field, IF-PRI's is the default (items
+            # 1a.iii, iv). A request never raises a participant above what it
+            # is authorised (owner decision 2026-11-24).
+            priority = min(requested, priority)
         self.apply(self.floor.handle(fl.Event(
             fl.EventType.FLOOR_REQUEST, participant=uri,
             floor_priority=priority)))
@@ -319,7 +326,7 @@ class MediaSession:
         position = queue.index(uri) + 1 if uri in queue else NOT_QUEUED
         self._send(uri, rtcp.message(
             MsgType.QUEUE_POSITION_INFO, PLATFORM_SSRC,
-            rtcp.f_queue_info(position, self._safe_priority(uri))))
+            rtcp.f_queue_info(position, self._floor_priority(uri))))
 
     # -- floor control out ----------------------------------------------------
 
@@ -358,7 +365,7 @@ class MediaSession:
                 self._send(a.target, rtcp.message(
                     MsgType.QUEUE_POSITION_INFO, PLATFORM_SSRC,
                     rtcp.f_queue_info(a.queue_position or 0,
-                                      self._safe_priority(a.target))))
+                                      self._floor_priority(a.target))))
 
     def sync_to(self, uri: str) -> None:
         """Tell one party the current floor state (a late answerer, or the
@@ -387,6 +394,12 @@ class MediaSession:
 
     # -- message construction --------------------------------------------------
 
+    def _floor_priority(self, uri: str) -> int:
+        """The priority the floor machine holds for `uri` (the granted or
+        queued request's, at most what was asked), else IF-PRI's."""
+        held = self.floor.priority_of(uri)
+        return self._safe_priority(uri) if held is None else held
+
     def _safe_priority(self, uri: str) -> int:
         try:
             return self._priority_of(uri)
@@ -401,7 +414,7 @@ class MediaSession:
             else duration_ms
         seconds = ms // 1000
         return rtcp.message(MsgType.GRANTED, PLATFORM_SSRC,
-                            rtcp.f_priority(self._safe_priority(uri)),
+                            rtcp.f_priority(self._floor_priority(uri)),
                             rtcp.f_duration(seconds))
 
     def _taken(self, holder: Optional[str]) -> rtcp.FloorMessage:

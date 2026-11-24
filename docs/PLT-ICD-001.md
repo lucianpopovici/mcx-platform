@@ -1,7 +1,7 @@
 # Profile hook interfaces — Interface Control Document
 
 **Document:** PLT-ICD-001
-**Version:** 0.39 (draft)
+**Version:** 0.40 (draft)
 **Date:** 2026-11-23
 **Status:** Draft for review — not baselined
 **Parent:** PLT-SRS v0.1 §6
@@ -121,6 +121,7 @@ mc_signature: null     # no native MCPTT client can request this call type
 | ICD-SIG-005 | The core renders the same signature into the INVITE it sends each invited member, together with `<mcptt-request-uri>`, `<mcptt-calling-user-id>` and `<mcptt-calling-group-id>` (TS 24.379 6.3.2.2.3 item 8, 10.1.1.4.1.1 item 4). |
 | ICD-SIG-006 | At startup the core reports call types declared `null` and call types whose signature the configured release cannot carry, in the log and in the health document. Whether the second case is fatal is the deployment's stated choice, `MCX_STRICT_RELEASE` (required, no default): `true` refuses to start and names the call types; `false` starts and warns (REL-OP-02, decided 2026-09-24). |
 | ICD-SIG-007 | `SessionRequest.application` and `urgency` are never taken from a native request, because TS 24.379 has no element for either. They come from the call type's declaration. |
+| ICD-SIG-009 | The target the core puts in `SessionRequest.target` for a native request: for a call to a group, `<mcptt-request-uri>` (TS 24.379 10.1.1.2.1.1 item 14b); for a private call, the one `<entry>` of the INVITE's `application/resource-lists+xml` body (11.1.1.2.1.1 item 9), never `<mcptt-request-uri>`. No list, more than one entry, or a list that cannot be read for one callee leaves the target empty; IF-IDR's unknown target is then answered 403 with warning 145 (11.1.1.3.1.1 items 8 and 9), where a callee named but unknown stays 404 + 145 (PLT-VP-R1 SIP-OP-25, owner decision 2026-11-24). |
 | ICD-SIG-008 | A call type TS 24.379 cannot tell apart from another may be chosen by the target group (PLT-VP-R1 PRF-OP-01, decided 2026-10-22). It declares `group_selected: true` (optional, default false) with the signature a call to the group carries. That signature must be a call to a group (`prearranged` or `chat`) and must be declared by exactly one call type that is not group-selected, which every other group's calls get; otherwise, or without a signature, the profile does not load. A group in the network profile names it with `call_type` (ICD-NET-005). A call whose `<mcptt-request-uri>` is that group (compared exactly, as the resolver compares it) and whose signature equals that call type's exactly is that call type; any other call to the group (an emergency one, a private one) is what its signature says, and a group naming no call type changes nothing. The call type is then subject to everything a call type is: its initiator roles at `authorise`, its limits and its floor. Its members' INVITEs carry its signature (ICD-SIG-005). The health document's `call_types.selected_by_group` lists each group-selected call type with the groups that name it (beside ICD-SIG-006's report), and one no group names is warned of at startup. Two consequences, accepted: a caller without the call type's role is refused `not-authorised` calling the group but `unknown-target` calling a group that does not exist, so a group's group-selected call type shows through the refusal (an exception to §5.0's same-refusal property, which holds for a given call type); and a request through IF-IWF names its call type itself and is not subject to the group's choice. |
 
 ### 2.7 Ring limit (declared data, not a hook)
@@ -444,7 +445,12 @@ only be known by reading it, so there `kind_of` resolves it.
 4. `label` is stable for a given decision and suitable for audit.
 
 **INV**
-1. The core performs no priority arithmetic of its own (PLT-HOK-021).
+1. The core performs no priority arithmetic of its own (PLT-HOK-021), with one
+   stated exception: a Floor Request is arbitrated at the lower of its Floor
+   Priority field and `floor_priority`, which is therefore the most a
+   participant may be granted (TS 24.380 6.3.5.4 item 1a.i; PLT-VP-R1
+   SIP-OP-25, owner decision 2026-11-24). Without the field, `floor_priority`
+   applies.
 2. The decision is taken once, at admission, and is immutable for the session
    (PLT-PRI-001). Re-evaluation happens only on an explicit call-type change,
    such as emergency upgrade, which the core treats as a new admission.
@@ -926,6 +932,7 @@ environmental condition.
 
 | Version | Date | Change |
 |---|---|---|
+| 0.40 | 2026-11-24 | ICD-SIG-009: a private call's target is its resource list's one entry, 403 + 145 otherwise; §4.1 INV 1: `floor_priority` is the most a floor request is granted (PLT-VP-R1 SIP-OP-25, owner decisions). A minor change: no hook or parameter object changes. |
 | 0.39 | 2026-11-23 | §5.2: a call to a group whose call is ongoing joins it, and the session decision's limit applies to the joiner and to a late entry (TS 24.379 10.1.1.4.2 steps 9 and 15, 10.1.1.4.6; PLT-VP-R1 CC-OP-01, owner decisions). A minor change: no hook or parameter object changes. |
 | 0.38 | 2026-11-17 | §9: `initiator-not-served` also answers a caller with no in-date registration, and that caller's refresh (PLT-VP-R1 SIP-OP-21, owner decision). A minor change: no hook or parameter object changes. |
 | 0.37 | 2026-10-28 | Major change (ICD-VER-003): IF-IDR gains `kind_of` (§3.6), which says what a target is without its members; the core asks it for each entry of an ad hoc caller's list before resolving it (ICD-ADH-003). `MCX_ADHOC_LIST_ENTRIES` (optional, default `users`; PLT-VP-R1 ADHOC-OP-06, owner decision 2026-10-28): with `users` a listed group is left out unresolved and the caller told in the 200 OK's Warning; with `users-and-groups` (a reported deviation) its members are invited, every listed user and member counting against `MCX_ADHOC_LIST_MAX`. All in-tree profiles implement `kind_of` in the same change set. |

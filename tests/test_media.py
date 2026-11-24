@@ -395,7 +395,7 @@ def test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire():
     clear(ios)
     to_floor(ms, B, MsgType.REQUEST, rtcp.f_priority(0))          # queued
     assert ios[B].types() == [MsgType.QUEUE_POSITION_INFO]
-    assert ios[B].msgs()[0].queue_info == (1, 100)
+    assert ios[B].msgs()[0].queue_info == (1, 0)   # asked 0, may 100: 0
     step()
     to_floor(ms, C, MsgType.REQUEST)                              # queue full
     d = ios[C].msgs()[0]
@@ -403,7 +403,7 @@ def test_vp1_fc_001_request_deny_queue_release_idle_revoke_all_on_the_wire():
     assert d.reject_cause == (rtcp.DENY_QUEUE_FULL, "queue-full")
     step()
     to_floor(ms, B, MsgType.QUEUE_POSITION_REQUEST)
-    assert ios[B].msgs()[0].queue_info == (1, 100)
+    assert ios[B].msgs()[0].queue_info == (1, 0)
     step()
     # A releases with B queued: B is granted directly and no Floor Idle is
     # sent (TS 24.380 6.3.4.3.2 item 3); A is told who holds the floor.
@@ -702,12 +702,48 @@ def test_queue_position_updates_are_sent_as_the_queue_moves():
     assert ios[B].msgs()[0].queue_info == (2, 50)
 
 
-def test_floor_priority_comes_from_the_hook_not_from_the_client():
+def test_a_request_is_arbitrated_at_the_lower_of_its_priority_and_the_hook_s():
+    """TS 24.380 6.3.5.4 item 1a.i; owner decision 2026-11-24: a client that
+    boasts stays at what IF-PRI authorises, one that asks for less gets less."""
     prio = {A: 100, B: 50, C: 60}
     ms, ios, _, floor = make(priority=prio)
     to_floor(ms, B, MsgType.REQUEST, rtcp.f_priority(255))       # client boasts
-    to_floor(ms, C, MsgType.REQUEST, rtcp.f_priority(1))
-    assert floor.queue == (C, B)
+    to_floor(ms, C, MsgType.REQUEST, rtcp.f_priority(1))         # asks for little
+    assert floor.queue == (B, C)
+    assert (floor.priority_of(B), floor.priority_of(C), floor.priority_of(A)) == (50, 1, 100)
+    assert floor.priority_of(D) is None
+
+
+def test_without_a_floor_priority_field_the_hook_s_priority_is_used():
+    """Items 1a.iii and iv: the default priority, which is IF-PRI's."""
+    ms, ios, _, floor = make(priority={A: 100, B: 50, C: 60})
+    to_floor(ms, B, MsgType.REQUEST)
+    to_floor(ms, C, MsgType.REQUEST, rtcp.f_priority(60))        # equal: no change
+    assert floor.queue == (C, B) and floor.priority_of(C) == 60
+
+
+def test_the_queue_position_info_reports_the_priority_arbitrated():
+    ms, ios, _, floor = make(priority={A: 100, B: 50, C: 200})
+    clear(ios)
+    to_floor(ms, C, MsgType.REQUEST, rtcp.f_priority(7))
+    assert ios[C].msgs()[0].queue_info == (1, 7)
+    clear(ios)
+    to_floor(ms, C, MsgType.QUEUE_POSITION_REQUEST)
+    assert ios[C].msgs()[0].queue_info == (1, 7)
+
+
+def test_the_floor_granted_reports_the_priority_arbitrated():
+    """8.2.4: the Floor Granted's Floor Priority is the granted request's,
+    at most what was asked -- it was IF-PRI's, whatever the client asked."""
+    ms, ios, _, floor = make(priority={A: 100, B: 150, C: 60})
+    to_floor(ms, B, MsgType.REQUEST, rtcp.f_priority(30))        # queued at 30
+    clear(ios)
+    to_floor(ms, A, MsgType.RELEASE)
+    (granted,) = [m for m in ios[B].msgs() if m.type is MsgType.GRANTED]
+    assert (floor.holder, granted.priority) == (B, 30)
+    clear(ios)
+    ms.sync_to(B)                                # a repeated grant says the same
+    assert [m.priority for m in ios[B].msgs()] == [30]
 
 
 def test_priority_hook_failure_denies_without_touching_the_machine():

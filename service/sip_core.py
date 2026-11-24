@@ -956,10 +956,16 @@ class SipCore:
             self.flows_by_user.pop(aor, None)
         else:
             newly = not self.registrations.is_registered(aor)
-            self.registrations.register(aor, _uri(contact) or aor,
-                                        seconds * 1000)
+            bound = _uri(contact) or aor
+            self.registrations.register(aor, bound, seconds * 1000)
             self.flows_by_user[aor] = flow
-        self._final(txn, Response(Status.OK, Headers([("Expires", str(seconds))])))
+        ok = Headers([("Expires", str(seconds))])
+        if seconds:
+            # RFC 3261 10.3 step 8: the 200 lists the current bindings, each
+            # with its expiry -- here the one binding the platform holds, not
+            # the request's header echoed (batch C review H5).
+            ok.add("Contact", f"<{bound}>;expires={seconds}")
+        self._final(txn, Response(Status.OK, ok))
         # After the 200 (review): the subscriptions waiting for a connection
         # (after a deregistration there is none, and they go on waiting).
         self._resume_alias_subs(aor)

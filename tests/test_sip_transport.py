@@ -494,6 +494,25 @@ def test_a_register_contact_expires_in_ascii_digits_is_read(core, contact):
     assert [(m.code, m.headers.get("Expires")) for m in f.messages()] == [(200, "60")]
 
 
+@pytest.mark.parametrize("contact,expires,listed", [
+    ("<{u}>;expires=60;q=0.5", None, "<{u}>;expires=60"),
+    ("<{u}>;expires=60 , <sip:x@mcptt.example>", None, "<{u}>;expires=60"),
+    ('"Bob" <{u}>', "120", "<{u}>;expires=120"),
+    ("<{u}>", None, "<{u}>;expires=3600"),
+    ("<{u}>;expires=0", None, None),
+])
+def test_the_register_200_lists_the_binding_it_holds(core, contact, expires, listed):
+    """RFC 3261 10.3 step 8 (batch C review H5): the 200 carries the binding
+    with its expiry -- the stored URI, not the request's header echoed; a
+    deregistration's 200 lists none."""
+    f = Flow(U[1])
+    extra = [f"Contact: {contact.format(u=U[1])}"] + ([f"Expires: {expires}"] if expires else [])
+    core.on_bytes(msg("REGISTER", "sip:mcptt.example", "r-c", 1, U[1], U[1], extra=extra), f)
+    (ok,) = f.messages()
+    assert (ok.code, ok.headers.get_all("Contact")) == \
+        (200, (listed.format(u=U[1]),) if listed else ())
+
+
 # ============================================================ SIP-OP-05
 
 
@@ -706,7 +725,7 @@ def test_the_floor_control_stream_is_not_data_media(core, world, rt):
     counting it as DATA made every real voice call look like voice + data."""
     offer = SDP + "m=application 20032 udp MCPTT\r\na=fmtp:MCPTT mc_queueing\r\n"
     core.on_bytes(msg("INVITE", LOCAL, "fc1", 1, U[0], LOCAL,
-                      body=mcf.multipart(offer, mcf.mcinfo_xml("private", U[1])),
+                      body=mcf.body_for("private", U[1], offer),
                       ctype=mcf.CONTENT_TYPE), world[U[0]])
     (req,) = world[U[1]].requests("INVITE")
     accept = " ".join(req.headers.get_all("Accept-Contact"))
@@ -2960,8 +2979,9 @@ def test_an_unbound_callers_location_is_not_kept(core, world):
     remaining steps"): the cell an unbound caller reports is not kept for a
     later functional alias PUBLISH. The same report from a bound caller is."""
     def located(cid, caller):
-        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private", U[1]),
-                              (mcf.CT_LOCATION, mcf.location_report(ecgi=mcf.ECGI)))
+        body = mcf.with_parts(SDP, mcf.mcinfo_xml("private"),
+                              (mcf.CT_LOCATION, mcf.location_report(ecgi=mcf.ECGI)),
+                              (mcf.CT_RESOURCE_LISTS, mcf.resource_list([U[1]])))
         return msg("INVITE", LOCAL, cid, 1, caller, LOCAL, body=body,
                    ctype=mcf.CONTENT_TYPE)
     unbound = Flow(UNLISTED)

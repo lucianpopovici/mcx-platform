@@ -228,3 +228,64 @@ def test_the_repository_plan_and_reviews_are_consistent():
     cases, reqs = v.read_plan(v.PLAN.read_text(encoding="utf-8"))
     assert v.plan_defects(cases, reqs, v.SRS.read_text(encoding="utf-8")) == []
     v.read_reviews(v.REVIEWS, cases)
+
+
+def test_e2e_evidence_is_one_item_per_case_it_decided():
+    run = {"passed": False, "cases": {
+        "VP1-FC-001": {"passed": True, "steps": []},
+        "VP1-CC-003": {"passed": False, "steps": []}}}
+    assert [(e.id, e.outcome, e.cases) for e in v.from_e2e(run)] == [
+        ("e2e:VP1-CC-003", "failed", ("VP1-CC-003",)),
+        ("e2e:VP1-FC-001", "passed", ("VP1-FC-001",))]
+    assert v.from_e2e(None) == []
+
+
+def test_e2e_evidence_not_supplied_is_not_run_not_stale():
+    rv = review("pass", ("a", "e2e:VP1-X-001"))
+    assert v.judge(case(), [ev("a")], rv, interop_run=False).status == "NOT RUN"
+    assert v.judge(case(), [ev("a")], rv, False, e2e_run=True).status == "STALE"
+    assert v.judge(case(), [ev("a"), ev("e2e:VP1-X-001")], rv, False,
+                   e2e_run=True).status == "PASS"
+    # Interop supplied does not stand in for e2e, nor the other way round.
+    both = review("pass", ("interop:k", "e2e:VP1-X-001"))
+    assert v.judge(case(), [ev("e2e:VP1-X-001")], both, False, e2e_run=True).status == "NOT RUN"
+    assert v.judge(case(), [ev("interop:k")], both, True, e2e_run=False).status == "NOT RUN"
+    assert v.judge(case(), [], both, True, e2e_run=True).status == "STALE"
+
+
+def test_an_e2e_run_of_uncommitted_code_is_refused():
+    """Review H7: it is evidence for no commit."""
+    run = {"passed": True, "commit": "abc", "dirty": True,
+           "cases": {"VP1-FC-001": {"passed": True, "steps": []}}}
+    with pytest.raises(SystemExit, match="uncommitted"):
+        v.from_e2e(run)
+    assert len(v.from_e2e(dict(run, dirty=False))) == 1
+
+
+@pytest.mark.parametrize("run,stale,verdict", [
+    (None, False, "NOT RUN"),
+    ({"cases": {}}, False, "NOT COVERED"),
+    ({"exit_criterion_6": {"a": True, "b": True}}, False, "PASS"),
+    ({"exit_criterion_6": {"a": True, "b": False}}, False, "FAIL"),
+    ({"exit_criterion_6": {"a": True, "b": True}}, True, "STALE"),
+])
+def test_exit_criterion_6_is_read_from_the_e2e_run(run, stale, verdict):
+    """Owner decision 2026-11-24: §10 criterion 6 is shown in the register."""
+    got, parts = v.exit_criterion_6(run, stale)
+    assert got == verdict
+    assert parts == list((run or {}).get("exit_criterion_6", {}).items())
+
+
+def test_the_register_shows_exit_criterion_6_and_each_condition():
+    cases, reqs = v.read_plan(v.PLAN.read_text(encoding="utf-8"))
+    results = {c: v.judge(cases[c], [], None, False) for c in cases}
+    meta = {"commit": "x", "date": "d", "pytest": "p", "gates": "g", "interop": "i",
+            "e2e": "passed",
+            "exit6": ("FAIL", [("two clients", True), ("floor arbitrated", False)])}
+    text = v.render(cases, reqs, results, meta, {}, [])
+    sect = text.split("## Exit criterion 6", 1)[1].split("\n## ", 1)[0]
+    assert "captured and matched by the trace comparator" in sect and "**FAIL**." in sect
+    assert "| two clients | PASS |" in sect and "| floor arbitrated | FAIL |" in sect
+    meta["exit6"] = ("NOT RUN", [])
+    sect = v.render(cases, reqs, results, meta, {}, []).split("## Exit criterion 6", 1)[1]
+    assert "**NOT RUN** (no end-to-end run supplied)." in sect.split("\n## ", 1)[0]

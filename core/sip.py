@@ -963,6 +963,11 @@ class Adapter:
     def _invite(self, signal: Signal, context: DialogContext,
                 request: Optional[SessionRequest]) -> Request:
         headers = self._common(context, cseq_method="INVITE")
+        # RFC 3261 8.1.1.2: To is the callee -- the URI the dialog's ACK, BYE
+        # and refreshes then carry as its remote URI (12.2.1.1). It was this
+        # server's own identity (batch C review H5).
+        if signal.target:
+            headers.set("To", f"<{signal.target}>")
         media = tuple(request.media) if request else (MediaKind.VOICE,)
         tags = self._feature_tags(media)
 
@@ -985,6 +990,10 @@ class Adapter:
         # combined header used to do (PLT-CONF-AUDIT CA-06).
         headers.add("Accept-Contact", f"*;{';'.join(tags)};require;explicit")
         headers.add("Accept-Contact", f"*;{icsi};require;explicit")
+        # 6.3.3.1.2 item 3: the MCPTT ICSI asserted (RFC 6050). The clause
+        # names the header "P-Asserted-Service-Id"; RFC 6050, which it cites,
+        # defines it as P-Asserted-Service (owner decision 2026-11-24).
+        headers.set("P-Asserted-Service", MCPTT_ICSI)
 
         # TS 24.379 clause 11.1.1.2.1.1 step 14 makes these MUTUALLY EXCLUSIVE:
         #
@@ -1074,6 +1083,10 @@ class Adapter:
         (185) or step 5 (186).
         """
         status = REASON_TO_STATUS.get(reason_code, Status.SERVER_ERROR)
+        if reason_code == UNKNOWN_TARGET and self._private_without_callee(invite):
+            # 11.1.1.3.1.1 items 8 and 9: no resource list, or more than one
+            # entry -- 403, where a callee named but unknown stays 404.
+            status = Status.FORBIDDEN
         if status is Status.SERVICE_UNAVAILABLE and reason_code not in KEEP_503:
             status = self._service_status
         headers = self._common(context)
@@ -1212,9 +1225,13 @@ class Adapter:
         of the MCPTT info body (TS 24.379 annex F.1; PLT-ICD-001 2.6), or ""
         when none does, the body is absent, or the configured release has no
         such session type -- and "" is left for the session policy to refuse.
-        Nothing is inferred. The target is <mcptt-request-uri> (10.1.1.2.1.1
-        item 14b for a group, 11.1.1.2.1.1 for a user); the Request-URI of a
-        conformant INVITE is the participating function's own identity.
+        Nothing is inferred. The target of a group call is <mcptt-request-uri>
+        (10.1.1.2.1.1 item 14b); of a private call, the one <entry> of the
+        application/resource-lists+xml body (11.1.1.2.1.1 item 9; owner
+        decision 2026-11-24, batch C review H1) -- none, or several, leave it
+        empty, refused 403 with warning 145 (11.1.1.3.1.1 items 8 and 9). The
+        Request-URI of a conformant INVITE is the participating function's
+        own identity.
 
         A body that is present and malformed raises SipError: a client that
         sent one is broken, and refusing it is VP1-SIG-004's business.
@@ -1248,6 +1265,8 @@ class Adapter:
         sig = info.signature()
         call_type = ""
         to = _uri(info.request_uri) if info.request_uri else target
+        if info.session_type == "private":
+            to = self._called_party(content_type, message.body) or ""
         if sig is not None and supports_session_type(self._release, sig.session_type):
             call_type = self._by_signature.get(sig, "")
             # PRF-OP-01: the target group's call type, when the call carries
@@ -1291,6 +1310,32 @@ class Adapter:
             participants=tuple(_uri(u) for u in listed or ()) if adhoc else (),
             participant_criteria=info.participant_criteria if adhoc else None,
         )
+
+    @staticmethod
+    def _called_party(content_type: str, body: str) -> Optional[str]:
+        """The private call's callee: the resource list's single entry, or
+        None when there is no list or it has more than one entry
+        (11.1.1.3.1.1 items 8 and 9). <mcptt-request-uri> does not name it."""
+        try:
+            listed = mcinfo.participants_of(content_type, body)
+        except mcinfo.McInfoError:
+            # A list it cannot read for one callee (<entry-ref>, <external>,
+            # not XML) leaves the called party undetermined, as no list does.
+            return None
+        return _uri(listed[0]) if listed is not None and len(listed) == 1 else None
+
+    def _private_without_callee(self, invite: Optional[Request]) -> bool:
+        """`invite` asks for a private call and names no single callee."""
+        if invite is None:
+            return False
+        ctype = invite.headers.get("Content-Type") or ""
+        try:
+            raw = mcinfo.mcinfo_of(ctype, invite.body)
+            info = mcinfo.parse(raw) if raw is not None else None
+            return info is not None and info.session_type == "private" and \
+                self._called_party(ctype, invite.body) is None
+        except mcinfo.McInfoError:
+            return False
 
     def _media_from_offer(self, message: Request) -> Tuple[MediaKind, ...]:
         try:

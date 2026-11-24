@@ -1,0 +1,135 @@
+[
+ {
+  "scenario": "private-manual",
+  "sip_port": 56927,
+  "call_id": "call-1569d65f99",
+  "callee_call_id": "mcx-57edc74d302bff59eae750ea",
+  "clients": [
+   {
+    "aor": "sip:u1@mcptt.example",
+    "sip_port": 49112,
+    "rtp": 51464,
+    "floor": 41130,
+    "relay_rtp": 47672,
+    "relay_floor": 54391
+   },
+   {
+    "aor": "sip:u2@mcptt.example",
+    "sip_port": 49120,
+    "rtp": 47302,
+    "floor": 39623,
+    "relay_rtp": 37248,
+    "relay_floor": 43025
+   }
+  ],
+  "callee_rtp_payload_types": [
+   0
+  ]
+ },
+ {
+  "scenario": "group-floor",
+  "sip_port": 56927,
+  "call_id": "call-59bc1e2bf8",
+  "callee_call_id": "mcx-6da607fee6c608fa611dee4d",
+  "clients": [
+   {
+    "aor": "sip:u1@mcptt.example",
+    "sip_port": 49124,
+    "rtp": 59242,
+    "floor": 40371,
+    "relay_rtp": 49919,
+    "relay_floor": 40317
+   },
+   {
+    "aor": "sip:u2@mcptt.example",
+    "sip_port": 49132,
+    "rtp": 52833,
+    "floor": 47546,
+    "relay_rtp": 40116,
+    "relay_floor": 58274
+   }
+  ],
+  "steps": [
+   "u1 granted at setup, u2 told taken",
+   "u2 queued; queue position asked and told",
+   "u1 revoked after talking past T2",
+   "u1 denied while revoked",
+   "u1 released; u2 granted, u1 told taken",
+   "u2 released; both told idle"
+  ],
+  "client_floor_rx": {
+   "sip:u1@mcptt.example": [
+    "granted",
+    "revoke",
+    "deny",
+    "taken",
+    "idle"
+   ],
+   "sip:u2@mcptt.example": [
+    "taken",
+    "queue-position-info",
+    "queue-position-info",
+    "granted",
+    "idle"
+   ]
+  },
+  "callee_rtp_payload_types": [
+   96
+  ],
+  "caller_rtp_payload_types": [
+   96
+  ]
+ },
+ {
+  "scenario": "codec-refused",
+  "sip_port": 56927,
+  "call_id": "call-36540f8813",
+  "clients": [
+   {
+    "aor": "sip:u1@mcptt.example",
+    "sip_port": 49144,
+    "rtp": 54257,
+    "floor": 51822,
+    "relay_rtp": null,
+    "relay_floor": null
+   },
+   {
+    "aor": "sip:u2@mcptt.example",
+    "sip_port": 49150,
+    "rtp": 49021,
+    "floor": 50473,
+    "relay_rtp": null,
+    "relay_floor": null
+   }
+  ],
+  "final": "SIP/2.0 488 Not Acceptable Here",
+  "callee_invites": 0
+ },
+ {
+  "scenario": "private-auto",
+  "sip_port": 53083,
+  "call_id": "call-0ce533e241",
+  "callee_call_id": "mcx-5c1529c73c75dcc9d04597ce",
+  "clients": [
+   {
+    "aor": "sip:u1@mcptt.example",
+    "sip_port": 59968,
+    "rtp": 58181,
+    "floor": 37467,
+    "relay_rtp": 45532,
+    "relay_floor": 49925
+   },
+   {
+    "aor": "sip:u2@mcptt.example",
+    "sip_port": 59970,
+    "rtp": 54456,
+    "floor": 45721,
+    "relay_rtp": 38880,
+    "relay_floor": 57980
+   }
+  ],
+  "callee_rtp_payload_types": [
+   0
+  ]
+ }
+]

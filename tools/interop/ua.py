@@ -22,9 +22,12 @@ import ssl
 import threading
 import time
 import uuid
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 ICSI = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt"
+# The same ICSI unescaped, as P-Preferred-Service / P-Asserted-Service carry
+# it (RFC 6050 4.2; TS 24.229 7.2A.8).
+ICSI_PLAIN = "urn:urn-7:3gpp-service.ims.icsi.mcptt"
 MCINFO = "application/vnd.3gpp.mcptt-info+xml"
 
 
@@ -83,8 +86,13 @@ class Dialog:
 
 
 class UA:
+    # When set, every agent writes its TLS secrets to a key log of its own in
+    # this directory (tools/interop/run.py --capture; PLT-VP-R1 SIP-OP-02).
+    keylog_dir: Optional[str] = None
+    _keylogs = 0
+
     def __init__(self, aor: str, host: str, port: int, pki: str,
-                 name: Optional[str] = None):
+                 name: Optional[str] = None, keylog: Optional[str] = None):
         self.aor = aor
         self.user = aor.split(":", 1)[1].split("@")[0]
         # The user's own certificate when there is one (it names the user's
@@ -98,12 +106,20 @@ class UA:
         ctx.load_verify_locations(f"{pki}/trust.crt")    # platform and cores
         ctx.load_cert_chain(f"{pki}/{name}.crt", f"{pki}/{name}.key")
         ctx.check_hostname = False
+        if keylog is None and UA.keylog_dir:
+            UA._keylogs += 1
+            keylog = os.path.join(UA.keylog_dir, f"keys-{UA._keylogs:02d}.log")
+        if keylog:
+            # NSS key log (SSLKEYLOGFILE format): lets a capture of this
+            # connection be decrypted afterwards (PLT-VP-R1 SIP-OP-02).
+            ctx.keylog_filename = keylog
         self.sock = ctx.wrap_socket(socket.create_connection((host, port), timeout=10))
         self.sock.settimeout(None)
         self.host, self.port = self.sock.getsockname()[:2]
         self.tag = uuid.uuid4().hex[:8]
         self.closed = False
-        threading.Thread(target=self._reader, daemon=True).start()
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
 
     # -- transport -------------------------------------------------------------
     def _reader(self) -> None:
@@ -168,7 +184,17 @@ class UA:
         raise TimeoutError(f"{self.user}: nothing matching {pattern!r}; queued: {seen}")
 
     def close(self) -> None:
+        """Shut the connection down, wait for the reader to leave recv, then
+        close. Closing under a reader still inside recv freed the descriptor
+        while the TLS layer could still write to it: the next file opened got
+        the number, and an encrypted alert landed in a TLS key log."""
         self.closed = True
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        if self._thread is not threading.current_thread():
+            self._thread.join(5)
         try:
             self.sock.close()
         except Exception:
@@ -207,7 +233,8 @@ class UA:
         return self.wait(r"^SIP/2\.0 [2-6]\d\d", call_id=cid)
 
     def invite(self, ruri: str, session_type: str, target: Optional[str],
-               media_port: int, emergency: bool = False) -> dict:
+               media_port: int, emergency: bool = False,
+               answer_mode: str = "Manual") -> dict:
         """A conformant INVITE (TS 24.379 10.1.1.2.1.1 / 11.1.1.2.1.1): the
         Request-URI is the participating function's identity, and what is
         wanted is in an application/vnd.3gpp.mcptt-info+xml part of a
@@ -216,10 +243,17 @@ class UA:
         The first version of this agent sent <mcptt-call_type> appended to
         the SDP -- copied from the platform's own tests, not from the
         specification, so on the one point that mattered most this agent was
-        not independent at all (PLT-CONF-AUDIT CA-20)."""
+        not independent at all (PLT-CONF-AUDIT CA-20).
+
+        A private call names its callee in an application/resource-lists+xml
+        part (11.1.1.2.1.1 item 9), not in <mcptt-request-uri>, and asks for
+        the callee's commencement mode with Answer-Mode (item 14b). The second
+        version of this agent named the callee in <mcptt-request-uri> -- the
+        platform's reading again (batch C review H1, 2026-11-24)."""
         cid = f"call-{uuid.uuid4().hex[:10]}"
+        private = session_type == "private"
         params = f"<session-type>{session_type}</session-type>"
-        if target:
+        if target and not private:
             params += (f'<mcptt-request-uri type="Normal"><mcpttURI>{target}'
                        f"</mcpttURI></mcptt-request-uri>")
         if emergency and session_type != "adhoc":
@@ -231,8 +265,17 @@ class UA:
                '<mcpttinfo xmlns="urn:3gpp:ns:mcpttInfo:1.0">'
                f"<mcptt-Params>{params}</mcptt-Params></mcpttinfo>")
         boundary = "ua" + uuid.uuid4().hex[:12]
-        body = (f"--{boundary}\nContent-Type: application/sdp\n\n{self.sdp(media_port)}"
-                f"--{boundary}\nContent-Type: {MCINFO}\n\n{xml}\n--{boundary}--\n")
+        parts = [("application/sdp", self.sdp(media_port).rstrip("\r\n")), (MCINFO, xml)]
+        if private and target:
+            parts.append(("application/resource-lists+xml",
+                          '<?xml version="1.0" encoding="UTF-8"?>\r\n'
+                          '<resource-lists xmlns="urn:ietf:params:xml:ns:resource-lists">'
+                          f'<list><entry uri="{target}"/></list></resource-lists>'))
+        # RFC 2046 5.1.1: CRLF line breaks, in the parts and around them.
+        body = "".join(f"--{boundary}\r\nContent-Type: {ct}\r\n\r\n"
+                       + content.replace("\r\n", "\n").replace("\n", "\r\n") + "\r\n"
+                       for ct, content in parts) + f"--{boundary}--\r\n"
+        extra = [f"Answer-Mode: {answer_mode}"] if private else []
         sent = self.send([
             f"INVITE {ruri} SIP/2.0", self._via(),
             f"From: <{self.aor}>;tag={self.tag}", f"To: <{ruri}>",
@@ -243,8 +286,10 @@ class UA:
             "Supported: timer",
             "Accept-Contact: *;+g.3gpp.mcptt;require;explicit",
             f'Accept-Contact: *;+g.3gpp.icsi-ref="{ICSI}";require;explicit',
+            # 10.1.1.2.1.1 / 11.1.1.2.1.1 item 7 (RFC 6050).
+            f"P-Preferred-Service: {ICSI_PLAIN}",
             f"Content-Type: multipart/mixed;boundary={boundary}",
-        ], body)
+        ] + extra, body)
         return {"call_id": cid, "ruri": ruri, "request": sent}
 
     def cancel(self, invite: dict) -> str:
@@ -305,7 +350,8 @@ class UA:
                   "Max-Forwards: 70"] + list(extra or [])
         return self.send(lines)
 
-    def respond(self, request: str, code: int, phrase: str, body: str = "") -> str:
+    def respond(self, request: str, code: int, phrase: str, body: str = "",
+                extra: Sequence[str] = ()) -> str:
         lines = [f"SIP/2.0 {code} {phrase}"]
         for ln in request.split("\r\n")[1:]:
             if not ln:
@@ -317,6 +363,7 @@ class UA:
                 lines.append(ln if "tag=" in ln else f"{ln};tag={self.tag}")
         if code >= 180 and code < 300:
             lines.append(f"Contact: {self.contact}")
+        lines.extend(extra)
         if body:
             lines.append("Content-Type: application/sdp")
         return self.send(lines, body)

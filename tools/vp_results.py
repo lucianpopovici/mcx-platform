@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The R1 results register (PLT-VP-R1 §10, exit criteria 1 to 3).
 
-    python3 tools/vp_results.py [--interop RUN.json ...] [--out docs/PLT-VP-R1-RESULTS.md]
+    python3 tools/vp_results.py [--interop RUN.json ...] [--e2e RUN.json]
+                                [--out docs/PLT-VP-R1-RESULTS.md]
 
 Runs the evidence and writes, for one commit, the result of every case in
 §3-§8 and of every requirement in §9:
@@ -10,7 +11,10 @@ Runs the evidence and writes, for one commit, the result of every case in
     case (a `test_vp1_<suite>_<nnn>` name or `@pytest.mark.vp(...)`);
   * the boundary gates, tools/check_boundary.py (its PASS/FAIL lines);
   * interoperability runs, tools/interop/run.py --results (VP1-SIG-001), given
-    with --interop because they need Kamailio and Asterisk.
+    with --interop because they need Kamailio and Asterisk;
+  * the ENV-E2E run, tools/e2e/run.py --results (one result per case it
+    decides from its capture), given with --e2e because it needs tcpdump and
+    tshark.
 
 Passing evidence is not by itself a result. Whether the evidence shows the
 case's pass criterion is a judgement, recorded in docs/PLT-VP-R1-REVIEWS.yaml
@@ -22,7 +26,7 @@ so and its evidence is still the evidence reviewed and still passes. Results:
   FAIL          evidence failed, or reviewed as failing
   STALE         reviewed, but the evidence has changed since
   UNREVIEWED    evidence exists and passes; nobody has judged it against the criterion
-  NOT RUN       reviewed evidence was not run this time (interop not supplied)
+  NOT RUN       reviewed evidence was not run this time (interop or e2e not supplied)
   NOT COVERED   no evidence at all
   NOT SIGNED    an analysis (§8) without a signed review
 
@@ -187,6 +191,31 @@ def from_interop(runs: Sequence[dict]) -> List[Evidence]:
                      (r["case"],)) for r in runs]
 
 
+def from_e2e(run: Optional[dict]) -> List[Evidence]:
+    """One evidence item per case the run decided, `e2e:<case>`. A run of
+    uncommitted code is refused: it is evidence for no commit (review H7)."""
+    if not run:
+        return []
+    if run.get("dirty"):
+        raise SystemExit("the end-to-end run was made with uncommitted changes "
+                         f"(at {run.get('commit', '?')}); commit, run it again, then register")
+    return [Evidence(f"e2e:{case}", "passed" if r["passed"] else "failed", (case,))
+            for case, r in sorted(run["cases"].items())]
+
+
+def exit_criterion_6(run: Optional[dict], stale: bool) -> Tuple[str, List[Tuple[str, bool]]]:
+    """§10 criterion 6 (owner decision 2026-11-24: shown in the register),
+    from the end-to-end run: its verdict and each condition it checked."""
+    if run is None:
+        return "NOT RUN", []
+    parts = [(k, bool(ok)) for k, ok in (run.get("exit_criterion_6") or {}).items()]
+    if not parts:
+        return "NOT COVERED", []
+    if stale:
+        return "STALE", parts
+    return ("PASS" if all(ok for _, ok in parts) else "FAIL"), parts
+
+
 def run_pytest() -> Tuple[Dict[str, dict], str]:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "vp.json"
@@ -252,7 +281,7 @@ class Result:
 
 
 def judge(case: Case, evidence: List[Evidence], review: Optional[dict],
-          interop_run: bool) -> Result:
+          interop_run: bool, e2e_run: bool = False) -> Result:
     if case.analysis:
         if review is None:
             return Result(case, "NOT SIGNED", [], None)
@@ -268,7 +297,8 @@ def judge(case: Case, evidence: List[Evidence], review: Optional[dict],
         reviewed = set(review.get("evidence") or [])
         now = {e.id for e in evidence}
         missing = reviewed - now
-        if missing and not interop_run and all(m.startswith("interop:") for m in missing):
+        if missing and all((m.startswith("interop:") and not interop_run)
+                           or (m.startswith("e2e:") and not e2e_run) for m in missing):
             return Result(case, "NOT RUN", evidence, review,
                           "not run: " + ", ".join(sorted(missing)))
         if reviewed != now:
@@ -327,7 +357,7 @@ def render(cases: Dict[str, Case], reqs: List[Requirement], results: Dict[str, R
          f"**Commit:** {meta['commit']}",
          f"**Run:** {meta['date']}",
          f"**Evidence run:** pytest ({meta['pytest']}); boundary gates ({meta['gates']}); "
-         f"interoperability ({meta['interop']})",
+         f"interoperability ({meta['interop']}); end to end ({meta['e2e']})",
          "**Reviews:** `docs/PLT-VP-R1-REVIEWS.yaml`", "",
          "A case is PASS only when a review records that its evidence shows the pass "
          "criterion, and that evidence is unchanged and passing. Passing evidence that "
@@ -340,6 +370,18 @@ def render(cases: Dict[str, Case], reqs: List[Requirement], results: Dict[str, R
     L += ["", f"Requirements ({len(reqs)}), each at the worst result of its cases:", "",
           "| Result | Requirements |", "|---|---|"]
     L += [f"| {s} | {req_counts[s]} |" for s in ORDER if req_counts[s]]
+    verdict, parts = meta.get("exit6", ("NOT RUN", []))
+    L += ["", "## Exit criterion 6", "",
+          "An end-to-end prearranged group call between two clients completes with floor "
+          "arbitration, captured and matched by the trace comparator (§10; "
+          "`tools/e2e/run.py`): " + {
+              "NOT RUN": "**NOT RUN** (no end-to-end run supplied).",
+              "NOT COVERED": "**NOT COVERED** (the run supplied does not report it).",
+              "STALE": "**STALE** (the run supplied is of another commit).",
+          }.get(verdict, f"**{verdict}**.")]
+    if parts:
+        L += ["", "| Condition | Result |", "|---|---|"]
+        L += [f"| {k} | {'PASS' if ok else 'FAIL'} |" for k, ok in parts]
     L += ["", "Plan consistency (§9 against PLT-SRS and §3-§8): "
           + ("no defect." if not defects else f"**{len(defects)} defect(s)**:")]
     L += [f"- {d}" for d in defects]
@@ -374,6 +416,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--interop", nargs="*", default=[], metavar="RUN.json",
                     help="results of tools/interop/run.py --results")
+    ap.add_argument("--e2e", type=Path, metavar="RUN.json",
+                    help="results of tools/e2e/run.py --results")
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--pytest-json", type=Path,
                     help="use this --vp-results file instead of running pytest")
@@ -388,7 +432,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         outcomes, summary = run_pytest()
     gates = run_gates()
     runs = [json.loads(Path(p).read_text()) for p in args.interop]
-    evidence = from_pytest(outcomes) + from_gates(gates) + from_interop(runs)
+    e2e = json.loads(args.e2e.read_text()) if args.e2e else None
+    evidence = from_pytest(outcomes) + from_gates(gates) + from_interop(runs) + from_e2e(e2e)
 
     by_case: Dict[str, List[Evidence]] = {c: [] for c in cases}
     for e in evidence:
@@ -398,7 +443,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if unknown:
         raise SystemExit(f"evidence for cases the plan does not define: {', '.join(unknown)}")
     results = {cid: judge(cases[cid], sorted(by_case[cid], key=lambda e: e.id),
-                          reviews.get(cid), bool(runs))
+                          reviews.get(cid), bool(runs), e2e is not None)
                for cid in cases}
 
     head = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"], cwd=ROOT,
@@ -408,6 +453,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                            capture_output=True, text=True).stdout.strip()
     stale_runs = [r["core"] for r in runs if r.get("commit") and head and
                   not head.startswith(r["commit"][:7])]
+    e2e_stale = bool(e2e and e2e.get("commit") and head
+                     and not head.startswith(e2e["commit"][:7]))
     meta = {
         "commit": (head or "unknown") + (" with uncommitted changes" if dirty else ""),
         "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -417,6 +464,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "interop": ", ".join(f"{r['core']} {'passed' if r['passed'] else 'FAILED'}"
                              + (f" at {r['commit']}" if r["core"] in stale_runs else "")
                              for r in runs) or "not supplied",
+        "e2e": ("not supplied" if e2e is None else
+                ("passed" if e2e["passed"] else "FAILED")
+                + (f" at {e2e['commit']}" if e2e_stale else "")),
+        "exit6": exit_criterion_6(e2e, e2e_stale),
     }
     args.out.write_text(render(cases, reqs, results, meta, mentions_in_tests(), defects),
                         encoding="utf-8")

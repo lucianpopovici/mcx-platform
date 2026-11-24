@@ -1029,8 +1029,9 @@ def test_the_location_is_the_publishes_or_else_the_last_reported_cell(tmp_path, 
         core.on_bytes(msg("REGISTER", "sip:frmcs.example", "r-d1", 1, DRV[1], DRV[1],
                           extra=[f"Contact: <{DRV[1]}>"]), f1)
         sdp = SDP
-        body = mcf.with_parts(sdp, mcf.mcinfo_xml("private", DRV[2]),
-                              (mcf.CT_LOCATION, mcf.location_report(ecgi=CELL_S2)))
+        body = mcf.with_parts(sdp, mcf.mcinfo_xml("private"),
+                              (mcf.CT_LOCATION, mcf.location_report(ecgi=CELL_S2)),
+                              (mcf.CT_RESOURCE_LISTS, mcf.resource_list([DRV[2]])))
         core.on_bytes(msg("INVITE", LOCAL, "c-s2", 1, DRV[1], LOCAL, body=body,
                           ctype=mcf.CONTENT_TYPE), f1)
         core.on_bytes(publish(DRV[1], ["track-controller"], call_id="l2"), f1)
